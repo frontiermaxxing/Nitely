@@ -567,9 +567,14 @@ pub fn budget_reads(command: &str, package: Option<&serde_json::Value>) -> Budge
 /// The commands of a compound command line, split at `&&`, `||`, `|` and `;` outside quotes: a
 /// quoted `'TestFoo|TestBar'` is one argument, not a pipe.
 fn command_parts(command: &str) -> Vec<&str> {
-    let (mut parts, mut start, mut quote) = (Vec::new(), 0, None);
+    let (mut parts, mut start, mut quote, mut escaped) = (Vec::new(), 0, None, false);
     for (i, c) in command.char_indices() {
+        if std::mem::take(&mut escaped) {
+            continue;
+        }
         match (quote, c) {
+            // A backslash escapes the next character, except inside single quotes (`it\'s`).
+            (None | Some('"'), '\\') => escaped = true,
             (Some(q), c) if c == q => quote = None,
             (Some(_), _) => {}
             (None, '\'' | '"') => quote = Some(c),
@@ -1957,6 +1962,7 @@ mod tests {
         // A quoted pipe is an argument, not a second command (NIT-601 review).
         assert_eq!(command_parts("go test ./... -run 'TestFoo|TestBar' -v && echo \"a;b\""), ["go test ./... -run 'TestFoo|TestBar' -v", "echo \"a;b\""]);
         assert_eq!(budget_reads("go test ./... -run 'TestFoo|TestBar' -v", None), budget_reads("go test ./... -v", None));
+        assert_eq!(command_parts(r"echo it\'s-ready && go test ./... -v"), [r"echo it\'s-ready", "go test ./... -v"], "an escaped quote opens nothing");
         // A failing scenario gets a repair card even when nothing else is planned for it.
         let mut broken = report.clone();
         broken.observations = vec![obs("core::land::pushes", 4000.0)];

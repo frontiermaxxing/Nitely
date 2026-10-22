@@ -69,15 +69,53 @@ const STARTS = [
   [/\.(?:java|kt)$/, /@(?:Test|ParameterizedTest)\b[\s\S]{0,240}?\b(?:void|fun)\s+(\w+)\s*\([^)]*\)[^{]*\{/g, 1],
   [/\.cs$/, /\[(?:Fact|Theory|Test|TestMethod)\b[^\]]*\][\s\S]{0,240}?\b(?:void|Task)\s+(\w+)\s*\([^)]*\)[^{]*\{/g, 1],
 ];
+// `text` with its comments and string, char and regex literals blanked (newlines kept), read as the
+// language of `ext` reads them, one character at a time: a regex was not enough (NIT-601 review).
+// Rust: raw strings (`r"\\?\"`, `r#"..."#`) end at their quote, whatever backslash precedes it, and
+// `'` opens a char literal only when one closes it (`'a'`, `'\n'`), never a lifetime (`'static`).
+// JavaScript: `'`, `"` and template strings, and a regex literal where only one can start (after
+// `(`, `,`, `=` and the like), so the apostrophe in `/a machine's 25 ms/` opens nothing.
+function mask(text, ext) {
+  const rust = ext === '.rs'; const js = /\.[cm]?[jt]sx?$/.test(ext); const go = ext === '.go';
+  const out = text.split(''); const blank = (a, b) => { for (let k = a; k < b; k++) if (out[k] !== '\n') out[k] = ' '; };
+  let i = 0; let prev = '';
+  const quoted = (q, from, multiline) => {
+    let j = from;
+    while (j < text.length && text[j] !== q) { if (text[j] === '\\') j++; else if (text[j] === '\n' && !multiline) return j; j++; }
+    return Math.min(j + 1, text.length);
+  };
+  while (i < text.length) {
+    const c = text[i], n = text[i + 1];
+    let end = -1;
+    if (c === '/' && n === '/') { end = text.indexOf('\n', i); if (end < 0) end = text.length; }
+    else if (c === '/' && n === '*') { end = text.indexOf('*/', i + 2); end = end < 0 ? text.length : end + 2; }
+    else if (rust && (c === 'r' || (c === 'b' && n === 'r')) && !/\w/.test(text[i - 1] || '')) {
+      const raw = text.slice(i).match(/^b?r(#*)"/);
+      if (raw) { const close = '"' + raw[1]; const at = text.indexOf(close, i + raw[0].length); end = at < 0 ? text.length : at + close.length; }
+    }
+    if (end < 0) {
+      if (c === '"') end = quoted('"', i + 1, true);
+      else if (c === '`' && (js || go)) end = go ? (text.indexOf('`', i + 1) + 1 || text.length) : quoted('`', i + 1, true);
+      else if (c === "'" && js) end = quoted("'", i + 1, false);
+      else if (c === "'") { const ch = text.slice(i).match(/^'(?:\\(?:u\{[0-9a-fA-F]+\}|x[0-9a-fA-F]{2}|.)|[^\\'\n])'/); if (ch) end = i + ch[0].length; }
+      else if (c === '/' && js && (prev === '' || '(,=:[!&|?{};'.includes(prev))) {
+        let j = i + 1, inClass = false;
+        while (j < text.length && text[j] !== '\n' && (inClass || text[j] !== '/')) { if (text[j] === '\\') j++; else if (text[j] === '[') inClass = true; else if (text[j] === ']') inClass = false; j++; }
+        if (text[j] === '/') { j++; while (/[a-z]/.test(text[j] || '')) j++; end = j; }
+      }
+    }
+    if (end > i) { blank(i, end); prev = 'x'; i = end; continue; }
+    if (!/\s/.test(c)) prev = c;
+    i++;
+  }
+  return out.join('');
+}
 function bodies(text, ext) {
   if (ext === '.py') return pythonBodies(text);
   const start = STARTS.find(([file]) => file.test(ext)); if (!start) return [];
   const [, pattern, group] = start; pattern.lastIndex = 0;
   // Conservatively extract named test bodies, balancing braces while masking comments/strings.
-  // A regex literal is masked too, where only one can start (after `(`, `,`, `=` and the like): an
-  // apostrophe in `/a machine's 25 ms/` opened a "string" that hid the tests after it. A
-  // single-quoted string or char ends at its line: a Rust lifetime (`'a`) has no closing quote.
-  const masked = text.replace(/(?<=[(,=:!&|?;{}\[]\s*)\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n])+\/[a-z]*|\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g, x => x.replace(/[^\n]/g, ' '));
+  const masked = mask(text, ext);
   const out = []; let m;
   while ((m = pattern.exec(text))) {
     // A match that starts inside a string or comment is a fixture's text, not a test (NIT-594).

@@ -118,6 +118,9 @@ test('a test written inside a string is a fixture, not a test', () => {
   assert.deepEqual(bodies(re, '.ts').map(t => t.name), ['one', 'two']);
   const rs = "#[test]\nfn a() { let r: &'static str = x; }\n#[test]\nfn b() { ok(); }";
   assert.deepEqual(bodies(rs, '.rs').map(t => t.name), ['a', 'b'], 'a lifetime is no string');
+  // A raw string ends at its quote, whatever backslash comes before it.
+  const raw = '#[test]\nfn a() { let p = r"\\\\?\\"; let q = r#"say "hi""#; let c = \'"\'; }\n#[test]\nfn b() { ok(); }';
+  assert.deepEqual(bodies(raw, '.rs').map(t => t.name), ['a', 'b'], 'raw strings and a quote char');
 });
 test('a source whose tests carry no time is named, since none of them can be found slow', () => {
   const o = (source, ms, outcome = 'pass') => ({ id: 'x', source, outcome, ...(ms === undefined ? {} : { duration_ms: ms }) });
