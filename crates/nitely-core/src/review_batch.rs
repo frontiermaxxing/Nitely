@@ -99,6 +99,12 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
     let mut rules = pb.review.clone();
     rules.policy_root = Some(root.to_path_buf());
     let integration = pb.integration_branch().to_string();
+    // The base as it is now, not as this checkout last saw it (NIT-646): from a stale tip, a branch
+    // that merged the newer base would show all the merge brought as its own change. Best effort,
+    // as submit fetches; `diff_base` then takes origin's when local is behind it.
+    if crate::playbook::has_origin(root) {
+        crate::playbook::git_remote(root, &["fetch", "--quiet", "origin", &integration]).ok();
+    }
     // A worktree already cleaned up: a scratch clone at the change's head stands in for it.
     let scratch = Scratch(std::cell::RefCell::new(vec![]));
     let mut waiting: Vec<Waiting> = Vec::new();
@@ -112,7 +118,7 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
                 !record.commit_sha.is_empty() && head.starts_with(&record.commit_sha),
                 "{branch} gained commits since it was handed in, which were never checked; submit again"
             );
-            let base = git(root, &["merge-base", &integration, &head])?.trim().to_string();
+            let base = change_base(root, &integration, &head)?;
             let dir = match worktree.filter(|w| w.is_dir() && crate::land::rev(w, "HEAD").ok().as_deref() == Some(head.as_str())) {
                 Some(w) => w,
                 None => {
@@ -411,6 +417,13 @@ fn not_on_top_of(db: &Db, worktree: &Path, key: &str) -> Result<Option<String>> 
     Ok(Some(format!("{key} landed at {at}, and this branch is not rebased onto it yet")))
 }
 
+/// Where a change's diff begins: its merge base with the integration branch's newest tip here,
+/// origin's when the local branch is behind it (NIT-646).
+pub(crate) fn change_base(root: &Path, integration: &str, head: &str) -> Result<String> {
+    let tip = crate::playbook::diff_base(root, integration);
+    Ok(git(root, &["merge-base", &tip, head])?.trim().to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -491,6 +504,48 @@ mod tests {
         assert!(!dir.exists(), "removed when the batch is done");
         assert!(checkout_at(&repo, "0000000000000000000000000000000000000000").is_err());
         std::fs::remove_dir_all(&base).ok();
+    }
+    /// NIT-646: a checkout whose own main is behind origin's, reviewing a branch that merged the
+    /// newer main, must begin the diff at that newer main, or all the merge brought is "the change".
+    #[test]
+    fn a_change_is_measured_from_the_newest_base_not_a_stale_local_one() {
+        let dir = crate::paths::unique_temp("nitely-batch-base", "");
+        let git = |at: &Path, args: &[&str]| {
+            let out = crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(at).args(args)).unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let (origin, here, there) = (dir.join("origin.git"), dir.join("here"), dir.join("there"));
+        std::fs::create_dir_all(&dir).unwrap();
+        git(&dir, &["init", "-q", "--bare", "-b", "main", &origin.to_string_lossy()]);
+        for clone in [&here, &there] {
+            git(&dir, &["clone", "-q", &origin.to_string_lossy(), &clone.to_string_lossy()]);
+            git(clone, &["config", "user.email", "t@example.com"]);
+            git(clone, &["config", "user.name", "t"]);
+        }
+        std::fs::write(there.join("a.txt"), "a\n").unwrap();
+        git(&there, &["add", "."]);
+        git(&there, &["commit", "-qm", "first"]);
+        git(&there, &["push", "-q", "origin", "HEAD:main"]);
+        git(&here, &["pull", "-q", "origin", "main"]);
+        git(&here, &["checkout", "-qb", "goal"]);
+        std::fs::write(here.join("goal.txt"), "goal\n").unwrap();
+        git(&here, &["add", "."]);
+        git(&here, &["commit", "-qm", "the goal"]);
+        // Main moves on elsewhere; here, only origin/main learns of it, and the branch merges it.
+        std::fs::write(there.join("b.txt"), "b\n").unwrap();
+        git(&there, &["add", "."]);
+        git(&there, &["commit", "-qm", "another goal lands"]);
+        git(&there, &["push", "-q", "origin", "HEAD:main"]);
+        git(&here, &["fetch", "-q", "origin"]);
+        git(&here, &["merge", "-q", "--no-edit", "origin/main"]);
+        let head = git(&here, &["rev-parse", "HEAD"]);
+        let newest = git(&here, &["rev-parse", "origin/main"]);
+        assert_ne!(git(&here, &["rev-parse", "main"]), newest, "the local main is behind");
+        let base = change_base(&here, "main", &head).unwrap();
+        assert_eq!(base, newest);
+        assert_eq!(git(&here, &["diff", "--name-only", &base, &head]), "goal.txt", "only the change's own file");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
 
