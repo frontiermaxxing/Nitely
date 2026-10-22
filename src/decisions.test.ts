@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVALS, askPlaces, decisionsOf, detailFingerprints, detailsToRead, folderOf, sessionOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
+import { APPROVALS, FINDINGS, groupFindings, askPlaces, decisionsOf, detailFingerprints, detailsToRead, folderOf, sessionOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
 import type { Ask, Board, IssueDetail, IssueRecord } from "./types.ts";
 import type { Track } from "./ui/lifecycle.ts";
 
@@ -185,6 +185,19 @@ test("NIT-218: several changes waiting for approval are one card, each still its
   const approved = { ...a, state: "Approved" };
   const after = new Map(details).set("X-1", detail(approved));
   assert.deepEqual(groupApprovals(ds, after, new Set(["approve-X-1"])).find((d) => d.id === APPROVALS)!.group!.map((d) => d.id), ["approve-X-2", "approve-X-1"]);
+});
+
+test("NIT-571: one issue's review findings are one card, each finding decided on its own", () => {
+  const finding = (id: number, key: string, text: string) => ({ ...ask(id, key, NOW - 100 + id), finding: { priority: 1, text } });
+  const asks = [finding(3, "X-7", "Drops a row"), finding(2, "X-7", "Leaks a key"), finding(4, "X-8", "Alone"), ask(5, "X-7", NOW - 10)];
+  const ds = decisionsOf(board([issue("X-7", "In Progress"), issue("X-8", "In Progress")], asks), new Map(), NOW);
+  const shown = groupFindings(ds);
+  const card = shown.find((d) => d.id === `${FINDINGS}X-7`)!;
+  assert.deepEqual(card.group!.map((d) => d.id), ["ask-2", "ask-3"], "its findings, in the order they were asked");
+  assert.equal(card.since, NOW - 98, "waiting since the oldest");
+  // A finding alone and an ordinary question stay cards of their own.
+  assert.deepEqual(shown.filter((d) => d !== card).map((d) => d.id).sort(), ["ask-4", "ask-5"]);
+  assert.equal(groupFindings(ds.filter((d) => d.id !== "ask-2")).length, 3, "one finding left: its own card again");
 });
 
 test("the human's own work is its own kind of decision, in any open state outside Backlog", () => {

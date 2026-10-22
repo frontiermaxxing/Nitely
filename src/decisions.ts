@@ -25,7 +25,8 @@ export interface Decision {
   since: number;
   /** 1 (urgent) to 4 (low); 5 when the issue has no priority or there is no issue. */
   urgency: number;
-  /** The Inbox's card for several change approvals at once (`groupApprovals`): each one. */
+  /** The Inbox's card for several decisions at once: change approvals (`groupApprovals`), or
+   *  one issue's review findings (`groupFindings`): each one. */
   group?: Decision[];
   /** The project it belongs to (`projectOf`), for the Inbox's project filter. */
   project?: string | null;
@@ -278,6 +279,42 @@ export function groupApprovals(decisions: Decision[], details: Map<string, Issue
     group: [...members].sort(byUrgency),
   };
   return [...decisions.filter((d) => !members.includes(d)), group].sort(byUrgency);
+}
+
+/** The id of the Inbox's card for one issue's review findings to decide: this, then its key. */
+export const FINDINGS = "findings-";
+
+/**
+ * One question per issue for its review findings (NIT-571): when several requests to accept a
+ * finding of one issue wait (the review rounds stalled, or the agent asked about more than one),
+ * they are one card listing each finding, each still accepted or sent back on its own, and a fix
+ * still closes its own. One alone is its own card, as before.
+ */
+export function groupFindings(decisions: Decision[]): Decision[] {
+  const byIssue = new Map<string, Decision[]>();
+  for (const d of decisions) {
+    const key = d.kind === "ask" && d.ask?.finding ? d.ask.issue_key?.toUpperCase() : undefined;
+    if (key) byIssue.set(key, [...(byIssue.get(key) ?? []), d]);
+  }
+  let out = decisions;
+  for (const [key, members] of byIssue) {
+    if (members.length < 2) continue;
+    const first = members[0];
+    const group: Decision = {
+      id: `${FINDINGS}${key}`,
+      kind: "ask",
+      issue: first.issue,
+      row: first.row,
+      repo: first.repo,
+      ask: null,
+      since: Math.min(...members.map((d) => d.since)),
+      urgency: Math.min(...members.map((d) => d.urgency)),
+      group: [...members].sort((a, b) => a.ask!.id - b.ask!.id),
+      project: first.project,
+    };
+    out = [...out.filter((d) => !members.includes(d)), group];
+  }
+  return out === decisions ? decisions : out.sort(byUrgency);
 }
 
 /** Most urgent first and, at the same urgency, the one that has waited longest first. */

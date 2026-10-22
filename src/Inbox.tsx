@@ -13,6 +13,7 @@ import {
   firstLine,
   folderOf,
   groupApprovals,
+  groupFindings,
   inProject,
   nextProject,
   outcomeOf,
@@ -103,7 +104,8 @@ export function Inbox(props: {
   const waiting = inProject(allWaiting, filter);
   // Several changes waiting for approval at once are one card (docs/batching.md); the count above
   // still counts each.
-  const listed = groupApprovals(inProject(decisions, filter), details, new Set(resolved.keys()));
+  // So are one issue's review findings to decide (NIT-571).
+  const listed = groupFindings(groupApprovals(inProject(decisions, filter), details, new Set(resolved.keys())));
   // A project with nothing left (its last decision just left the list) goes back to All.
   const filterEmpty = !!filter && inProject(decisions, filter).length === 0;
   useEffect(() => {
@@ -304,7 +306,10 @@ export function Inbox(props: {
           </span>
         </div>
       </div>
-      {open?.group && (
+      {open?.group && open.kind === "ask" && (
+        <FindingsCard key={open.id} decision={open} resolved={resolved} failed={failed} now={now} onOpenIssue={props.onOpenIssue} onAct={act} keys={keys} />
+      )}
+      {open?.group && open.kind !== "ask" && (
         <ApprovalsCard
           key={open.id}
           decision={open}
@@ -542,7 +547,7 @@ function InboxRow(props: {
   const issue = props.detail?.issue ?? d.issue;
   const done = props.resolved;
   const ev = d.group
-    ? { text: "Each is approved or sent back on its own", tone: null, agent: null }
+    ? { text: d.kind === "ask" ? "Each is accepted or sent back on its own" : "Each is approved or sent back on its own", tone: null, agent: null }
     : done
       ? { text: outcomeOf(done), tone: "good" as const, agent: null }
       : eventOf(d, props.detail, props.place);
@@ -573,9 +578,9 @@ function InboxRow(props: {
       </span>
       <span className="inbox-row-text">
         <span className="inbox-row-top">
-          <span className="inbox-row-key">{d.group ? `${d.group.length} changes` : (issue?.key ?? d.row?.branch ?? d.repo)}</span>
-          <span className="inbox-row-title" title={question && issue ? issue.title : d.group ? d.group.map((m) => m.issue?.key).join(", ") : undefined}>
-            {d.group ? "wait for your approval" : question || issue?.title || (d.row ? d.row.worktree : "")}
+          <span className="inbox-row-key">{d.group && d.kind !== "ask" ? `${d.group.length} changes` : (issue?.key ?? d.row?.branch ?? d.repo)}</span>
+          <span className="inbox-row-title" title={question && issue ? issue.title : d.group && d.kind !== "ask" ? d.group.map((m) => m.issue?.key).join(", ") : issue?.title}>
+            {d.group ? (d.kind === "ask" ? `${d.group.length} review findings to decide` : "wait for your approval") : question || issue?.title || (d.row ? d.row.worktree : "")}
           </span>
         </span>
         <span className="inbox-row-ev">
@@ -896,6 +901,76 @@ function ApprovalsCard(props: {
           </div>
         </div>
       )}
+    </article>
+  );
+}
+
+/**
+ * One issue's review findings to decide, as one card (NIT-571): each finding with the agent's
+ * reasoning, accepted or sent back on its own. A finding a later review no longer raises leaves the
+ * card by itself, and the card becomes a single finding's once one is left.
+ */
+function FindingsCard(props: {
+  decision: Decision;
+  resolved: Map<string, Resolved>;
+  failed: Map<string, string>;
+  now: number;
+  onOpenIssue: (key: string) => void;
+  onAct: (d: Decision, move: Move, run: () => Promise<unknown>, answer?: string) => Promise<void>;
+  keys: React.MutableRefObject<DecisionKeys>;
+}) {
+  const { decision: g, now } = props;
+  const members = g.group ?? [];
+  const issue = g.issue;
+  const decide = (m: Decision, accept: boolean, line: string) => {
+    if (!m.ask || !line.trim()) return;
+    const id = m.ask.id;
+    const text = `${accept ? "Accepted" : "Not accepted"}: ${line.trim()}`;
+    props.onAct(m, "answer", () => invoke(accept ? "accept_finding" : "decline_finding", accept ? { id, reason: line.trim() } : { id, why: line.trim() }).then(() => drafts.delete(id)), text);
+  };
+  // Each finding is decided on its own line: no key decides one for the card.
+  props.keys.current = {};
+  return (
+    <article className="inbox-detail decision-ask decision-findings">
+      <div className="dd-context">
+        <span className="dd-kind">Review findings</span>
+        {issue && <span className="mono muted">{issue.key}</span>}
+        <span className="dd-meta" title={`The oldest has waited since ${new Date(g.since * 1000).toLocaleString()}`}>
+          oldest asked {ago(now, g.since)}
+        </span>
+      </div>
+      {issue ? (
+        <button className="dd-title" onClick={() => props.onOpenIssue(issue.key)} title="Open the issue">
+          {issue.title}
+        </button>
+      ) : null}
+      <p className="muted small">
+        Accept a finding as it is if it is a trade-off you decided: it no longer blocks the land, and the next review round is told. Send it back and it stays a defect to fix. The agent keeps working meanwhile, and a finding it fixes leaves this list by itself.
+      </p>
+      <ol className="approvals-list">
+        {members.map((m) => {
+          const f = m.ask!.finding!;
+          const done = props.resolved.get(m.id);
+          const error = props.failed.get(m.id);
+          return (
+            <li key={m.id} className={`approvals-item${done ? " resolved" : ""}`}>
+              <p className="dd-finding">
+                <span className="dd-finding-p mono">P{f.priority}</span> {f.text}
+              </p>
+              <p className="dd-reasoning">{m.ask!.question}</p>
+              {done ? (
+                <p className={`dd-outcome${done.done ? " done" : ""}`} role="status">
+                  <ResultMark result={done.done ? "pass" : "pending"} size={16} />
+                  {outcomeOf(done)}
+                </p>
+              ) : (
+                <DecideFinding askId={m.ask!.id} busy={false} onDecide={(accept, line) => decide(m, accept, line)} />
+              )}
+              {error && <p className="error small">{error}</p>}
+            </li>
+          );
+        })}
+      </ol>
     </article>
   );
 }

@@ -150,6 +150,8 @@ interface IssueSpec {
   ask?: { question: string; options: string[]; finding?: { priority: number; text: string } };
   /** More questions on the same issue, asked after `ask`, still open (NIT-172). */
   moreAsks?: string[];
+  /** Further requests to accept a finding, made after the first (the Inbox puts them on one card, NIT-571). */
+  moreFindings?: { question: string; finding: { priority: number; text: string } }[];
   /** The agent session in the issue's worktree, if one is open. */
   live?: Live;
   branch?: Partial<BranchState>;
@@ -345,6 +347,10 @@ const ISSUES: IssueSpec[] = [
       options: [],
       finding: { priority: 1, text: "No migration for existing sites: src/settings.ts, load: a site set up before this starts with empty settings" },
     },
+    moreFindings: [{
+      question: "The old behaviour shared one cache across sites on purpose, to keep the first load fast; splitting it is a separate change.",
+      finding: { priority: 1, text: "Shared cache still mixes sites: src/cache.ts, get: a site reads another site's cached settings until the cache expires" },
+    }],
     live: { state: "waiting", seen: 0.6, activity: "Asked to accept a finding" }, branch: { ahead: 4, dirty_files: 0 },
   },
   {
@@ -654,6 +660,11 @@ function build(): World {
         const at = open.asked_at + 60 * (n + 1);
         world.asks.push({ ...open, id: askId++, question, options: [], asked_at: at });
         timeline.push({ ts: at, actor: open.asked_by, kind: "ask", summary: question });
+      }
+      for (const [n, more] of (spec.moreFindings ?? []).entries()) {
+        const at = open.asked_at + 90 * (n + 1);
+        world.asks.push({ ...open, id: askId++, question: more.question, options: [], asked_at: at, finding: more.finding });
+        timeline.push({ ts: at, actor: open.asked_by, kind: "ask", summary: more.question });
       }
     }
     timeline.sort((a, b) => a.ts - b.ts);
