@@ -2,7 +2,9 @@
 
 The public site: one static page with its stylesheet and assets, and no build step. It uses the
 app's own design tokens (`src/styles/tokens.css`) and the Geist fonts served from here, so the
-page makes no third-party requests. It has no analytics.
+page's own requests stay on nitely.net. The one exception is Google Analytics: GA4 property
+`nitely.net`, measurement ID `G-E79GE90HZG`, in a GA account of its own. Its tag is inline in each
+page's head, and a new page copies it.
 
 - `index.html` and `styles.css`: the page. Dark first, light follows the system, and the hero track
   stops moving under reduced motion.
