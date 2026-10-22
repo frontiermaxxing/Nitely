@@ -72,9 +72,16 @@ pub enum Command {
     Report {
         file: PathBuf,
     },
-    /// Create an editable human goal-plan proposal; never applies changes or approves it.
+    /// Proposes one goal from the classified map (see `map`): a refactor card per module, a
+    /// clock-wait card, the test budget, one deletion card, and, where the repo has CI, a
+    /// playbook proposal for ci_commands. Nothing is applied or approved.
     Propose {
         file: PathBuf,
+        /// The classes of every flagged test, as `map --classes` takes them.
+        #[arg(long)]
+        classes: PathBuf,
+        #[arg(long, default_value_t = 2.0)]
+        slow: f64,
         #[arg(long)]
         project: Option<String>,
         #[arg(long)]
@@ -432,11 +439,7 @@ pub fn run(command: Command) -> Result<()> {
                     .collect();
                 return crate::print_json(&template);
             };
-            if classes.metadata()?.len() > 4 * 1024 * 1024 {
-                bail!("the classes file exceeds 4 MiB");
-            }
-            let classes: Vec<test_sweep::Classified> = serde_json::from_slice(&std::fs::read(&classes)?)
-                .context("classes must be a JSON array of {test, class, ...}: decision (with decision and module), scenario, presence, wall-clock, duplicate (with of) or restates")?;
+            let classes = test_sweep::read_classes(&classes)?;
             let map = test_sweep::render_map(&report.revision, &flagged, &classes)?;
             match output {
                 Some(path) => std::fs::write(path, map)?,
@@ -455,17 +458,33 @@ pub fn run(command: Command) -> Result<()> {
         Command::Report { file } => crate::print_json(&Report::read(&file)?)?,
         Command::Propose {
             file,
+            classes,
+            slow,
             project,
             issue,
         } => {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
-            let project =
-                nitely_core::resolve_project(&config, &db, project.as_deref(), &crate::cwd()?)?;
+            let cwd = crate::cwd()?;
+            let project = nitely_core::resolve_project(&config, &db, project.as_deref(), &cwd)?;
+            // The project's own repo, as the MCP tool resolves it, not just the one here.
+            let root = nitely_core::playbook::repo_for_issue(&config, Some(&project), &cwd)?;
+            let classes = test_sweep::read_classes(&classes)?;
+            let repo = test_sweep::repo_facts(&config, &root)?;
+            let facts = test_sweep::OptimizeFacts {
+                slow_seconds: slow,
+                tests: &repo.tests,
+                ci_commands: &repo.ci_commands,
+                has_ci: repo.has_ci,
+                has_lanes: repo.has_lanes,
+                playbook: repo.target.as_ref(),
+            };
             crate::print_json(&Report::read(&file)?.propose(
                 &mut db,
                 &project,
                 issue,
+                &classes,
+                &facts,
                 &Actor::Agent("cli".into()),
             )?)?;
         }

@@ -567,6 +567,20 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
+            "name": "test_optimize_propose",
+            "description": "Propose one goal from a sweep report and the classes of its flagged tests (`nitely test-sweep map`): a refactor card per module with the decisions to lift, the scenarios kept and the time measured; a clock-wait card; the test budget; one deletion card that names what covers each test and waits for the refactors; and, where the repo has CI, a playbook proposal routing every test command to CI. The person approves; nothing is applied.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "report": { "type": "string", "description": "Path of the sweep report (collect's --output)." },
+                    "classes": { "type": "string", "description": "Path of the JSON array of {test, class, ...} for every flagged test." },
+                    "slow": { "type": "number", "description": "Seconds past which a test is slow; the budget's per-test limit. Default 2." },
+                    "issue": { "type": "string", "description": "The sweep issue this answers, if any." }
+                },
+                "required": ["report", "classes"]
+            }
+        },
+        {
             "name": "setup_guide",
             "description": "The step-by-step first-run sweep that seeds a project's board from its repo: pre-flight checks (integration branch, gate, working tree), sweeping areas, filing issues, proposing review rules, writing the brief. Call it when asked to set up or onboard a project, or when get_project shows setup is null, and follow it.",
             "inputSchema": { "type": "object", "properties": {} }
@@ -1465,7 +1479,25 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let issues: Vec<_> = db.list_issues(Some(&project), include_closed)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))).collect();
             json!(issues)
         }
-        "test_sweep_guide" => json!({ "guide": nitely_core::test_sweep::GUIDE }),
+        "test_sweep_guide" => json!({ "guide": nitely_core::test_sweep::GUIDE, "classify": nitely_core::test_sweep::OPTIMIZE_GUIDE }),
+        "test_optimize_propose" => {
+            use nitely_core::test_sweep;
+            let project = project(&db)?;
+            let root = playbook::repo_for_issue(&config, Some(&project), &server.cwd)?;
+            let here = std::path::Path::new(&server.cwd);
+            let report = test_sweep::Report::read(&here.join(req(args, "report")?))?;
+            let classes = test_sweep::read_classes(&here.join(req(args, "classes")?))?;
+            let repo = test_sweep::repo_facts(&config, &root)?;
+            let facts = test_sweep::OptimizeFacts {
+                slow_seconds: args.get("slow").and_then(Value::as_f64).unwrap_or(2.0),
+                tests: &repo.tests,
+                ci_commands: &repo.ci_commands,
+                has_ci: repo.has_ci,
+                has_lanes: repo.has_lanes,
+                playbook: repo.target.as_ref(),
+            };
+            json!(report.propose(&mut db, &project, str_arg(args, "issue").map(String::from), &classes, &facts, &actor)?)
+        }
         "setup_guide" => json!({ "guide": nitely_core::instructions::SETUP_GUIDE }),
         "goals" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => json!(db.goal_detail(id)?),
