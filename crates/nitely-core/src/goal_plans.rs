@@ -230,6 +230,7 @@ fn batch(plan: &GoalPlan, project: &str, goal: Option<i64>, source: &str, own: &
         .iter()
         .map(|i| BatchItem {
             not_duplicates: own.to_vec(),
+            distinct_in_batch: true,
             local_ref: i.local_ref.clone(),
             issue: NewIssue {
                 project: project.to_string(),

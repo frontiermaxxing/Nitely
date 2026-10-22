@@ -407,7 +407,7 @@ pub fn failed_tests(output: &str) -> Vec<String> {
     let mut names: Vec<String> = Vec::new();
     let mut in_list = false;
     for line in output.lines() {
-        let line = line.trim_end();
+        let line = ci_content(line).trim_end();
         // With per-test times on (test_budget.rs), the line ends in the time: `... FAILED <1.234s>`.
         let untimed = match line.rsplit_once(" <") {
             Some((rest, time)) if time.ends_with("s>") => rest,
@@ -432,6 +432,22 @@ pub fn failed_tests(output: &str) -> Vec<String> {
         }
     }
     names
+}
+
+/// What a line of a GitHub Actions log says, without the job, step and time `gh run view --log`
+/// and `--log-failed` put before it (`build<TAB>Run tests<TAB>2026-10-21T10:00:00.1234567Z test x ...
+/// FAILED`), so a CI failure's tests are read as a lane's are (NIT-565). Any other line is left as
+/// it is.
+pub fn ci_content(line: &str) -> &str {
+    let mut parts = line.splitn(3, '\t');
+    let (Some(_job), Some(_step), Some(rest)) = (parts.next(), parts.next(), parts.next()) else { return line };
+    let (stamp, content) = rest.split_once(' ').unwrap_or((rest, ""));
+    let is_stamp = stamp.len() >= 20 && stamp.ends_with('Z') && stamp.as_bytes()[4] == b'-' && stamp.as_bytes()[10] == b'T' && stamp[..4].bytes().all(|b| b.is_ascii_digit());
+    if is_stamp {
+        content.trim_start_matches('\u{feff}')
+    } else {
+        line
+    }
 }
 
 /// A gate command that depends on what the branch changes (against the integration branch).
@@ -2128,6 +2144,22 @@ mod tests {
         let node = "ok 1 - fine\nnot ok 2 - since: counts from the move\n  ---\nnot ok 2 - since: counts from the move\n";
         assert_eq!(failed_tests(node), ["since: counts from the move"]);
         assert!(failed_tests("error[E0425]: cannot find value").is_empty());
+    }
+
+    /// NIT-565: what `gh run view --log-failed` prints puts the job, step and time before each
+    /// line; the tests are read through it as from a lane's output.
+    #[test]
+    fn names_the_failed_tests_in_a_ci_log() {
+        let log = "Rust tests\tRun cargo test --workspace\t2026-10-22T00:41:12.1234567Z \u{feff}running 3 tests\n\
+Rust tests\tRun cargo test --workspace\t2026-10-22T00:41:13.0000000Z test land::tests::a ... FAILED <0.410s>\n\
+Rust tests\tRun cargo test --workspace\t2026-10-22T00:41:14.0000000Z failures:\n\
+Rust tests\tRun cargo test --workspace\t2026-10-22T00:41:14.0000001Z     land::tests::a\n\
+Rust tests\tRun cargo test --workspace\t2026-10-22T00:41:14.0000002Z     store::tests::b\n\
+Rust tests\tRun cargo test --workspace\t2026-10-22T00:41:15.0000000Z\n\
+Node tests\tRun npm test\t2026-10-22T00:42:00.0000000Z not ok 7 - since: counts from the move\n";
+        assert_eq!(failed_tests(log), ["land::tests::a", "store::tests::b", "since: counts from the move"]);
+        assert_eq!(ci_content("plain\tline with tabs\tbut no time"), "plain\tline with tabs\tbut no time", "not a CI line: as it is");
+        assert_eq!(ci_content("test x ... FAILED"), "test x ... FAILED");
     }
 
     #[test]

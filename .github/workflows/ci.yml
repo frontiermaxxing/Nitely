@@ -210,6 +210,23 @@ jobs:
           RUSTC_BOOTSTRAP=1 exec "$bin" "$@" -Z unstable-options --report-time
           RUNNER
           export CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER="bash $runner"
+          # A command `measure` dispatched writes its runner's report here (NIT-567).
+          export NITELY_JUNIT_DIR="$RUNNER_TEMP/nitely-junit"
+          mkdir -p "$NITELY_JUNIT_DIR"
           command=$(printf '%s' "$NITELY_COMMAND" | sed -E "s/--test-threads=[0-9]+/--test-threads=$(nproc)/")
           echo "Running: $command"
           bash -c "$command"
+
+      # The reports `measure` reads back for this command: what it wrote to NITELY_JUNIT_DIR, and
+      # Maven's and Gradle's own JUnit folders (NIT-567).
+      - name: Test reports
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: nitely-report-${{ inputs.nitely_run }}-${{ strategy.job-index }}
+          path: |
+            ${{ runner.temp }}/nitely-junit
+            **/target/surefire-reports/*.xml
+            **/build/test-results/**/*.xml
+          if-no-files-found: ignore
+          retention-days: 3
