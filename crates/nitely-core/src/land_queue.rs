@@ -608,8 +608,8 @@ fn gate_failed(gate: &GateResult, why: &str) -> String {
     let failed = gate.results.iter().find(|r| !r.ok);
     let step = failed.map(|r| format!(" at `{}`", r.command)).unwrap_or_default();
     let output = failed.map(|r| r.output.trim().to_string()).filter(|o| !o.is_empty()).map(|o| format!("\n{o}")).unwrap_or_default();
-    if failed.is_some_and(|r| r.timed_out) {
-        return format!("the gate did not finish{step}: it ran past the lane's time limit and was stopped, which says nothing about the change. Land again.{output}");
+    if let Some(r) = gate.timed_out() {
+        return format!("the gate did not finish: {}, which says nothing about the change. Land again.{output}", r.stopped());
     }
     format!("the gate failed{step}: {why}. Fix it on the branch, submit, and land again.{output}")
 }
@@ -922,7 +922,7 @@ mod tests {
         let step = |timed_out: bool| crate::playbook::CommandResult { step: None, command: "npm test".into(), ok: false, seconds: 1800, output: "out".into(), skipped: false, timed_out };
         let gate = |timed_out: bool| super::GateResult { mode_authority: None, plan: None, skipped: None, passed: false, commit: "c".into(), results: vec![step(timed_out)], warnings: vec![], flaked: vec![], lane_run: None };
         let stopped = super::gate_failed(&gate(true), "its gate failed");
-        assert!(stopped.starts_with("the gate did not finish at `npm test`") && !stopped.contains("Fix it"), "{stopped}");
+        assert!(stopped.starts_with("the gate did not finish: `npm test` ran past the lane's time limit") && !stopped.contains("Fix it"), "{stopped}");
         assert!(super::gate_failed(&gate(false), "its gate failed").starts_with("the gate failed at `npm test`: its gate failed. Fix it"));
     }
 

@@ -1502,11 +1502,35 @@ fn suite_result(view: &serde_json::Value, commands: &[String]) -> Option<(bool, 
                 (Some(s), Some(e)) if e >= s => (e - s) as u64,
                 _ => 0,
             };
+            let url = job["url"].as_str().unwrap_or_default().to_string();
+            // A job that failed before its command's step ran says nothing about the change: it did
+            // not run, as one past its time limit (NIT-641), and is never a failed test or a bisect.
+            if let Some(step) = (!ok).then(|| setup_failure(job)).flatten() {
+                return (false, seconds, format!("{} \"{step}\" before `{command}` ran.\n{url}", playbook::CI_SETUP_FAILED), true, start, end);
+            }
             let late = job["conclusion"] == "timed_out" || job["conclusion"] == "cancelled";
-            (ok, seconds, job["url"].as_str().unwrap_or_default().to_string(), late, start, end)
+            (ok, seconds, url, late, start, end)
         })
         .collect();
     Some((passed, results))
+}
+
+/// The setup step a failed CI job stopped in, before its command's own step ran (NIT-641): the
+/// last step named `Run` or `Run ...` (the suite job's command), with an earlier step that failed,
+/// timed out or was cancelled. None when the command's step itself failed, or the job lists no
+/// steps to tell by.
+pub fn setup_failure(job: &serde_json::Value) -> Option<String> {
+    let steps = job["steps"].as_array()?;
+    let name = |s: &serde_json::Value| s["name"].as_str().unwrap_or_default().to_string();
+    let command = steps.iter().rposition(|s| {
+        let n = name(s);
+        n == "Run" || n.starts_with("Run ")
+    })?;
+    let stopped = |s: &serde_json::Value| ["failure", "timed_out", "cancelled"].contains(&s["conclusion"].as_str().unwrap_or_default());
+    if stopped(&steps[command]) {
+        return None;
+    }
+    steps[..command].iter().find(|s| stopped(s)).map(name)
 }
 
 fn evidence(pending: &Pending, view: &serde_json::Value, (passed, jobs): (bool, Vec<Job>)) -> SuiteEvidence {
@@ -1802,6 +1826,47 @@ mod tests {
         view["jobs"] = serde_json::json!([job("Gate (ubuntu-latest)", "success")]);
         let (passed, jobs) = suite_result(&view, &commands).unwrap();
         assert!(!passed && jobs.iter().all(|j| !j.0));
+    }
+
+    /// NIT-641: on 2026-10-22 every job of a land's suite failed in "Linux prerequisites" before
+    /// any test ran, the gate read as `npm test` failing, and the checkpoint started to bisect.
+    /// A job that stopped in a setup step did not run: never a failed command, never a bisect.
+    #[test]
+    fn a_job_that_failed_in_setup_did_not_run_and_one_that_failed_in_its_command_did() {
+        // The steps of run 39864832690, as `gh run view --json jobs` gives them.
+        let steps = |setup: &str, command: &str| {
+            serde_json::json!([
+                {"name": "Set up job", "conclusion": "success"},
+                {"name": "Run actions/checkout@v5", "conclusion": "success"},
+                {"name": "The exact tree", "conclusion": "success"},
+                {"name": "Linux prerequisites", "conclusion": setup},
+                {"name": "Rust toolchain", "conclusion": if setup == "success" { "success" } else { "skipped" }},
+                {"name": "Run npm ci", "conclusion": if setup == "success" { "success" } else { "skipped" }},
+                {"name": "Run", "conclusion": command},
+                {"name": "Test reports", "conclusion": "success"},
+                {"name": "Post Run actions/checkout@v5", "conclusion": "success"},
+            ])
+        };
+        let job = |name: &str, setup: &str, command: &str| serde_json::json!({"databaseId": 9, "name": name, "conclusion": if command == "success" && setup == "success" { "success" } else { "failure" }, "url": "https://github.com/acme/app/actions/runs/2/job/9", "startedAt": "2026-01-01T00:00:00Z", "completedAt": "2026-01-01T00:06:20Z", "steps": steps(setup, command)});
+        assert_eq!(setup_failure(&job("npm test", "failure", "skipped")).as_deref(), Some("Linux prerequisites"), "apt failed or hit its step limit");
+        assert_eq!(setup_failure(&job("npm test", "timed_out", "skipped")).as_deref(), Some("Linux prerequisites"));
+        assert_eq!(setup_failure(&job("npm test", "success", "failure")), None, "the command ran and failed: the change's");
+        assert_eq!(setup_failure(&serde_json::json!({"conclusion": "failure"})), None, "no steps to tell by: as before");
+
+        let commands = vec!["npm test".to_string(), "cargo clippy".to_string()];
+        let view = serde_json::json!({"status": "completed", "conclusion": "failure", "url": "u", "jobs": [job("npm test", "failure", "skipped"), job("cargo clippy", "failure", "skipped")]});
+        let (passed, jobs) = suite_result(&view, &commands).unwrap();
+        assert!(!passed && jobs.iter().all(|j| !j.0 && j.3), "not passed, and every job did not run");
+        assert!(jobs[0].2.starts_with("CI setup failed in \"Linux prerequisites\" before `npm test` ran."), "{}", jobs[0].2);
+        let result = |(ok, seconds, output, timed_out, _, _): Job, command: &str| playbook::CommandResult { step: None, command: command.into(), ok, seconds, output, skipped: false, timed_out };
+        let gate = |results: Vec<playbook::CommandResult>| serde_json::from_value::<playbook::GateResult>(serde_json::json!({"passed": false, "commit": "c", "results": results})).unwrap();
+        let all_setup = gate(jobs.into_iter().zip(&commands).map(|(j, c)| result(j, c)).collect());
+        let stopped = all_setup.timed_out().expect("the gate did not finish, so no bisect and no send-back");
+        assert_eq!(stopped.stopped(), "CI setup failed in \"Linux prerequisites\" before `npm test` ran");
+        // One job stopped in setup and another failed in its command: the failure is the change's.
+        let view = serde_json::json!({"status": "completed", "conclusion": "failure", "url": "u", "jobs": [job("npm test", "failure", "skipped"), job("cargo clippy", "success", "failure")]});
+        let (_, jobs) = suite_result(&view, &commands).unwrap();
+        assert!(gate(jobs.into_iter().zip(&commands).map(|(j, c)| result(j, c)).collect()).timed_out().is_none());
     }
 
     #[test]
