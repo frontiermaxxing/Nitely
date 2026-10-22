@@ -111,6 +111,10 @@ enum Cmd {
     /// asks another build before putting it in place.
     #[command(hide = true)]
     CheckDatabase,
+    /// Check one file's syntax without running it: parse JSON or TOML, or ask PowerShell, bash,
+    /// Python or node. What a small change to a file no test reaches runs (NIT-623).
+    #[command(hide = true)]
+    CheckFile { path: std::path::PathBuf },
     /// Report what you are doing, from the current directory's worktree.
     Status {
         /// One line, e.g. "running test:gate".
@@ -1088,6 +1092,7 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             print_json(&found)
         }
+        Cmd::CheckFile { path } => nitely_core::affected_tests::check_file(&path),
         Cmd::CheckDatabase => match nitely_core::db::refused_by_this_build(&paths::db_path())? {
             Some(why) => {
                 eprintln!("{why}");

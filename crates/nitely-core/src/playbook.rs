@@ -30,6 +30,9 @@ pub struct Playbook {
     pub release: Option<crate::release_verification::Rules>,
     #[serde(default)]
     pub branch: BranchRules,
+    /// How a small change checks a file no test reaches (`[checks.files]`, NIT-623).
+    #[serde(default, skip_serializing_if = "CheckRules::is_empty")]
+    pub checks: CheckRules,
     #[serde(default)]
     pub worktree: WorktreeRules,
     #[serde(default)]
@@ -164,6 +167,19 @@ pub struct BranchRules {
     pub integration_macos: Option<String>,
     /// `{vendor}`, `{key}` (lowercase) and `{slug}` are filled in.
     pub pattern: String,
+}
+
+/// `[checks.files]`: a glob over the repo-relative path (`*` within a segment, `**` across them)
+/// to the command that checks such a file, with `{path}` filled in, e.g.
+/// `"scripts/*.ps1" = "pwsh -NoProfile -File scripts/lint.ps1 {path}"`. A small change to a file
+/// no test reaches runs it instead of the full gate (affected_tests::own_checks).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CheckRules {
+    pub files: std::collections::BTreeMap<String, String>,
+}
+impl CheckRules {
+    fn is_empty(&self) -> bool { self.files.is_empty() }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

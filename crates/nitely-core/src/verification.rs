@@ -406,6 +406,19 @@ fn risk_floor(repo:&Path,plan:&Plan,pb:&Playbook)->Result<Option<String>> {
     }
     Ok(None)
 }
+/// A small change (NIT-622) the test map would send to the full gate only for files no test
+/// reaches runs those files' own checks instead (NIT-623), under the committed playbook's
+/// `[checks.files]`. Anything else stays as the map decided.
+fn small_selection(repo:&Path,plan:&mut Plan,limits:Option<crate::project_modes::QuickLimits>)->Result<()> {
+    if plan.affected.as_ref().is_none_or(|s|!s.full) {return Ok(());}
+    let verdict=small_change(repo,&plan.policy_commit,&plan.head,limits)?;
+    if !verdict.small {return Ok(());}
+    let pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+    let selection=crate::affected_tests::select_small(repo,&plan.base,&plan.head,&plan.policy_commit,&pb.checks.files,&pb.verification.basic)?;
+    if !selection.full {plan.reasons.push(format!("Small: {}",verdict.reason));}
+    plan.affected=Some(selection);
+    Ok(())
+}
 /// Before landing under a risk-based mode (Fast and Careful), only the quick checks: compile and
 /// lint (the playbook's `basic` commands) and the tests the change affects (NIT-494). Size, new or
 /// renamed files and a missing declaration no longer force the full suite here, because the land
@@ -422,7 +435,8 @@ fn fast_checks(repo:&Path,plan:&mut Plan,issue:&IssueRecord)->Result<()> {
     plan.commands.append(&mut pb.verification.basic);
     for check in &selection.checks {
         if let Some(d)=&check.discovery {plan.commands.extend([d.command.clone(),d.ignored_command.clone()]);}
-        plan.commands.push(check.command.clone());
+        // A small change's own TypeScript check is the basic type check already listed (NIT-623).
+        if !plan.commands.contains(&check.command) {plan.commands.push(check.command.clone());}
     }
     plan.effective="standard".into();plan.depth=crate::issues::review_depth("standard").into();plan.shadow=false;
     for component in &selection.components {let id=format!("component:{component}");if !plan.rule_ids.contains(&id) {plan.rule_ids.push(id);}}
@@ -477,7 +491,10 @@ fn project_plan(db:&Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord)->Resul
                     plan.enforcement="Configured Basic commands selected by human project mode; review is independently configured.".into();
                 }
             }
-            Some(crate::project_modes::TestDepth::Risk) if plan.commands.is_empty() => fast_checks(repo,&mut plan,issue)?,
+            Some(crate::project_modes::TestDepth::Risk) if plan.commands.is_empty() => {
+                small_selection(repo,&mut plan,o.quick_limits)?;
+                fast_checks(repo,&mut plan,issue)?
+            }
             _=>{}
         }
         if let Some(n)=o.audit_percent {plan.audit_percent=n;}
@@ -705,6 +722,7 @@ mod tests {
                 ("src/app.test.ts", "import {a} from './app'; export const ok = a === 1;"),
                 ("src/keys/key.ts", "export const k = 1;"),
                 ("notes.txt", "notes"),
+                ("tools/build.ps1", "Write-Output 1"),
             ]);
         });
         let mut db = Db::open(&repo.join("state.sqlite")).unwrap();
@@ -728,12 +746,18 @@ mod tests {
         assert!(!fast.shadow && ["echo typed", "npm run build", "npm test"].iter().all(|c| fast.commands.iter().any(|x| x == c)), "{:?}", fast.commands);
         assert!(checks_note(&crate::playbook::GateResult { mode_authority: None, passed: true, plan: Some(fast.clone()), skipped: None, commit: "abc".into(), results: vec![crate::playbook::CommandResult { step: None, command: "npm run build".into(), ok: true, seconds: 7, output: String::new(), skipped: false, timed_out: false }], warnings: vec![], flaked: vec![], lane_run: None }).unwrap().contains("`npm run build`: passed in 7 s"));
         assert!(project_plan(&db, &repo, &base, "HEAD", &sensitive).unwrap().commands.is_empty(), "a declared sensitive change keeps the full gate");
-        // The risk floors: a protected path, and a file the test map does not cover.
+        // The risk floors: a protected path, and a file the test map does not cover with no check
+        // of its own (plain text).
         for path in ["src/keys/key.ts", "notes.txt"] {
             change(path);
             let full = project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap();
             assert!(full.commands.is_empty(), "{path}: {:?}", full.commands);
         }
+        // A small change to a script no test reaches runs that script's own check, not the full
+        // suite (NIT-623).
+        change("tools/build.ps1");
+        let own = project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap();
+        assert!(own.commands.iter().any(|c| c == "nitely check-file \"tools/build.ps1\"") && !own.commands.iter().any(|c| c == "npm test"), "{:?} {:?}", own.commands, own.reasons);
         change("src/feature.ts");
         db.set_project_review_mode("APP", Mode::Release, Options::default(), 1, &Actor::Human).unwrap();
         assert_eq!(project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap().depth, "Full", "Release runs the full suite before every land");

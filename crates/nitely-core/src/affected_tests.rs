@@ -315,6 +315,117 @@ pub fn select_with_policy(repo: &Path, base: &str, head: &str, policy_commit:&st
     Ok(selection)
 }
 
+/// The built-in check for a file no test reaches, by its kind, where one is cheap and certain
+/// (NIT-623): a parse or syntax check `nitely check-file` runs, or for TypeScript the project's
+/// own type check (the playbook's `basic` commands). None for any other kind.
+pub fn builtin_check(path: &str, basic: &[String]) -> Option<Vec<String>> {
+    let (_, ext) = path.rsplit_once('.')?;
+    match ext.to_ascii_lowercase().as_str() {
+        "ps1" | "psm1" | "sh" | "bash" | "py" | "json" | "toml" | "js" | "mjs" | "cjs" => Some(vec![format!("nitely check-file \"{path}\"")]),
+        "ts" | "tsx" | "mts" | "cts" if !basic.is_empty() => Some(basic.to_vec()),
+        _ => None,
+    }
+}
+
+/// The checks of a small change's files that no test reaches (NIT-623). A file the map's tests
+/// reach (`mapped`) keeps them and adds nothing here. Any other file runs, first found: the
+/// playbook's `[checks.files]` command for it, the built-in check for its kind, or the checks of
+/// the build it is an input to (`build_of`). A protected file, or one with none of these, keeps
+/// the full gate: the error says which. Plain data in; the commands come out once each, in order.
+pub fn own_checks(
+    paths: &[String],
+    mapped: impl Fn(&str) -> bool,
+    files: &BTreeMap<String, String>,
+    build_of: impl Fn(&str) -> Option<Vec<String>>,
+    basic: &[String],
+) -> std::result::Result<Vec<String>, String> {
+    let mut commands: Vec<String> = Vec::new();
+    for path in paths {
+        if protected(path) { return Err(format!("{path} is a build, lock or policy file")); }
+        if mapped(path) { continue; }
+        let found = files.iter().find(|(g, _)| glob(g, path)).map(|(_, c)| vec![c.replace("{path}", path)])
+            .or_else(|| builtin_check(path, basic))
+            .or_else(|| build_of(path))
+            .ok_or_else(|| format!("{path}: no test reaches it and it has no check of its own"))?;
+        for c in found { if !commands.contains(&c) { commands.push(c); } }
+    }
+    Ok(commands)
+}
+
+/// `select_with_policy` for a change already found small: where the map would keep the full gate
+/// only because some files no test reaches, those files run their own checks (`own_checks`) and
+/// the rest keep their mapped tests. The full suite still runs after landing, on main.
+pub fn select_small(repo: &Path, base: &str, head: &str, policy_commit: &str, files: &BTreeMap<String, String>, basic: &[String]) -> Result<Selection> {
+    let mut selection = select_with_policy(repo, base, head, policy_commit)?;
+    if !selection.full { return Ok(selection); }
+    let (b, h) = (selection.base.clone(), selection.head.clone());
+    let decided = (|| -> Result<Selection> {
+        let before = snapshot(repo, &b)?;
+        let after = snapshot(repo, &h)?;
+        let policy_files = if policy_commit == b { before.clone() } else { snapshot(repo, policy_commit)? };
+        let objects = GitObjects { repo, read: RefCell::new(HashMap::new()) };
+        let policy: Option<Policy> = match policy_files.get(POLICY_PATH) {
+            Some(_) => Some(toml::from_str(&read(&objects, &policy_files, POLICY_PATH)?)?),
+            None => None,
+        };
+        let build_input = |p: &str| policy.iter().flat_map(|pol| &pol.components).find(|c| c.build_inputs.iter().any(|i| under(p, i)));
+        let mapped = |p: &str| policy.as_ref().is_some_and(|pol| owner(pol, p).is_some()) && build_input(p).is_none();
+        let changed: Vec<String> = before.keys().chain(after.keys())
+            .filter(|p| before.get(*p).map(|e| (&e.oid, &e.mode)) != after.get(*p).map(|e| (&e.oid, &e.mode)))
+            .cloned().collect::<BTreeSet<_>>().into_iter().collect();
+        let own = own_checks(&changed, mapped, files, |p| build_input(p).map(|c| c.checks.clone()), basic).map_err(anyhow::Error::msg)?;
+        let mut small = Selection { full: true, components: vec![], checks: vec![], reasons: vec![], ..selection.clone() };
+        if changed.iter().any(|p| mapped(p)) {
+            // The mapped files alone: the others as they were, so the map decides only what it owns.
+            let mut rest = after.clone();
+            for p in changed.iter().filter(|p| !mapped(p)) {
+                match before.get(p) { Some(e) => { rest.insert(p.clone(), e.clone()); } None => { rest.remove(p); } }
+            }
+            decide(&policy_files, &before, &rest, &objects, &mut small)?;
+        }
+        small.full = false;
+        for command in own {
+            small.checks.push(Check { component: "own-file".into(), suite: None, command, required_tests: vec![], discovery: None, whole_suite: false });
+        }
+        small.reasons.push("A small change: files no test reaches run their own checks, the rest their mapped tests; the full suite runs on main after landing.".into());
+        Ok(small)
+    })();
+    match decided {
+        Ok(small) => selection = small,
+        Err(e) => selection.reasons.push(format!("Own-file checks unavailable: {e:#}")),
+    }
+    Ok(selection)
+}
+
+/// What `nitely check-file` runs: parses a JSON or TOML file here, and asks the language's own
+/// tool to check a PowerShell, shell, Python or JavaScript file's syntax without running it.
+pub fn check_file(path: &Path) -> Result<()> {
+    let ext = path.extension().and_then(|e| e.to_str()).map(|e| e.to_ascii_lowercase()).unwrap_or_default();
+    let run = |programs: &[&str], args: Vec<String>| -> Result<()> {
+        for program in programs {
+            match crate::playbook::shell_free_command(program).args(&args).output() {
+                Ok(out) if out.status.success() => return Ok(()),
+                Ok(out) => bail!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr)),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(e.into()),
+            }
+        }
+        bail!("none of {} is installed to check {}", programs.join(", "), path.display())
+    };
+    let p = path.to_string_lossy().into_owned();
+    match ext.as_str() {
+        "json" => { serde_json::from_str::<serde_json::Value>(&std::fs::read_to_string(path)?).with_context(|| p.clone())?; Ok(()) }
+        "toml" => { toml::from_str::<toml::Value>(&std::fs::read_to_string(path)?).with_context(|| p.clone())?; Ok(()) }
+        "ps1" | "psm1" => run(&["pwsh", "powershell"], vec!["-NoProfile".into(), "-NonInteractive".into(), "-Command".into(), format!(
+            "$e=$null; [void][System.Management.Automation.Language.Parser]::ParseFile('{}',[ref]$null,[ref]$e); if ($e) {{ $e | ForEach-Object {{ $_.ToString() }}; exit 1 }}",
+            std::path::absolute(path)?.to_string_lossy().replace('\'', "''"))]),
+        "sh" | "bash" => run(&["bash"], vec!["-n".into(), p]),
+        "py" => run(&["python3", "python"], vec!["-m".into(), "py_compile".into(), p]),
+        "js" | "mjs" | "cjs" => run(&["node"], vec!["--check".into(), p]),
+        _ => bail!("no built-in check for {p}"),
+    }
+}
+
 /// Anything the selector cannot prove keeps the full gate, and says why.
 fn fall_back(selection: &mut Selection, decided: Result<()>) {
     if let Err(e) = decided {
@@ -1148,6 +1259,36 @@ pub fn preview(policy: &str, path: &str) -> PathPreview {
 mod tests {
     use super::*;
     use crate::test_repo::{git as g, init};
+
+    /// NIT-623: how a small change's files are checked when no test reaches them.
+    #[test]
+    fn a_file_no_test_reaches_runs_its_own_check_and_one_with_none_keeps_the_full_gate() {
+        let files: BTreeMap<String, String> = [("scripts/*.ps1".to_string(), "pwsh -File lint.ps1 {path}".to_string())].into();
+        let basic = vec!["tsc --noEmit".to_string()];
+        let mapped = |p: &str| p.starts_with("src/");
+        let build_of = |p: &str| p.starts_with("crates/core/migrations/").then(|| vec!["cargo check -p core".to_string()]);
+        let checks = |paths: &[&str]| own_checks(&paths.iter().map(|p| p.to_string()).collect::<Vec<_>>(), mapped, &files, build_of, &basic);
+        assert_eq!(checks(&["scripts/build.ps1"]).unwrap(), ["pwsh -File lint.ps1 scripts/build.ps1"], "the playbook's own command");
+        assert_eq!(checks(&["tools/build.ps1"]).unwrap(), ["nitely check-file \"tools/build.ps1\""], "the built-in parse");
+        assert_eq!(checks(&["tools/gen.ts", "tools/more.ts"]).unwrap(), ["tsc --noEmit"], "TypeScript runs the project's type check once");
+        assert_eq!(checks(&["crates/core/migrations/0001.sql"]).unwrap(), ["cargo check -p core"], "the build it feeds");
+        assert_eq!(checks(&["src/App.tsx", "tools/x.py"]).unwrap(), ["nitely check-file \"tools/x.py\""], "a mapped file keeps its tests and adds nothing");
+        assert!(checks(&["docs/diagram.svg"]).unwrap_err().contains("no check of its own"));
+        assert!(checks(&["tools/Cargo.toml"]).unwrap_err().contains("build, lock or policy"));
+    }
+
+    #[test]
+    fn check_file_parses_json_and_toml() {
+        let dir = std::env::temp_dir().join(format!("nitely-check-file-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let write = |name: &str, text: &str| { let p = dir.join(name); std::fs::write(&p, text).unwrap(); p };
+        assert!(check_file(&write("ok.json", "{\"a\": [1, 2]}")).is_ok());
+        assert!(check_file(&write("bad.json", "{\"a\": [1, 2}")).is_err());
+        assert!(check_file(&write("ok.toml", "[a]\nb = 1\n")).is_ok());
+        assert!(check_file(&write("bad.toml", "[a\nb = 1\n")).is_err());
+        assert!(check_file(&write("x.svg", "<svg/>")).is_err(), "no built-in check");
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// The dry run reads this repo's own map: a frontend file gets the web checks, a lock file
     /// and a file no component owns keep the full gate.
