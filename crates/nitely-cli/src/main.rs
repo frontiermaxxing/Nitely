@@ -111,6 +111,10 @@ enum Cmd {
     /// asks another build before putting it in place.
     #[command(hide = true)]
     CheckDatabase,
+    /// Check one file's syntax without running it: parse JSON or TOML, or ask PowerShell, bash,
+    /// Python or node. What a small change to a file no test reaches runs (NIT-623).
+    #[command(hide = true)]
+    CheckFile { path: std::path::PathBuf },
     /// Report what you are doing, from the current directory's worktree.
     Status {
         /// One line, e.g. "running test:gate".
@@ -193,6 +197,12 @@ enum Cmd {
         /// Take the issue from the agent that holds it, only when you know that agent stopped.
         #[arg(long)]
         take_over: bool,
+    },
+    /// The quick path: a small change made by whoever is already there, landed with its own checks
+    /// and reviewed after landing.
+    Quick {
+        #[command(subcommand)]
+        command: QuickCmd,
     },
     /// Add paths to the current sparse light worktree (each file's directory, or the directory); a
     /// path in a declared submodule makes or widens that submodule's worktree.
@@ -450,6 +460,36 @@ enum Cmd {
         /// Seconds to listen for announcements.
         #[arg(long, default_value_t = 3)]
         wait: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum QuickCmd {
+    /// File an issue for a small change (or take --key's) and make its light worktree.
+    Start {
+        /// What the change does, as the issue's title.
+        title: Option<String>,
+        /// An issue that exists already, instead of filing one.
+        #[arg(long)]
+        key: Option<String>,
+        /// The project to file the issue in.
+        #[arg(long)]
+        project: Option<String>,
+        /// Who the branch is for, e.g. claude or cursor.
+        #[arg(long, default_value = "claude")]
+        agent: String,
+    },
+    /// In the quick worktree: commit, and land the change when it is small; else say why.
+    Land {
+        /// The commit message; defaults to the issue's title and key.
+        #[arg(long)]
+        message: Option<String>,
+    },
+    /// Review now, in one reviewer call, the quick changes of this repo that landed and wait for
+    /// their review after landing (the app does it once five wait or the oldest waited 3 hours).
+    Review {
+        #[arg(long)]
+        project: String,
     },
 }
 
@@ -1088,6 +1128,7 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             print_json(&found)
         }
+        Cmd::CheckFile { path } => nitely_core::affected_tests::check_file(&path),
         Cmd::CheckDatabase => match nitely_core::db::refused_by_this_build(&paths::db_path())? {
             Some(why) => {
                 eprintln!("{why}");
@@ -1627,6 +1668,55 @@ fn run(cmd: Cmd) -> Result<()> {
                     bail!("ask {} {why}, unanswered", ask.id);
                 }
             }
+        }
+        Cmd::Quick { command: QuickCmd::Start { title, key, project, agent } } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let cwd = cwd()?;
+            let issue = match (key, title) {
+                (Some(key), _) => db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?,
+                (None, Some(title)) => {
+                    let project = project.as_deref().context("pass --project for the new issue, or --key for one that exists")?;
+                    let source = if nitely_core::issues::SOURCES.contains(&agent.as_str()) { agent.as_str() } else { "human" };
+                    db.create_issue(&nitely_core::quick::new_issue(project, &title, source), &me)?
+                }
+                (None, None) => anyhow::bail!("pass the change's title, or --key for its issue"),
+            };
+            let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &cwd)?;
+            let started = nitely_core::quick::start(&db, &root, &issue, &agent, &me)?;
+            for w in &started.warnings {
+                eprintln!("warning: {w}");
+            }
+            println!("{} started in {}", started.issue, started.worktree);
+            println!("Make the change there, then run `nitely quick land` in it.");
+            Ok(())
+        }
+        Cmd::Quick { command: QuickCmd::Review { project } } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let cwd = cwd()?;
+            let root = playbook::repo_for_issue(&config, Some(&project), &cwd)?;
+            let branch = Playbook::load(&root)?.integration_branch().to_string();
+            match nitely_core::quick_review::review(&mut db, &root, &project, &branch)? {
+                Some(r) => println!("{} reviewed {} quick change(s): {} finding(s){}", r.reviewer, r.changes.len(), r.findings, if r.filed.is_empty() { String::new() } else { format!("; reopened or filed {}", r.filed.join(", ")) }),
+                None => println!("No quick change waits for its review after landing."),
+            }
+            let (reviewed, escaped) = nitely_core::quick_review::escape_rate(&db, &project)?;
+            println!("{project}: {escaped} of {reviewed} quick changes reviewed after landing had findings.");
+            Ok(())
+        }
+        Cmd::Quick { command: QuickCmd::Land { message } } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let cwd = cwd()?;
+            nitely_core::install::check_current(&config, &cwd, env!("NITELY_COMMIT"))?;
+            let out = nitely_core::quick::land(&mut db, &config, &cwd, message.as_deref(), &me)?;
+            println!("{}: {}", out.issue, out.reason);
+            println!("{}", out.next);
+            if !out.landed {
+                exit(1);
+            }
+            Ok(())
         }
         Cmd::Start { key, agent, take_over } => {
             let config = Config::load()?;

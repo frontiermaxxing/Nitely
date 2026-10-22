@@ -26,7 +26,8 @@ export interface Round {
   reviewer: string | null;
   /** The review record the closing submit wrote, with the findings. */
   review: ReviewRecord | null;
-  reviewSkipped?: "yolo" | "disabled" | "light";
+  /** quick: a small change through the quick path, reviewed after it lands (NIT-624). */
+  reviewSkipped?: "yolo" | "disabled" | "light" | "quick";
   /** The submit could not push the branch, so nobody can see this round. */
   pushFailed: boolean;
   /** The submit handed the change to the human for approval. */
@@ -116,8 +117,8 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
       case "submit": {
         const s = e.summary ?? "";
         const r = openRound(e.ts);
-        const skipped = s.startsWith("Review disabled for this project") || s.startsWith("YOLO mode:") || s.startsWith("Basic checks:");
-        if (skipped) r.reviewSkipped = s.startsWith("YOLO mode:") ? "yolo" : s.startsWith("Basic checks:") ? "light" : "disabled";
+        const skipped = s.startsWith("Review disabled for this project") || s.startsWith("YOLO mode:") || s.startsWith("Basic checks:") || s.startsWith("Quick path:");
+        if (skipped) r.reviewSkipped = s.startsWith("YOLO mode:") ? "yolo" : s.startsWith("Basic checks:") ? "light" : s.startsWith("Quick path:") ? "quick" : "disabled";
         r.outcome = skipped ? "unreviewed" : s.includes("requested changes") ? "changes" : s.includes("passed") ? "passed" : "unreviewed";
         r.reviewer = skipped ? null : reviewerOf(s) ?? r.reviewer;
         r.pushFailed = s.includes("push failed");
@@ -151,7 +152,7 @@ export function journeyOf(timeline: TimelineEntry[] = [], reviews: ReviewRecord[
         outcome: outcomeOf(rec),
         reviewer: rec.reviewer || null,
         review: rec,
-        ...(rec.verdict === "yolo" || rec.verdict === "disabled" || rec.verdict === "light" ? { reviewSkipped: rec.verdict } : {}),
+        ...(rec.verdict === "yolo" || rec.verdict === "disabled" || rec.verdict === "light" || rec.verdict === "quick" ? { reviewSkipped: rec.verdict } : {}),
         pushFailed: false,
         waitsForHuman: rec.approver === "human",
       }),

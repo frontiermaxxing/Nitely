@@ -706,7 +706,7 @@ export interface ReviewRecord {
   commit_sha: string;
   /** Empty when no review ran. */
   reviewer: string;
-  verdict: "pass" | "changes" | "none" | "disabled" | "yolo" | "light";
+  verdict: "pass" | "changes" | "none" | "disabled" | "yolo" | "light" | "quick";
   approver: "agent" | "human";
   reasons: string[];
   /** carried: raised in an earlier round and not fixed since; now: how the reviewer says it is still open. */

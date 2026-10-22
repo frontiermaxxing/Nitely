@@ -813,6 +813,7 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
             gate: Some(gate.clone()),
             // Where this change started, so the post-merge backstop records the landing (NIT-457).
             landed_from: Some(s.from.clone()),
+            own_tip: Some(s.tip.clone()),
             after: after.after.clone(),
             warnings: after.warnings.clone(),
             batch: Some(BatchNote {
