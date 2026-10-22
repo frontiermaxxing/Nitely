@@ -166,11 +166,14 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
 /* Under the app's own title bar (Windows), the bar takes the top of the padding. */
 .drag-titlebar .inbox-head, .drag-titlebar .inbox-detail { padding-top: 12px; }
 
-@media (max-width: 1100px) {
-  .inbox-split { grid-template-columns: minmax(300px, 400px) minmax(0, 1fr); }
+/* The split answers to the Inbox's own width (NIT-591): beside the sidebar, a window 800 px wide
+   left the open decision about 140 px. Narrower, the list takes less; narrower still, they stack. */
+.inbox-frame { container-type: inline-size; min-height: 100%; }
+@container (max-width: 860px) {
+  .inbox-split { grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); }
   .inbox-detail { padding: 28px 24px 40px; }
 }
-@media (max-width: 760px) {
+@container (max-width: 640px) {
   .inbox-split { grid-template-columns: minmax(0, 1fr); }
   .inbox-list { border-right: 0; border-bottom: 1px solid var(--line); }
   .inbox-head { padding: 20px 16px 12px; }
@@ -178,6 +181,9 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
   .inbox-keys { display: none; }
   .inbox-detail { padding: 20px 16px 40px; }
   .drag-titlebar .inbox-head, .drag-titlebar .inbox-detail { padding-top: 20px; }
+}
+/* The empty Inbox's "Meanwhile" list is outside the split's container: it follows the window. */
+@media (max-width: 760px) {
   .at-work-row { grid-template-columns: 18px minmax(0, 1fr) 32px; row-gap: 2px; }
   .at-work-activity { grid-column: 2 / 4; grid-row: 2; }
 }
