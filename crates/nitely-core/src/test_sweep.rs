@@ -1026,11 +1026,34 @@ pub struct MeasureFacts<'a> {
     pub ci: CiFact<'a>,
     /// The gate's test commands.
     pub tests: &'a [String],
+    /// The repo's package.json, to find the runner behind `npm test` (NIT-567).
+    pub package: Option<&'a serde_json::Value>,
     pub runs: u32,
     pub minutes: u32,
     /// The person asked for a CI run (`--dispatch`) or a lane run (`--lane`).
     pub dispatch: bool,
     pub lane: bool,
+}
+
+/// What CI runs for test command `t` so its results come back per test (NIT-567): the command
+/// writing its runner's report (JUnit XML or TRX) where the suite workflow uploads it, else one
+/// whose console says each outcome (cargo, node:test, go test -v). An npm script whose runner
+/// needs a report it cannot write is skipped, with why, rather than run for nothing.
+pub fn dispatched_command(
+    t: &str,
+    package: Option<&serde_json::Value>,
+) -> std::result::Result<String, String> {
+    if ["{main}", "{worktree}", "{base}", "{jobs}"]
+        .iter()
+        .any(|p| t.contains(p))
+    {
+        return crate::test_evidence::console_command(t);
+    }
+    match crate::test_evidence::report_command(t, package) {
+        Ok(c) => Ok(c),
+        Err(why) if why.contains("jest-junit") => Err(why),
+        Err(_) => crate::test_evidence::console_command(t),
+    }
 }
 
 /// Which CI other than GitHub Actions the repo at `root` is set up for, as why `measure` may
@@ -1098,7 +1121,7 @@ pub fn plan_measure(f: &MeasureFacts) -> Result<MeasurePlan> {
         CiFact::Ready { workflow: true } => {
             let (mut commands, mut skipped) = (vec![], vec![]);
             for t in f.tests {
-                match crate::test_evidence::console_command(t) {
+                match dispatched_command(t, f.package) {
                     Ok(c) => commands.push(c),
                     Err(why) => skipped.push(why),
                 }
@@ -1430,6 +1453,7 @@ mod tests {
             tested_main: None,
             ci,
             tests: &tests,
+            package: None,
             runs: 2,
             minutes: 20,
             dispatch,
@@ -1447,7 +1471,7 @@ mod tests {
             [
                 "npm test",
                 "cargo test --workspace",
-                "pytest -v --durations=0 --durations-min=0"
+                "pytest -q --junitxml=$NITELY_JUNIT_DIR/pytest.xml"
             ]
         );
         assert!(

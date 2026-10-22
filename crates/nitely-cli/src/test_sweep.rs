@@ -239,7 +239,12 @@ fn measure(
             }
         }
     }
+    // package.json, to find the runner behind `npm test` (NIT-567).
+    let package: Option<serde_json::Value> = std::fs::read(root.join("package.json"))
+        .ok()
+        .and_then(|b| serde_json::from_slice(&b).ok());
     let plan = test_sweep::plan_measure(&test_sweep::MeasureFacts {
+        package: package.as_ref(),
         revision: &revision,
         ci_logs: found.len(),
         tested_main: tested_main.as_deref().map(|sha| (sha, from_main.len())),

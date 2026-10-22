@@ -20,6 +20,8 @@ pub enum Format {
     Pytest,
     /// `go test -v`.
     Gotest,
+    /// `dotnet test --logger trx`.
+    Trx,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -142,7 +144,9 @@ pub fn read(text: &str) -> Run {
         &plain
     };
     let mut parts = detect(text).into_iter().map(|f| match f {
+        Format::Junit if text.contains("<TestRun") => trx(text),
         Format::Junit => junit(text),
+        Format::Trx => trx(text),
         Format::Libtest => libtest(text),
         Format::Tap => tap(text),
         Format::Pytest => pytest(text),
@@ -735,6 +739,193 @@ pub fn readable_command(command: &str) -> std::result::Result<String, String> {
     Err(format!("CI's console would not say each test's outcome for `{command}`: have CI write JUnit XML and upload it as an artifact named for tests, and `measure` reads it from CI's finished runs"))
 }
 
+/// `dotnet test --logger trx`'s report: each `<UnitTestResult testName duration outcome>`, its
+/// `testName` the class-qualified method, ended by `<ResultSummary>`; a file without it was cut.
+pub fn trx(text: &str) -> Run {
+    use quick_xml::events::Event;
+    let mut reader = quick_xml::Reader::from_str(text);
+    reader.config_mut().trim_text(true);
+    let mut run = Run {
+        format: Some(Format::Trx),
+        runner: Some("dotnet".into()),
+        complete: false,
+        seconds: None,
+        tests: vec![],
+        warnings: vec![],
+    };
+    loop {
+        let e = match reader.read_event() {
+            Ok(Event::Start(e)) | Ok(Event::Empty(e)) => e,
+            Ok(Event::Eof) => break,
+            Ok(_) => continue,
+            Err(e) => {
+                run.warnings.push(format!(
+                    "the TRX stops being readable at byte {}: {e}; the tests after it are unknown",
+                    reader.buffer_position()
+                ));
+                run.complete = false;
+                return run;
+            }
+        };
+        let attr = |key: &str| -> Option<String> {
+            e.attributes()
+                .flatten()
+                .find(|a| a.key.as_ref() == key)
+                .and_then(|a| a.normalized_value(quick_xml::XmlVersion::Implicit1_0).ok())
+                .map(|v| v.into_owned())
+        };
+        match e.local_name().as_ref() {
+            "UnitTestResult" => {
+                let id = attr("testName").unwrap_or_default();
+                let (suite, name) = match id.rsplit_once('.') {
+                    Some((suite, name)) => (Some(suite.to_string()), name.to_string()),
+                    None => (None, id.clone()),
+                };
+                let outcome = match attr("outcome").as_deref() {
+                    Some("Passed") => Outcome::Pass,
+                    Some("Failed" | "Error" | "Timeout" | "Aborted") => Outcome::Fail,
+                    _ => Outcome::Skip,
+                };
+                run.tests.push(Observation {
+                    id,
+                    name,
+                    suite,
+                    file: None,
+                    outcome,
+                    seconds: attr("duration").as_deref().and_then(trx_seconds),
+                    flaky: false,
+                });
+            }
+            "ResultSummary" => run.complete = true,
+            _ => {}
+        }
+    }
+    if !run.complete {
+        run.warnings.push(
+            "no ResultSummary in the TRX: the file was cut, and the tests after it are unknown"
+                .into(),
+        );
+    }
+    if run.tests.is_empty() {
+        run.complete = false;
+        run.warnings
+            .push("no test results in the TRX: its tests are unknown".into());
+    }
+    run
+}
+
+/// A TRX duration, `hh:mm:ss.fffffff`, in seconds.
+fn trx_seconds(d: &str) -> Option<f64> {
+    let mut parts = d.split(':');
+    let (h, m, s) = (
+        parts.next()?.parse::<f64>().ok()?,
+        parts.next()?.parse::<f64>().ok()?,
+        parts.next()?.parse::<f64>().ok()?,
+    );
+    Some(h * 3600.0 + m * 60.0 + s)
+}
+
+/// Where a dispatched command's machine-readable report lands: the suite workflow sets
+/// `$NITELY_JUNIT_DIR` and uploads it with Maven's and Gradle's own report folders (NIT-567).
+pub const JUNIT_DIR: &str = "$NITELY_JUNIT_DIR";
+
+/// `command` as dispatched to CI so it writes a report `measure` reads (JUnit XML or TRX), for
+/// runners whose console says too little: pytest, vitest, jest (with jest-junit), dotnet, Maven
+/// and Gradle (their default reports). `npm test` and `npm run <script>` are resolved through
+/// `package` (package.json) to the runner their script calls. None when the command has no such
+/// report, with why.
+pub fn report_command(
+    command: &str,
+    package: Option<&serde_json::Value>,
+) -> std::result::Result<String, String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let script = match words.as_slice() {
+        ["npm", "test" | "t", ..] => Some("test"),
+        ["npm", "run" | "run-script", name, ..] => Some(*name),
+        _ => None,
+    };
+    if let Some(name) = script {
+        let body = package
+            .and_then(|p| p["scripts"][name].as_str())
+            .ok_or_else(|| format!("`{command}`: package.json has no script `{name}`"))?;
+        let (env, flags) = report_flags(body, package)?;
+        if flags.is_empty() {
+            return Ok(format!("{env}{command}"));
+        }
+        // npm passes what follows `--` to the script's runner.
+        let sep = if words.contains(&"--") { "" } else { " --" };
+        return Ok(format!("{env}{command}{sep} {flags}"));
+    }
+    let (env, flags) = report_flags(command, package)?;
+    Ok(if flags.is_empty() {
+        format!("{env}{command}")
+    } else {
+        format!("{env}{command} {flags}")
+    })
+}
+
+/// The environment prefix and flags that make the runner in `command` write its report into
+/// `$NITELY_JUNIT_DIR`.
+fn report_flags(
+    command: &str,
+    package: Option<&serde_json::Value>,
+) -> std::result::Result<(String, String), String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let has = |w: &str| {
+        words
+            .iter()
+            .any(|x| *x == w || x.ends_with(&format!("/{w}")))
+    };
+    let depends = |dep: &str| {
+        package.is_some_and(|p| {
+            ["dependencies", "devDependencies"]
+                .iter()
+                .any(|k| p[k][dep].is_string())
+        })
+    };
+    if has("vitest") {
+        return Ok((
+            String::new(),
+            format!(
+                "--reporter=default --reporter=junit --outputFile.junit={JUNIT_DIR}/vitest.xml"
+            ),
+        ));
+    }
+    if has("jest") {
+        if !depends("jest-junit") {
+            return Err(format!("`{command}` runs jest, which writes JUnit only with jest-junit: add it as a dev dependency"));
+        }
+        return Ok((
+            format!("JEST_JUNIT_OUTPUT_DIR={JUNIT_DIR} JEST_JUNIT_OUTPUT_NAME=jest.xml "),
+            "--reporters=default --reporters=jest-junit".into(),
+        ));
+    }
+    if has("pytest") {
+        return Ok((String::new(), format!("--junitxml={JUNIT_DIR}/pytest.xml")));
+    }
+    if words.first() == Some(&"dotnet") && words.get(1) == Some(&"test") {
+        return Ok((
+            String::new(),
+            format!("--logger trx --results-directory {JUNIT_DIR}"),
+        ));
+    }
+    // Maven Surefire and Gradle write JUnit XML into their own report folders by default.
+    if (has("mvn") || has("mvnw"))
+        && words
+            .iter()
+            .any(|w| matches!(*w, "test" | "verify" | "install" | "package"))
+        || (has("gradle") || has("gradlew"))
+            && words
+                .iter()
+                .any(|w| w.ends_with("test") || *w == "check" || *w == "build")
+    {
+        return Ok((String::new(), String::new()));
+    }
+    Err(format!(
+        "`{command}`: no report Nitely reads is known for its runner"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1073,5 +1264,60 @@ mod tests {
         assert!(console_command("npx jest --ci")
             .unwrap_err()
             .contains("JUnit"));
+    }
+
+    /// A dispatched command writes its runner's report where CI uploads it; npm scripts resolve
+    /// to their runner; jest needs jest-junit.
+    #[test]
+    fn dispatched_commands_write_each_runners_report() {
+        let none = None;
+        assert_eq!(
+            report_command("pytest -q", none).as_deref(),
+            Ok("pytest -q --junitxml=$NITELY_JUNIT_DIR/pytest.xml")
+        );
+        assert_eq!(report_command("npx vitest run", none).as_deref(), Ok("npx vitest run --reporter=default --reporter=junit --outputFile.junit=$NITELY_JUNIT_DIR/vitest.xml"));
+        assert_eq!(
+            report_command("dotnet test Shop.sln", none).as_deref(),
+            Ok("dotnet test Shop.sln --logger trx --results-directory $NITELY_JUNIT_DIR")
+        );
+        assert_eq!(
+            report_command("./mvnw -q verify", none).as_deref(),
+            Ok("./mvnw -q verify")
+        );
+        assert_eq!(
+            report_command("./gradlew test", none).as_deref(),
+            Ok("./gradlew test")
+        );
+        assert!(report_command("cargo test", none).is_err());
+        let with_jest = serde_json::json!({"scripts": {"test": "jest --ci", "unit": "vitest run"}, "devDependencies": {"jest-junit": "^16"}});
+        assert_eq!(report_command("npm test", Some(&with_jest)).as_deref(), Ok("JEST_JUNIT_OUTPUT_DIR=$NITELY_JUNIT_DIR JEST_JUNIT_OUTPUT_NAME=jest.xml npm test -- --reporters=default --reporters=jest-junit"));
+        assert!(report_command("npm run unit", Some(&with_jest))
+            .unwrap()
+            .starts_with("npm run unit -- --reporter=default --reporter=junit"));
+        let bare_jest = serde_json::json!({"scripts": {"test": "jest"}});
+        assert!(report_command("npm test", Some(&bare_jest))
+            .unwrap_err()
+            .contains("jest-junit"));
+    }
+
+    /// dotnet's TRX: each result, its duration and outcome, and a cut file.
+    #[test]
+    fn trx_reads_each_result_and_a_cut_file() {
+        let trx_text = r#"<?xml version="1.0" encoding="utf-8"?><TestRun xmlns="http://microsoft.com/schemas/VisualStudio/TeamTest/2010"><Results><UnitTestResult testName="Shop.Tests.CartTests.Total" duration="00:00:01.2500000" outcome="Passed" /><UnitTestResult testName="Shop.Tests.CartTests.Tax" duration="00:00:00.0100000" outcome="Failed"><Output /></UnitTestResult></Results><ResultSummary outcome="Failed"><Counters total="2" /></ResultSummary></TestRun>"#;
+        let r = read(trx_text);
+        assert_eq!(r.format, Some(Format::Trx));
+        assert!(r.complete, "{:?}", r.warnings);
+        assert_eq!(
+            summary(&r),
+            [
+                (
+                    "Shop.Tests.CartTests.Total".to_string(),
+                    Outcome::Pass,
+                    Some(1.25)
+                ),
+                ("Shop.Tests.CartTests.Tax".into(), Outcome::Fail, Some(0.01))
+            ]
+        );
+        assert!(!read(&trx_text[..trx_text.find("<ResultSummary").unwrap()]).complete);
     }
 }
