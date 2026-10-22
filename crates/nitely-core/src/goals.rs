@@ -316,6 +316,10 @@ impl Db {
             "INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, ?2, ?3, 'goal_changed', ?4)",
             params![ts, actor.id(), issue.key, summary],
         )?;
+        // The goal it left may be finished now: its last open issue went elsewhere (NIT-614).
+        if let Some(left) = issue.goal {
+            self.complete_goal_if_finished(left, actor)?;
+        }
         self.issue(&issue.key)?.context("issue vanished")
     }
 
@@ -381,9 +385,10 @@ impl Db {
             "INSERT INTO event (ts, actor, issue_key, type, summary, payload) VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
             params![ts, actor.id(), GOAL_COMPLETED, said, payload],
         )?;
-        let focused: Option<i64> = self.conn.query_row("SELECT goal FROM project_focus WHERE project = ?1", [&goal.project], |r| r.get(0)).optional()?.flatten();
-        if focused.is_some() && focus_after_completion(focused, id).is_none() {
-            self.conn.execute("UPDATE project_focus SET goal = NULL, updated_at = ?2, updated_by = ?3 WHERE project = ?1", params![goal.project, ts, actor.id()])?;
+        // `focus_after_completion`, in one statement: cleared only while it is still on this goal,
+        // so a focus the person set meanwhile stands (NIT-614).
+        let cleared = self.conn.execute("UPDATE project_focus SET goal = NULL, updated_at = ?2, updated_by = ?3 WHERE project = ?1 AND goal = ?4", params![goal.project, ts, actor.id(), id])?;
+        if cleared > 0 {
             self.conn.execute(
                 "INSERT INTO event (ts, actor, issue_key, type, summary, payload) VALUES (?1, ?2, NULL, ?3, ?4, ?5)",
                 params![ts, actor.id(), FOCUS_CLEARED, format!("{}'s focus on goal {id} \"{}\" ended with the goal: agents work by priority until you set another", goal.project, goal.title), payload],
@@ -431,6 +436,19 @@ mod tests {
         assert!(notices.iter().any(|n| n.summary.contains("completed: 2 issues")), "{notices:?}");
         assert!(notices.iter().any(|n| n.summary.contains("focus on goal")), "{notices:?}");
         assert!(db.goals("NIT", false).unwrap().iter().all(|x| x.id != g.id), "hidden unless closed goals are asked for");
+
+        // NIT-614: a goal whose last open issue moves to another goal is finished too, and the
+        // focus set on that other goal stands.
+        let h = db.save_goal("NIT", None, &GoalChange { title: Some("Next".into()), outcome: Some("Then.".into()), ..Default::default() }, &human).unwrap();
+        let other = db.save_goal("NIT", None, &GoalChange { title: Some("Other".into()), outcome: Some("Else.".into()), ..Default::default() }, &human).unwrap();
+        let in_h = |title: &str| crate::issues::NewIssue { goal: Some(h.id), ..new(title) };
+        let c = db.create_issue(&in_h("C"), &human).unwrap().key;
+        let d = db.create_issue(&in_h("D"), &human).unwrap().key;
+        db.move_issue(&c, "Done", Some("shipped"), None, &human).unwrap();
+        db.set_project_focus("NIT", Some(other.id), true, &human).unwrap();
+        db.set_issue_goal(&d, Some(other.id), &human).unwrap();
+        assert_eq!(db.goal(h.id).unwrap().unwrap().state, "done", "its last open issue left");
+        assert_eq!(db.project_focus("NIT").unwrap().goal, Some(other.id), "the person's focus on another goal stands");
     }
 
     fn db() -> Db {
@@ -475,13 +493,13 @@ mod tests {
         assert_eq!(d.issues.len(), 2);
         assert_eq!((d.goal.progress.total, d.goal.progress.done, d.goal.progress.open), (2, 1, 1));
 
-        db.set_issue_goal(&b, None, &agent).unwrap();
-        assert_eq!(db.goal(g.id).unwrap().unwrap().progress.total, 1);
-
         // The goal rows: active goals of every project, each with its issues.
         let rows = db.active_goals(None).unwrap();
-        assert_eq!((rows.len(), rows[0].issues.len()), (1, 1));
-        db.save_goal("NIT", Some(g.id), &GoalChange { state: Some("done".into()), ..Default::default() }, &agent).unwrap();
+        assert_eq!((rows.len(), rows[0].issues.len()), (1, 2));
+        // B leaves, and the goal's one issue left is done: it finishes by itself (NIT-614).
+        db.set_issue_goal(&b, None, &agent).unwrap();
+        let left = db.goal(g.id).unwrap().unwrap();
+        assert_eq!((left.progress.total, left.state.as_str()), (1, "done"));
         assert!(db.active_goals(Some("nit")).unwrap().is_empty());
     }
 
