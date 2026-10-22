@@ -494,6 +494,18 @@ fn check_classes<'a>(
     Ok(by_test)
 }
 
+/// A refactor card's title: the module and the decisions it lifts, short enough to read.
+fn refactor_title<'a>(module: &str, decisions: impl Iterator<Item = &'a str>) -> String {
+    let mut title = format!(
+        "{module}: lift {}",
+        decisions.collect::<Vec<_>>().join("; ")
+    );
+    if title.chars().count() > 120 {
+        title = title.chars().take(117).collect::<String>() + "...";
+    }
+    title
+}
+
 /// What the goal is planned from besides the map: the budget's per-test limit, the gate's test
 /// commands, and the commands CI already runs, when the repo has CI.
 pub struct OptimizeFacts<'a> {
@@ -567,7 +579,12 @@ pub fn optimize_plan(
         title,
         body,
         evidence: evidence.clone(),
-        kind: "improvement".into(),
+        kind: if touches.is_empty() {
+            "live-check"
+        } else {
+            "improvement"
+        }
+        .into(),
         priority: 3,
         labels: vec!["test-hygiene".into()],
         blocked_by,
@@ -683,10 +700,7 @@ pub fn optimize_plan(
             .collect();
         items.push(item(
             format!("refactor-{}", n + 1),
-            format!(
-                "{module}: lift {} decisions into pure functions (up to {measured:.0} s measured)",
-                decisions.len()
-            ),
+            refactor_title(module, decisions.iter().map(|(d, _)| *d)),
             body,
             paths(&fs),
             decisions.len(),
@@ -719,11 +733,16 @@ pub fn optimize_plan(
     let mut budget = format!("test_seconds = {}\n", facts.slow_seconds);
     if !named.is_empty() {
         budget.push_str("\n[scenarios]\n");
+        // One key per printed name: two binaries' `tests::roundtrip` are one entry.
+        let mut names = std::collections::BTreeSet::new();
         for f in &named {
             let name = f
                 .printed
                 .clone()
                 .unwrap_or_else(|| f.test.rsplit("::").next().unwrap_or(&f.test).to_string());
+            if !names.insert(name.clone()) {
+                continue;
+            }
             budget.push_str(&format!(
                 "{} = {}\n",
                 serde_json::to_string(&name)?,
@@ -1181,19 +1200,20 @@ pub fn repo_facts(config: &crate::Config, root: &Path) -> Result<RepoFacts> {
             .map(|l| l.ci_commands.clone())
             .unwrap_or_default(),
         // CI that can run ci_commands: a GitHub repo holding the playbook's suite workflow.
+        // CI that can run ci_commands: reachable, with the playbook's suite workflow, which takes
+        // Nitely's dispatch inputs (an ordinary ci.yml does not).
         has_ci: matches!(
             crate::executor::ci_state(root, &project),
             crate::executor::CiState::Ready(_)
-        ) && root
-            .join(".github")
-            .join("workflows")
-            .join(
+        ) && std::fs::read_to_string(
+            root.join(".github").join("workflows").join(
                 pb.lanes
                     .as_ref()
                     .map(|l| l.ci_workflow.as_str())
                     .unwrap_or("ci.yml"),
-            )
-            .is_file(),
+            ),
+        )
+        .is_ok_and(|w| w.contains("nitely_commands")),
         has_lanes: pb.lanes.is_some(),
         target: repo.map(|r| crate::proposals::Target::of(&r.name, root)),
         project,
@@ -1529,6 +1549,24 @@ mod tests {
         assert_eq!(run["partial"], true);
     }
 
+    /// Two modules' refactor cards are filed as two issues, not one as a duplicate.
+    #[test]
+    fn refactor_cards_of_two_modules_are_not_duplicates() {
+        let parser = refactor_title("parser", ["where a quoted token ends"].into_iter());
+        let router = refactor_title("router", ["which route a path matches"].into_iter());
+        fn text(t: &str) -> crate::similar::Text<'_> {
+            crate::similar::Text {
+                title: t,
+                body: "",
+                evidence: "",
+            }
+        }
+        assert!(
+            !crate::similar::compare(&text(&parser), &text(&router)).is_duplicate(),
+            "{parser} / {router}"
+        );
+    }
+
     #[test]
     fn optimize_goal_has_a_card_per_module_one_deletion_card_and_needs_a_person() {
         let mut db =
@@ -1606,10 +1644,7 @@ mod tests {
             ]
         );
         let card = &planned.plan.issues[0];
-        assert_eq!(
-            card.title,
-            "land_rules: lift 1 decisions into pure functions (up to 9 s measured)"
-        );
+        assert_eq!(card.title, "land_rules: lift which changes land together");
         assert!(
             card.body.contains("Keep these scenarios")
                 && card.body.contains("`src/land.rs::pushes` (4.0 s)"),
