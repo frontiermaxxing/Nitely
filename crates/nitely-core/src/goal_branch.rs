@@ -1016,8 +1016,8 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
         db.log_event(actor, Some(key), None, "status", &format!("Bisecting the checkpoint: the full gate at {} ({mid} of {k} items)", items[mid - 1].issue))?;
         let g = playbook::run_gate_as(db, root, &wt, Some(key), actor, crate::lanes::Kind::Land)?;
         gates += 1;
-        if g.timed_out().is_some() {
-            bail!("the full gate at {} ran past the lane's time limit, which says nothing about it; land the checkpoint again", items[mid - 1].issue);
+        if let Some(r) = g.timed_out() {
+            bail!("the full gate at {} did not finish: {}, which says nothing about it; land the checkpoint again", items[mid - 1].issue, r.stopped());
         }
         if g.passed || g.skipped.is_some() {
             lo = mid;
