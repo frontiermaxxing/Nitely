@@ -495,6 +495,16 @@ fn gate_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path
     if full.passed || full.skipped.is_some() {
         return land_prefix(db, root, pb, run, stack, stacked, before, &full, *gates);
     }
+    // A gate that did not finish (past its time limit, or CI failing in setup before any command
+    // ran) says nothing about any change: no bisect, nobody sent to fix code (NIT-641). Each
+    // change ends this run saying so, its issue where it was, to be landed again.
+    if !bisects(&full) {
+        let why = gate_failed(&full, "");
+        for s in &stacked {
+            not_finished(db, run, &s.entry, &why, &full, pb)?;
+        }
+        return Ok(());
+    }
     // The search for the change that broke it (land_rules::Bisect): one cheap guess first, the
     // only change touching a file the failing output names, gated without it; then halving.
     let mut search = Bisect::new(k, suspect(&stacked, &full));
@@ -608,8 +618,8 @@ fn gate_failed(gate: &GateResult, why: &str) -> String {
     let failed = gate.results.iter().find(|r| !r.ok);
     let step = failed.map(|r| format!(" at `{}`", r.command)).unwrap_or_default();
     let output = failed.map(|r| r.output.trim().to_string()).filter(|o| !o.is_empty()).map(|o| format!("\n{o}")).unwrap_or_default();
-    if failed.is_some_and(|r| r.timed_out) {
-        return format!("the gate did not finish{step}: it ran past the lane's time limit and was stopped, which says nothing about the change. Land again.{output}");
+    if let Some(r) = gate.timed_out() {
+        return format!("the gate did not finish: {}, which says nothing about the change. Land again.{output}", r.stopped());
     }
     format!("the gate failed{step}: {why}. Fix it on the branch, submit, and land again.{output}")
 }
@@ -900,6 +910,21 @@ fn send_back(db: &mut Db, run: i64, entry: &Entry, why: &str, gate: Option<&Gate
     Ok(())
 }
 
+/// Whether a failed stack's gate is searched for the change that broke it: only when it finished.
+fn bisects(gate: &GateResult) -> bool {
+    gate.timed_out().is_none()
+}
+
+/// Ends `entry`'s place in this run when the gate did not finish: it is not the change's fault, so
+/// the issue stays where it is and the note says to land again (NIT-641).
+fn not_finished(db: &mut Db, run: i64, entry: &Entry, why: &str, gate: &GateResult, pb: &Playbook) -> Result<()> {
+    let actor = entry.actor();
+    let mut report = Landed { issue: entry.issue.clone(), base: pb.integration_branch().to_string(), gate: Some(gate.clone()), ..Default::default() };
+    land::record_stopped(db, &entry.issue, why, &mut report, &actor)?;
+    db.add_note(&entry.issue, &format!("Land queue run {run} stopped: {why}"), "land", &actor)?;
+    finish(db, entry, "sent_back", &report)
+}
+
 fn finish(db: &Db, entry: &Entry, state: &str, report: &Landed) -> Result<()> {
     db.conn.execute(
         "UPDATE land_queue SET state = ?2, ended_at = ?3, result = ?4 WHERE id = ?1",
@@ -922,8 +947,15 @@ mod tests {
         let step = |timed_out: bool| crate::playbook::CommandResult { step: None, command: "npm test".into(), ok: false, seconds: 1800, output: "out".into(), skipped: false, timed_out };
         let gate = |timed_out: bool| super::GateResult { mode_authority: None, plan: None, skipped: None, passed: false, commit: "c".into(), results: vec![step(timed_out)], warnings: vec![], flaked: vec![], lane_run: None };
         let stopped = super::gate_failed(&gate(true), "its gate failed");
-        assert!(stopped.starts_with("the gate did not finish at `npm test`") && !stopped.contains("Fix it"), "{stopped}");
+        assert!(stopped.starts_with("the gate did not finish: `npm test` ran past the lane's time limit") && !stopped.contains("Fix it"), "{stopped}");
         assert!(super::gate_failed(&gate(false), "its gate failed").starts_with("the gate failed at `npm test`: its gate failed. Fix it"));
+        // NIT-641: a stack whose gate did not finish (here CI failed in setup) is not bisected,
+        // which would blame a change on a runner's stall; one that failed is.
+        let mut setup = gate(true);
+        setup.results[0].output = "CI setup failed in \"Linux prerequisites\" before `npm test` ran.
+https://x".into();
+        assert!(!super::bisects(&setup) && super::bisects(&gate(false)));
+        assert!(super::gate_failed(&setup, "").starts_with("the gate did not finish: CI setup failed in \"Linux prerequisites\" before `npm test` ran, which says nothing about the change. Land again."), "{}", super::gate_failed(&setup, ""));
     }
 
     use super::*;

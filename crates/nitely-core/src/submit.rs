@@ -916,8 +916,8 @@ does not.\n",
 fn after_failed_gate(gate: &GateResult) -> String {
     if let Some(r) = gate.timed_out() {
         return format!(
-            "The gate did not finish: `{}` ran past the lane's time limit and was stopped, which says nothing about this change. Read its log for where it hung, then submit again; a gate that needs longer needs a larger `[lanes] timeout_minutes`.",
-            r.command
+            "The gate did not finish: {}, which says nothing about this change. Read its log for where it stopped, then submit again; a gate that needs longer needs a larger `[lanes] timeout_minutes`.",
+            r.stopped()
         );
     }
     // The step that failed: CI runs its steps side by side, so it need not be the last one reported.
@@ -1085,6 +1085,7 @@ fn reused_pass(
         batch: None,
         tokens: None,
         reused: Some(commit),
+        outside: vec![],
     };
     let choice = crate::review::Choice { independent: rules.is_independent(&reviewer, vendor), reviewer, note };
     Ok(Some((choice, review)))
@@ -1184,6 +1185,13 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
                 };
                 format!("- [P{}] {}{carried}", f.priority, f.text)
             }));
+            if !r.outside.is_empty() {
+                lines.push(format!(
+                    "Set aside, about code this change does not touch (the base's own, so they do not count; file any that is real against `{}`):",
+                    s.base
+                ));
+                lines.extend(r.outside.iter().map(|f| format!("- [P{}] {}", f.priority, f.text)));
+            }
         }
         None if s.review_batched => lines.push(format!("**Review:** {}.", crate::review_batch::PENDING_NOTE)),
         None if s.yolo => lines.push(format!("**Review:** {}. This revision is unverified.", crate::project_yolo::NOTE)),
@@ -1466,6 +1474,7 @@ mod tests {
             batch: None,
             tokens: None,
             reused: None,
+            outside: vec![],
         };
         // Round 2 carrying a P1 once is still a round that may converge.
         let first = record(vec![f(1, "Drops the last row: a.rs", false)]);

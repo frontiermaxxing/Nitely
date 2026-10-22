@@ -102,7 +102,7 @@ fn seed(path: &std::path::Path) -> anyhow::Result<()> {
         let new = NewIssue { project: "DEMO".into(), title: title.into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "claude".into(), priority, allow_similar: true, ..Default::default() };
         let key = db.create_issue(&new, &agent)?.key;
         db.move_issue(&key, "In Progress", None, None, &agent)?;
-        let review = review::Review { reviewer: "codex".into(), verdict: "pass".into(), findings, flagged: vec![], summary: String::new(), seconds: 80, previous: vec![], note: String::new(), batch: None, tokens: None, reused: None };
+        let review = review::Review { reviewer: "codex".into(), verdict: "pass".into(), findings, flagged: vec![], summary: String::new(), seconds: 80, previous: vec![], note: String::new(), batch: None, tokens: None, reused: None, outside: vec![] };
         let gate = playbook::GateResult { mode_authority: None, passed: true, plan: None, skipped: None, commit: "abc1234".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
         let s = submit::Submitted {
             solution: Some(submit::SolutionSummary { title: "Validate access before returning account data".into(), summary: "Reject requests without an active session before loading account data.".into() }),

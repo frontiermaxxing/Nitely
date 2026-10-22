@@ -312,7 +312,8 @@ fn tick_inner(db:&mut Db,config:&Config,repo:&Path,project:&str,branch:&str,forc
         }
         result => {
             let message=match &result { Ok(g)=>format!("Full gate failed or flaked: {}",serde_json::to_string(&g.results)?),Err(e)=>format!("Full gate could not complete: {e:#}") };
-            let isolate_failure=result.as_ref().is_ok_and(|g|!g.passed && g.flaked.is_empty());
+            // A check that did not finish (CI failing in setup, a timeout) is no product failure either (NIT-641).
+            let isolate_failure=result.as_ref().is_ok_and(|g|!g.passed && g.flaked.is_empty() && !playbook::stalled(&g.results));
             db.conn.execute("UPDATE verification_backstop_run SET state='failed',ended_at=?2,evidence=?3,isolate_failure=?4 WHERE id=?1",params![run,now(),message,isolate_failure])?;
             db.conn.execute("UPDATE verification_health SET status='failed',message=?2 WHERE repo=?1",params![id,message])?;
             // Infrastructure/flake failures never justify reverting product changes.

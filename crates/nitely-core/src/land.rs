@@ -1117,7 +1117,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
     report.gate = Some(gate);
     if !passed {
         if let Some(r) = report.gate.as_ref().and_then(|g| g.timed_out()) {
-            bail!("the gate did not finish: `{}` ran past the lane's time limit and was stopped, which says nothing about {branch}; land again", r.command);
+            bail!("the gate did not finish: {}, which says nothing about {branch}; land again", r.stopped());
         }
         bail!("the gate failed; fix it on {branch}, submit, and land again");
     }

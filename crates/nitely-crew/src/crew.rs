@@ -1662,7 +1662,9 @@ fn after_land(stopped: Option<&str>) -> AfterLand {
     let Some(why) = stopped else { return AfterLand::Later };
     if why.contains("waits for a human") {
         AfterLand::ToPerson
-    } else if why.contains("another land holds") || why.contains(nitely_core::approval::UNSIGNED) {
+    } else if why.contains("another land holds") || why.contains(nitely_core::approval::UNSIGNED) || why.contains("the gate did not finish") {
+        // A gate that did not finish (a timeout, CI failing in setup) says nothing about the
+        // change: it lands again later, and no worker is sent to fix code (NIT-641).
         AfterLand::Later
     } else {
         AfterLand::ToNewWorker(why.trim_start_matches("Land stopped: ").to_string())
@@ -2853,6 +2855,11 @@ max_per_day = 5
         assert_eq!(after_land(Some("Land stopped: another land holds the lock")), AfterLand::Later);
         assert_eq!(after_land(Some(&format!("Land stopped: the approval {}", nitely_core::approval::UNSIGNED))), AfterLand::Later);
         assert_eq!(after_land(Some("Land stopped: this change waits for a human (billing)")), AfterLand::ToPerson);
+        assert_eq!(
+            after_land(Some("Land stopped: the gate did not finish: CI setup failed in \"Linux prerequisites\" before `npm test` ran, which says nothing about the change. Land again.")),
+            AfterLand::Later,
+            "a gate that did not finish is no work for a new worker (NIT-641)"
+        );
         assert_eq!(after_land(Some("Land stopped: the rebase stopped on conflicts in a.txt")), AfterLand::ToNewWorker("the rebase stopped on conflicts in a.txt".into()));
     }
 
