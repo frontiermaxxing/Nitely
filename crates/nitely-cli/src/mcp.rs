@@ -1623,7 +1623,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                             issue.review_source = Some("author".into());
                         }
                     }
-                    Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue, not_duplicates: vec![] })
+                    Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue, not_duplicates: vec![], distinct_in_batch: false })
                 })
                 .collect::<Result<Vec<_>>>()?;
             let before = db.project_labels(&project)?;

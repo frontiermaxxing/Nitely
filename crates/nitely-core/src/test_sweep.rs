@@ -339,6 +339,18 @@ impl Report {
                 );
             }
         }
+        // The name a runner printed for an inventoried test, when exactly one observation names it:
+        // what the budget's scenarios must match, whatever flagged the test.
+        let printed_of = |t: &serde_json::Value| -> Option<String> {
+            let n = t["name"].as_str()?;
+            let names: std::collections::BTreeSet<&str> = self
+                .observations
+                .iter()
+                .filter_map(|o| o["name"].as_str())
+                .filter(|o| *o == n || o.ends_with(&format!("::{n}")))
+                .collect();
+            (names.len() == 1).then(|| names.into_iter().next().unwrap().to_string())
+        };
         for t in &self.tests {
             for (hint, why) in [
                 ("waits", "waits on time or load"),
@@ -349,7 +361,7 @@ impl Report {
                         key(t),
                         Some(t),
                         None,
-                        None,
+                        printed_of(t).as_deref(),
                         format!("{why} ({n} in its body)"),
                     );
                 }
@@ -362,7 +374,13 @@ impl Report {
                     && t["line"].as_u64() == c.line.map(|l| l as u64)
             };
             if let Some(t) = self.tests.iter().find(at) {
-                flag(key(t), Some(t), None, None, c.title.clone());
+                flag(
+                    key(t),
+                    Some(t),
+                    None,
+                    printed_of(t).as_deref(),
+                    c.title.clone(),
+                );
             }
         }
         out.into_values().collect()
@@ -625,18 +643,6 @@ pub fn optimize_plan(
     if !uncovered.is_empty() {
         bail!("a test that restates the implementation needs `covered_by`, the behaviour test that covers it, before its deletion is proposed: {}", uncovered.join(", "));
     }
-    // A decision's old test goes once its refactor lands: the pure test of that decision covers it.
-    for (n, (module, decisions)) in modules.iter().enumerate() {
-        for (decision, f) in decisions {
-            deletions.push((
-                f,
-                format!(
-                    "the pure test of \"{decision}\" in {module} (refactor-{})",
-                    n + 1
-                ),
-            ));
-        }
-    }
     let mut items = Vec::new();
     // Failing and flaky tests that stay (scenarios, kept tests, decisions until their refactor)
     // are repaired, whatever else is planned for them.
@@ -692,7 +698,16 @@ pub fn optimize_plan(
                 body.push_str(&format!("- `{}` ({})\n", f.test, time(f)));
             }
         }
-        body.push_str(&format!("\nEstimated saving: up to {measured:.1} s of measured time across {timed} of {} tests (untimed ones unknown). Keep the old tests: the deletion card removes them once this lands, so list in your handoff what now covers each.\n", decisions.len()));
+        body.push_str(&format!("\nEstimated saving: up to {measured:.1} s of measured time across {timed} of {} tests (untimed ones unknown).\n", decisions.len()));
+        // The old tests go with their module's card, so dropping the card keeps them.
+        body.push_str("\nLast step, once the pure tests pass: ask the person once (`ask`) to delete these old tests, each covered by its decision's pure test, and delete only what they approve:\n\n");
+        for (decision, f) in decisions {
+            body.push_str(&format!(
+                "- `{}` ({}): covered by the pure test of \"{decision}\"\n",
+                f.test,
+                time(f)
+            ));
+        }
         let fs: Vec<&Flagged> = decisions
             .iter()
             .map(|(_, f)| *f)
@@ -1549,6 +1564,42 @@ mod tests {
         assert_eq!(run["partial"], true);
     }
 
+    /// One plan's cards are filed as written, even two that read alike: the person approved them
+    /// together.
+    #[test]
+    fn a_plans_cards_that_read_alike_are_both_filed() {
+        let mut db =
+            Db::open(&crate::paths::unique_temp("nitely-sweep-alike", "").join("t.db")).unwrap();
+        db.create_project("APP", "Example").unwrap();
+        let card = |r: &str, module: &str| PlanItem {
+            local_ref: r.into(),
+            title: format!("{module}: lift whether input is valid"),
+            body: format!("Lift the check out of {module}."),
+            evidence: "Test map".into(),
+            kind: "improvement".into(),
+            priority: 3,
+            touches: vec![format!("src/{module}.rs")],
+            ..Default::default()
+        };
+        let plan = GoalPlan {
+            sentence: "s".into(),
+            title: "Tests".into(),
+            outcome: "o".into(),
+            issues: vec![card("refactor-1", "parser"), card("refactor-2", "router")],
+            ..Default::default()
+        };
+        let proposed = db
+            .propose_goal("APP", &plan, None, &Actor::Agent("codex:sweep".into()))
+            .unwrap();
+        let approved = db
+            .approve_goal_plan(&proposed.issue.key, &Default::default(), &Actor::Human)
+            .unwrap();
+        assert_ne!(
+            approved.filed.keys["refactor-1"],
+            approved.filed.keys["refactor-2"]
+        );
+    }
+
     /// Two modules' refactor cards are filed as two issues, not one as a duplicate.
     #[test]
     fn refactor_cards_of_two_modules_are_not_duplicates() {
@@ -1661,7 +1712,9 @@ mod tests {
                 .contains("covered by nothing it should keep"),
             "a presence test is covered by nothing it should keep"
         );
-        assert!(planned.plan.issues[2].body.contains("`src/land.rs::batches` (9.0 s): covered by the pure test of \"which changes land together\" in land_rules (refactor-1)"), "{}", planned.plan.issues[2].body);
+        // A decision's old test goes with its module's card, not the shared deletion card.
+        assert!(card.body.contains("`src/land.rs::batches` (9.0 s): covered by the pure test of \"which changes land together\""), "{}", card.body);
+        assert!(!planned.plan.issues[2].body.contains("src/land.rs::batches"));
         // A failing scenario gets a repair card even when nothing else is planned for it.
         let mut broken = report.clone();
         broken.observations = vec![obs("core::land::pushes", 4000.0)];
