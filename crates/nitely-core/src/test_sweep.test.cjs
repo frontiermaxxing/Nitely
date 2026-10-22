@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { merged, parseLog, classify, bodies, hints, timingMethod, inventory } = require('./test_sweep.cjs');
+const { merged, parseLog, classify, bodies, hints, timingMethod, inventory, untimed } = require('./test_sweep.cjs');
 const revision = 'a'.repeat(40);
 test('same-revision distinct runs distinguish flakes from repeats and ambiguous names', () => {
  const passed = parseLog('test parser::roundtrip ... ok', '1', revision, 'lane 1');
@@ -113,4 +113,10 @@ test('a test written inside a string is a fixture, not a test', () => {
   assert.deepEqual(bodies(js, '.js').map(t => t.name), ['real']);
   const py = 'def test_real():\n    src = """\ndef test_fake():\n    time.sleep(1)\n"""\n    assert run(src)\n';
   assert.deepEqual(bodies(py, '.py').map(t => t.name), ['test_real']);
+});
+test('a source whose tests carry no time is named, since none of them can be found slow', () => {
+  const o = (source, ms, outcome = 'pass') => ({ id: 'x', source, outcome, ...(ms === undefined ? {} : { duration_ms: ms }) });
+  const said = untimed([o('Gate (ubuntu-latest)', undefined), o('Gate (ubuntu-latest)', undefined), o('Gate (ubuntu-latest)', 12), o('suite', 40), o('suite', undefined, 'skip')]);
+  assert.equal(said.length, 1, 'the timed source, whose only untimed test was skipped, is not named');
+  assert.match(said[0], /^Gate \(ubuntu-latest\): 2 of 3 tests carry no time/);
 });

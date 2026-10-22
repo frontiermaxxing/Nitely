@@ -185,6 +185,16 @@ function classify(observations, tests, revision) {
   for (const t of tests.filter(t => t.mocks >= 3)) push('inspect', 'Mock coupling candidate: ' + t.name, `${t.mocks} mock/spy calls in extracted body. Heuristic only: inspect whether it protects behavior or just implementation.`, t, t.path + ':' + t.line);
   return candidates;
 }
+// Each source whose tests ran but carry no time, said by name (NIT-593): none of them can be found
+// slow, so a proposal from that evidence is blind to them. A CI job whose runner prints no times
+// (libtest without --report-time, a console reporter) needs a timed run instead.
+function untimed(observations) {
+  const by = new Map();
+  for (const o of observations.filter(o => o.outcome !== 'skip')) {
+    const s = by.get(o.source) || { all: 0, timed: 0 }; s.all++; if (Number.isFinite(o.duration_ms)) s.timed++; by.set(o.source, s);
+  }
+  return [...by].filter(([, s]) => s.timed < s.all).map(([source, s]) => `${source}: ${s.all - s.timed} of ${s.all} tests carry no time, so none of them can be found slow; a run that times each test (libtest's --report-time, a JUnit reporter) is needed to judge them.`);
+}
 function main(args) {
   const opts = JSON.parse(read(args[0])); const root = process.cwd(); const revision = opts.revision || cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim();
   const inv = inventory(root, opts.at && opts.at !== cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim() ? opts.at : undefined); const observations = []; const runs = []; const warnings = ['Static duplicates and mocks are review leads, never proof that deletion is safe.', 'A log without per-test times (libtest without --report-time) leaves timing unknown. Missing observations/timing are unknown, not passing.', 'Tests with duplicate display names are excluded from outcome classification.', 'Source extraction is conservative: macro-generated, parameterized and non-arrow JavaScript tests may be absent. Inventoried bodies are not a suite count.'];
@@ -192,6 +202,7 @@ function main(args) {
   const imported = opts.imported || {}; let evidenceTruncated = !!imported.truncated;
   observations.push(...(imported.observations || [])); runs.push(...(imported.runs || []));
   for (const r of runs.filter(r => r.partial)) warnings.push(`${r.source} (${r.run}) was not read whole: ${(r.warnings || []).join(' ')}`);
+  warnings.push(...untimed(observations));
   if (opts.execute) {
     const end = Date.now() + Math.min(opts.seconds || 600, 3600) * 1000;
     for (let run = 0; run < Math.min(opts.runs || 2, 3); run++) {
@@ -240,5 +251,5 @@ function main(args) {
   fs.writeFileSync(opts.output, JSON.stringify(report, null, 2), { flag: 'wx' });
   console.log(JSON.stringify({ report: opts.output, revision, observed: observations.length, inventoried: inv.tests.length, candidates: candidates.length, truncated: report.truncated }));
 }
-module.exports = { merged, parseLog, bodies, classify, hints, timingMethod, inventory };
+module.exports = { merged, parseLog, bodies, classify, hints, timingMethod, inventory, untimed };
 if (require.main === module) main(process.argv.slice(2));

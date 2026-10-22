@@ -227,8 +227,10 @@ that runs `cargo test` gets `nitely test-runner` as cargo's test runner
 without it and a warm lane stays warm. A repo with a test harness or runner of its own
 (`harness = false`, a `runner` in `.cargo/config.toml`), or a command that sets `--format`, runs
 as before, without times. In CI, the suite job in `.github/workflows/ci.yml` writes the same
-runner into the job and sets it for Linux. node:test's TAP output has each test's `duration_ms`
-already.
+runner into the job and sets it for Linux, and so does the push gate job's Linux run, whose log
+`test-sweep measure` reads first (NIT-593). node:test's TAP output has each test's `duration_ms`
+already. A report names each source whose tests carry no time, since none of those can be found
+slow.
 
 **What the gate says.** `test_budget.rs` reads the times from the lane's log, or from the CI
 job's whole log (`gh run view --log`), and adds two lines to the gate's warnings:
