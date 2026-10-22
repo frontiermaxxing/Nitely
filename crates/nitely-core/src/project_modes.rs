@@ -48,6 +48,12 @@ impl Default for Periodic {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Checkpoint { pub items:u32, pub daily:bool }
+/// How big a change may be and still count as small (NIT-622): at most `lines` changed lines,
+/// added and removed, in at most `files` files. Unset, no change is small.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QuickLimits { pub lines:u32, pub files:u32 }
+impl Default for QuickLimits { fn default()->Self {Self {lines:30,files:2}} }
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(default,deny_unknown_fields)]
 pub struct Options {
@@ -56,6 +62,7 @@ pub struct Options {
  pub goal_branches:Option<bool>, pub item_review:Option<ItemReview>, pub checkpoint:Option<Checkpoint>,
  pub goal_plans:Option<GoalPlans>,
  pub stalled_reviews:Option<StalledReviews>,
+ pub quick_limits:Option<QuickLimits>,
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Preset {pub mode:Mode,pub options:Options}
@@ -89,6 +96,8 @@ pub fn preset(mode:Mode)->Options {
   // Release approves every plan; only Custom starts plans nobody asked for.
   goal_plans:Some(if release {GoalPlans::Approve}else{GoalPlans::Asked}),
   stalled_reviews:Some(if release {StalledReviews::Ask}else{StalledReviews::Fix}),
+  // Release has no small changes: everything goes the usual way.
+  quick_limits:(!release).then(QuickLimits::default),
  }
 }
 /// What Custom uses for a value it leaves unset: Nitely's own default, never the playbook, whose
@@ -101,7 +110,7 @@ pub fn builtin()->Options {
   test_depth:Some(TestDepth::Full),pre_review:Some(PreReview::Individual),land_batch:Some(false),shared_lanes:None,
   full_backstop:Some(Backstop{enabled:false,landings:5,delay_seconds:1800}),audit_percent:Some(10),
   periodic:Some(Periodic::default()),goal_branches:Some(false),item_review:Some(ItemReview::Off),checkpoint:None,
-  goal_plans:Some(GoalPlans::Approve),stalled_reviews:Some(StalledReviews::Ask),
+  goal_plans:Some(GoalPlans::Approve),stalled_reviews:Some(StalledReviews::Ask),quick_limits:None,
  }
 }
 /// What moving from a retired mode to its preset changed.
@@ -143,7 +152,9 @@ impl ProjectReviewMode {
   // Which plans start by themselves, and what stalled review rounds come to, decide nothing about
   // checking a change, so they are left out: adding them moved no gate's authority (NIT-550, NIT-568).
   let mut checked=serde_json::to_value(self.options())?;
-  if let Some(o)=checked.as_object_mut() {o.remove("goal_plans");o.remove("stalled_reviews");}
+  // The quick limits neither: a small change takes its own path and is reviewed after landing, so
+  // they decide nothing about how the usual path checks a change (NIT-622).
+  if let Some(o)=checked.as_object_mut() {o.remove("goal_plans");o.remove("stalled_reviews");o.remove("quick_limits");}
   Ok(Some(format!("{:x}",Sha256::digest(serde_json::to_vec(&(self.mode,self.revision,checked))?))))
  }
 }
@@ -153,7 +164,8 @@ impl Options {
   Options {test_depth:self.test_depth.or(d.test_depth),pre_review:self.pre_review.or(d.pre_review),land_batch:self.land_batch.or(d.land_batch),
    shared_lanes:self.shared_lanes.or(d.shared_lanes),full_backstop:self.full_backstop.or(d.full_backstop),audit_percent:self.audit_percent.or(d.audit_percent),
    periodic:self.periodic.or(d.periodic),goal_branches:self.goal_branches.or(d.goal_branches),item_review:self.item_review.or(d.item_review),
-   checkpoint:self.checkpoint.or(d.checkpoint),goal_plans:self.goal_plans.or(d.goal_plans),stalled_reviews:self.stalled_reviews.or(d.stalled_reviews)}
+   checkpoint:self.checkpoint.or(d.checkpoint),goal_plans:self.goal_plans.or(d.goal_plans),stalled_reviews:self.stalled_reviews.or(d.stalled_reviews),
+   quick_limits:self.quick_limits.or(d.quick_limits)}
  }
  /// Whether work checked under these options did at least what `now` asks before landing, so it
  /// may finish under `now` (NIT-487). Values that act only after landing (backstop, periodic

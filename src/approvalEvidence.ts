@@ -10,10 +10,11 @@ export interface ApprovalEvidence {
 export function automatedReviewEvidence(review?: { reviewer?: string; verdict?: string; note?: string | null } | null) {
   const yolo = review?.verdict === "yolo";
   const light = review?.verdict === "light";
-  const disabled = review?.verdict === "disabled" || yolo || light;
+  const quick = review?.verdict === "quick";
+  const disabled = review?.verdict === "disabled" || yolo || light || quick;
   return {
     ran: !!review?.reviewer && review.verdict !== "none" && !disabled,
-    text: review?.note || (yolo ? "Tests and review off (Custom mode): automatic gate and PR review skipped" : light ? "Basic checks: pre-merge review exempt; post-merge audit applies" : disabled ? "Review disabled for this project" : "No automated review ran."),
+    text: review?.note || (yolo ? "Tests and review off (Custom mode): automatic gate and PR review skipped" : light ? "Basic checks: pre-merge review exempt; post-merge audit applies" : quick ? "Quick path: a small change, reviewed after landing" : disabled ? "Review disabled for this project" : "No automated review ran."),
     tone: disabled ? null : "bad" as const,
   };
 }

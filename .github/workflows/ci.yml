@@ -61,6 +61,8 @@ jobs:
       NITELY_CHANNEL: ${{ inputs.channel || 'dev' }}
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
+      # Tauri's Linux prerequisites and D-Bus (Linux prerequisites, below).
+      LINUX_PACKAGES: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config
     steps:
       # The runner's TEMP is an 8.3 short path (C:\Users\RUNNER~1\...), which the tests run under
       # on purpose: paths::normalize spells short names out (NIT-104).
@@ -68,11 +70,40 @@ jobs:
 
       # Tauri's Linux prerequisites, for the app crate (nitely-app) that `cargo test --workspace`
       # builds, plus D-Bus for the keychain (keyring's Secret Service). No Linux bundle is built yet.
+      # The .debs the step below installs, kept between runs: a crawling mirror stalled every Linux
+      # job in this step (NIT-642). Keyed on the runner image and the package list, so a new image or
+      # list fetches afresh; saved only when the key missed.
+      - name: Linux prerequisites cache
+        if: runner.os == 'Linux'
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ env.LINUX_PACKAGES }}
+
       - name: Linux prerequisites
         if: runner.os == 'Linux'
+        # A mirror that stops answering hung this step for 14 and 23 minutes (NIT-635): apt gives up on
+        # a silent mirror itself, each attempt is bounded and tried again, and the step's limit stops
+        # whatever still hangs, so a gate fails in minutes instead of waiting out the job.
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config
+          # The packages come from the cache's .debs when it has them (NIT-642): with the image's own
+          # package lists, that install needs no mirror at all. Only what is missing is fetched.
+          debs="$RUNNER_TEMP/apt-debs"
+          mkdir -p "$debs/partial"
+          apt_opts="-o Dir::Cache::Archives=$debs -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60"
+          install() { timeout 120 sudo apt-get $apt_opts install -y --no-install-recommends $LINUX_PACKAGES; }
+          keep() { sudo rm -rf "$debs/partial" "$debs/lock"; sudo chmod -R a+rX "$debs"; }
+          if install; then keep; exit 0; fi
+          for attempt in 1 2 3; do
+            if timeout 60 sudo apt-get $apt_opts update && install; then
+              keep
+              exit 0
+            fi
+            echo "apt attempt $attempt did not finish; trying again"
+            sleep 5
+          done
+          exit 1
 
       # rustup installs the toolchain rust-toolchain.toml pins, with clippy.
       - name: Rust toolchain
@@ -162,6 +193,8 @@ jobs:
       NITELY_CHANNEL: dev
       CARGO_TERM_COLOR: always
       CARGO_INCREMENTAL: 0
+      # Tauri's Linux prerequisites and D-Bus (Linux prerequisites, below).
+      LINUX_PACKAGES: libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config
     steps:
       - uses: actions/checkout@v5
 
@@ -178,10 +211,41 @@ jobs:
           test "$(git rev-parse 'HEAD^{tree}')" = "$NITELY_TREE" || { echo "commit's tree is not $NITELY_TREE"; exit 1; }
           echo "Running at commit $NITELY_SHA, tree $NITELY_TREE"
 
+      # The .debs the step below installs, kept between runs: a crawling mirror stalled every Linux
+      # job in this step (NIT-642). Keyed on the runner image and the package list, so a new image or
+      # list fetches afresh; saved only when the key missed.
+      - name: Linux prerequisites cache
+        if: startsWith(matrix.command, 'cargo')
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/apt-debs
+          key: apt-debs-${{ env.ImageOS }}-${{ env.ImageVersion }}-${{ env.LINUX_PACKAGES }}
+
       - name: Linux prerequisites
+        # Only a cargo command builds the Tauri crate that needs these; npm test skips them (NIT-642).
+        if: startsWith(matrix.command, 'cargo')
+        # A mirror that stops answering hung this step for 14 and 23 minutes (NIT-635): apt gives up on
+        # a silent mirror itself, each attempt is bounded and tried again, and the step's limit stops
+        # whatever still hangs, so a gate fails in minutes instead of waiting out the job.
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config
+          # The packages come from the cache's .debs when it has them (NIT-642): with the image's own
+          # package lists, that install needs no mirror at all. Only what is missing is fetched.
+          debs="$RUNNER_TEMP/apt-debs"
+          mkdir -p "$debs/partial"
+          apt_opts="-o Dir::Cache::Archives=$debs -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60"
+          install() { timeout 120 sudo apt-get $apt_opts install -y --no-install-recommends $LINUX_PACKAGES; }
+          keep() { sudo rm -rf "$debs/partial" "$debs/lock"; sudo chmod -R a+rX "$debs"; }
+          if install; then keep; exit 0; fi
+          for attempt in 1 2 3; do
+            if timeout 60 sudo apt-get $apt_opts update && install; then
+              keep
+              exit 0
+            fi
+            echo "apt attempt $attempt did not finish; trying again"
+            sleep 5
+          done
+          exit 1
 
       - name: Rust toolchain
         run: |

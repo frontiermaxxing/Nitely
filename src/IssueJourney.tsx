@@ -63,7 +63,7 @@ export function IssueJourney(props: { detail: IssueDetail; now: number }) {
             </span>
             <span className="journey-review">
               {r.outcome !== "open" && (
-                <span className={`journey-verdict journey-verdict-${r.outcome}`}>{r.reviewSkipped === "yolo" ? "skipped (checks off)" : r.reviewSkipped === "disabled" ? "disabled" : r.reviewSkipped === "light" ? "exempt (Basic)" : OUTCOME[r.outcome]}</span>
+                <span className={`journey-verdict journey-verdict-${r.outcome}`}>{r.reviewSkipped === "yolo" ? "skipped (checks off)" : r.reviewSkipped === "disabled" ? "disabled" : r.reviewSkipped === "light" ? "exempt (Basic)" : r.reviewSkipped === "quick" ? "after landing" : OUTCOME[r.outcome]}</span>
               )}
               {automated.ran && <FindingDots findings={findings} />}
               {r.pushFailed && <span className="journey-stuck">push failed</span>}

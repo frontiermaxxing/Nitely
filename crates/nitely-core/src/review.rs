@@ -465,6 +465,25 @@ regressions. Skip style. Do not edit anything.\n",
                 c = prev.commit
             ),
         };
+        p.push_str(&self.prompt_rest(previous));
+        p
+    }
+
+    /// The review prompt for small changes that already landed through the quick path (NIT-625):
+    /// `changes` says which, and how to see each; the rest is as `prompt` asks.
+    pub(crate) fn landed_prompt(&self, changes: &str) -> String {
+        let mut p = format!(
+            "These small changes already landed through the quick path, with no review before landing. Review each one: \
+read its diff, the changed code and its callers, and look for correctness bugs and regressions. Skip style. Do not edit \
+anything. Start each finding with the key of the change it is about.\n{changes}\n"
+        );
+        p.push_str(&self.prompt_rest(None));
+        p
+    }
+
+    /// What every review prompt asks after saying what to review.
+    fn prompt_rest(&self, previous: Option<&PreviousRound>) -> String {
+        let mut p = String::new();
         p.push_str("\nTesting standard:\n");
         p.push_str(crate::instructions::TESTING_STANDARD);
         if !self.context.trim().is_empty() {
