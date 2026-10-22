@@ -93,6 +93,13 @@ pub fn follow_up_body(key: &str, open: &[String]) -> String {
     format!("{key}'s review rounds stopped converging. Its agent lands the part the reviews agree on; these findings are what is left:\n\n{}", open.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n"))
 }
 
+/// An open follow-up's body with the findings of a later stall it does not list yet, one per line
+/// as `follow_up_body` writes them, or None when it lists them all already (NIT-634 review).
+pub fn follow_up_with(body: &str, open: &[String]) -> Option<String> {
+    let new: Vec<String> = open.iter().map(|f| format!("- {f}")).filter(|line| !body.lines().any(|l| l.trim() == line)).collect();
+    (!new.is_empty()).then(|| format!("{}\n{}", body.trim_end(), new.join("\n")))
+}
+
 /// What the agent is told to do under `fix` once Nitely filed the follow-up itself.
 pub fn split_into(follow_up: &str) -> String {
     format!("The review rounds are not converging, so split the change: keep what the reviews agree on and take out what the open P0/P1 findings are about. Nitely filed those findings as {follow_up} in the same goal ({}); do not file them again. Then commit and submit the smaller change. The person is told, and nothing waits on them.", crate::links::issue_url(follow_up))
@@ -332,6 +339,10 @@ mod tests {
         assert!(body.ends_with("- [P0] Leaks the token: b.rs\n- [P1] Drops the last row: a.rs"), "{body}");
         assert!(split_into("APP-9").contains("filed those findings as APP-9") && split_into("APP-9").contains("do not file them again"));
         assert_ne!(follow_up_evidence("APP-7"), follow_up_evidence("APP-8"), "one follow-up per issue");
+        // A later stall adds only the findings the open follow-up does not list yet.
+        let later = ["[P0] Leaks the token: b.rs".to_string(), "[P1] Off by one: c.rs".to_string()];
+        assert_eq!(follow_up_with(&body, &later).unwrap(), format!("{body}\n- [P1] Off by one: c.rs"));
+        assert_eq!(follow_up_with(&body, &later[..1]), None, "nothing new: left as it is");
     }
 
     #[test]

@@ -898,13 +898,17 @@ fn after_failed_gate(gate: &GateResult) -> String {
 
 /// The follow-up issue that takes `issue`'s open P0/P1 findings when its review rounds stop
 /// converging under `fix`, in the same goal: the one filed at an earlier stall while it is still
-/// open, else a new one. Filed before the notice, so the notice names it (NIT-634 review).
+/// open, with this stall's new findings added to it, else a new one. Filed before the notice, so
+/// the notice names it (NIT-634 review).
 fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &[String], actor: &Actor) -> Result<String> {
     let evidence = crate::submit_rules::follow_up_evidence(&issue.key);
-    if let Some(open) = db.list_issues(issue.project.as_deref(), false)?.into_iter().find(|i| i.evidence == evidence) {
-        return Ok(open.key);
-    }
     let open = crate::submit_rules::blocking(&review.findings, accepted);
+    if let Some(existing) = db.list_issues(issue.project.as_deref(), false)?.into_iter().find(|i| i.evidence == evidence) {
+        if let Some(body) = crate::submit_rules::follow_up_with(&existing.body, &open) {
+            db.edit_issue(&existing.key, None, Some(&body), actor)?;
+        }
+        return Ok(existing.key);
+    }
     let p0 = review.findings.iter().any(|f| f.priority == 0 && !accepted.contains(&f.text));
     let new = crate::issues::NewIssue {
         project: issue.project.clone().unwrap_or_default(),
