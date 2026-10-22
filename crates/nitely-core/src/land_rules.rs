@@ -316,9 +316,27 @@ pub fn alone_reason(
     Ok(None)
 }
 
+/// Whether a change that lands alone takes its turn in the land queue rather than the lock now
+/// (NIT-586): when another live land holds the lock, or changes already wait in line. Refused at
+/// once, a checkpoint kept losing the lock to whichever land retried first while others landed one
+/// after another. The queue runs it alone, in order. Not a land kept local (a queue run pushes),
+/// nor one breaking the lock.
+pub fn alone_waits_in_line(push: bool, break_lock: bool, lock_held: bool, queued: bool) -> bool {
+    push && !break_lock && (lock_held || queued)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_change_that_lands_alone_waits_its_turn_while_others_land() {
+        assert!(!alone_waits_in_line(true, false, false, false), "the lock is free and nobody waits: it lands now");
+        assert!(alone_waits_in_line(true, false, true, false), "another land holds the lock: in line, not refused");
+        assert!(alone_waits_in_line(true, false, false, true), "the lock is free but others wait: behind them");
+        assert!(!alone_waits_in_line(false, false, true, true), "a land kept local never goes in a queue that pushes");
+        assert!(!alone_waits_in_line(true, true, true, true), "breaking the lock takes it now");
+    }
 
     /// What `lands_reviewed_work_and_waits_for_human_approval`,
     /// `lands_only_what_a_human_approved_when_the_playbook_says_human...`,
