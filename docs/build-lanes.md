@@ -620,3 +620,42 @@ The measurement excludes process enumeration and does not establish the cause of
 timeout. Thread caps, process priorities, memory admission and timeouts are unchanged; the earlier
 idle-machine thread/priority matrix remains unmeasured. Reproduce through a build lane with
 `cargo test -p nitely-core procs::tests::holder_path_preparation_measurement -- --ignored --nocapture`.
+
+### Submit to landed (NIT-500)
+
+For [NIT-500](http://127.0.0.1:7423/i/NIT-500), measured on 2026-10-22 from the database, read-only.
+For each change that landed (`land_queue` reaching `landed`):
+- submit is the last finished `submit_job` before the land;
+- landed is that `land_queue` row's end;
+- full suites are `lane_run` rows whose command is `cargo test --workspace`;
+- runs per land come from `land_run.gates`.
+
+Earlier rounds that a review sent back are not counted, so the time starts at the submit that passed.
+
+| Window (UTC) | Agents submitting | Landed | Submit to landed, median / p90 | Full suites per land run | Local full suites at once | Full-suite minutes |
+| --- | --- | --- | --- | --- | --- | --- |
+| 10-20 00:00 to 10-21 12:00 | 24 | 70 | 5.7 / 69.3 min | 0.3 (max 1) | 3 | 1362 local, 0 CI |
+| 10-21 21:17 to 10-22 00:17 | 4 | 16 | 10.9 / 19.1 min | 1.0 (max 1) | 0 | 0 local, 58 CI |
+| 10-21 23:17 to 10-22 00:17 | 4 | 6 | 9.6 / 11.8 min | 1.0 (max 1) | 0 | 0 local, 22 CI |
+
+In the last hour, the submit-to-landed time breaks down as follows (medians):
+- 0.9 min: the submit job. Gate steps are deferred to the land, and the review takes about 2.5 min.
+- 0.2 min: In Review until the agent asks to land.
+- 6.3 min: the land, most of it the CI full suite (median 3.1 min) plus rebase, push and the
+  queue.
+
+The p90 over three hours (19 min) comes from changes that waited behind another land, or whose
+agent asked to land late (In Review to land asked: p90 11 min).
+
+The baseline's low median is misleading. That window includes the post-reboot catch-up, which
+landed waiting work without a gate (0.3 gates per land run). Changes that were gated locally waited
+behind 22-minute full suites, three at once, which gives the 69-minute p90.
+
+Against the done-when:
+- one full run per batch: met;
+- never two local full suites at once: met, since full suites now run only in CI;
+- median under 10 minutes: met in the last hour (9.6 min), but over three hours it was 10.9 min.
+
+The run had four agents, not the five or more the measurement asks for, and batches seldom held
+more than one change (mean 1.07, max 2). So the batching under load is not measured yet. Measure
+again during a run with five or more agents.
