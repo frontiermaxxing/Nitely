@@ -97,8 +97,43 @@ pub fn after_answer(accepted: bool, state: &str, blocking_left: usize, needs_app
 /// there already, or when the person accepted every blocking finding while the submit ran
 /// (`decided_meanwhile`): that acceptance moved it from the review as it now stands, and submit's
 /// own verdict, read before it, must not undo it (NIT-575).
-pub fn final_move<'a>(computed: &'a str, now_in: &str, decided_meanwhile: bool) -> Option<&'a str> {
-    (!decided_meanwhile && computed != now_in).then_some(computed)
+pub fn final_move<'a>(computed: &'a str, now_in: &str, meanwhile: Meanwhile) -> Option<&'a str> {
+    (meanwhile == Meanwhile::No && computed != now_in).then_some(computed)
+}
+
+/// Whether the person accepted a review's blocking findings while its submit ran.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Meanwhile {
+    No,
+    /// Every blocker is accepted, verified with the approval key.
+    Accepted,
+    /// Acceptances cover every blocker, but this machine cannot read the approval key to verify
+    /// them (macOS: only the app can): the person's decision stands, for the app to check.
+    Unverified,
+}
+
+/// What the person decided meanwhile, from the review's verdict (`changes`), whether the approval
+/// key can be read here, the blockers left unaccepted by verified acceptances, and whether the
+/// recorded acceptances, verified or not, cover every blocker. An unreadable key is never a
+/// revert: it cannot say the acceptance is false.
+pub fn meanwhile(changes: bool, key_readable: bool, unaccepted_verified: usize, recorded_cover_all: bool) -> Meanwhile {
+    match (changes, key_readable) {
+        (false, _) => Meanwhile::No,
+        (true, true) if unaccepted_verified == 0 => Meanwhile::Accepted,
+        (true, false) if recorded_cover_all => Meanwhile::Unverified,
+        _ => Meanwhile::No,
+    }
+}
+
+/// The state submit's own land goes by: its computed state, or, when the person's acceptance kept
+/// the issue where it is, that state (`now_in`). An acceptance this machine cannot verify lands
+/// nowhere here: the land would refuse it, so the app, which can check it, lands it.
+pub fn land_state<'a>(computed: &'a str, now_in: &'a str, meanwhile: Meanwhile) -> Option<&'a str> {
+    match meanwhile {
+        Meanwhile::No => Some(computed),
+        Meanwhile::Accepted => Some(now_in),
+        Meanwhile::Unverified => None,
+    }
 }
 
 /// The P0 and P1 findings the person has not accepted as they are, as `[P1] text`: what still
@@ -215,9 +250,24 @@ mod tests {
     /// NIT-575: an acceptance made while the submit ran stands.
     #[test]
     fn submit_never_undoes_an_acceptance_made_while_it_ran() {
-        assert_eq!(final_move("In Progress", "In Review", true), None, "accepted meanwhile: it stays where the acceptance put it");
-        assert_eq!(final_move("In Progress", "In Review", false), Some("In Progress"));
-        assert_eq!(final_move("In Review", "In Review", false), None, "already there");
+        assert_eq!(final_move("In Progress", "In Review", Meanwhile::Accepted), None, "accepted meanwhile: it stays where the acceptance put it");
+        assert_eq!(final_move("In Progress", "Needs You", Meanwhile::Unverified), None, "an acceptance it cannot verify stays too");
+        assert_eq!(final_move("In Progress", "In Review", Meanwhile::No), Some("In Progress"));
+        assert_eq!(final_move("In Review", "In Review", Meanwhile::No), None, "already there");
+    }
+
+    /// The person's acceptance during a submit is kept whether or not this machine can read the
+    /// approval key, and the submit's own land follows the state it kept (NIT-580 review).
+    #[test]
+    fn an_acceptance_made_during_a_submit_is_kept_and_lands_where_it_can_be_checked() {
+        assert_eq!(meanwhile(false, true, 0, true), Meanwhile::No, "a passing review decides nothing");
+        assert_eq!(meanwhile(true, true, 0, true), Meanwhile::Accepted);
+        assert_eq!(meanwhile(true, true, 1, true), Meanwhile::No, "one blocker left");
+        assert_eq!(meanwhile(true, false, 2, true), Meanwhile::Unverified, "unreadable key: kept, not reverted");
+        assert_eq!(meanwhile(true, false, 2, false), Meanwhile::No, "nothing recorded covers a blocker");
+        assert_eq!(land_state("In Progress", "In Review", Meanwhile::Accepted), Some("In Review"), "the kept state lands");
+        assert_eq!(land_state("In Progress", "Needs You", Meanwhile::Unverified), None, "the app lands what only it can check");
+        assert_eq!(land_state("In Review", "In Progress", Meanwhile::No), Some("In Review"));
     }
 
     fn finding(priority: u8, text: &str) -> Finding {

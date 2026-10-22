@@ -501,21 +501,32 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     let now_in = db.issue(&issue.key)?.map(|i| i.state).unwrap_or_else(|| issue.state.clone());
     // The person may have accepted its blocking findings while it was pushed (NIT-575): that
     // acceptance moved the issue itself, from the review as it now stands.
-    let decided_meanwhile = verdict == "changes"
-        && match db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()) {
-            Some(r) => db.review_passes(&issue.key, &r)?,
-            None => false,
-        };
+    // A machine that cannot read the approval key (macOS) cannot verify the acceptance, and keeps
+    // the person's decision rather than undoing it (NIT-580 review).
+    use crate::submit_rules::Meanwhile;
+    let meanwhile = match db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()) {
+        Some(r) if verdict == "changes" => {
+            let key_readable = crate::approval::trusted_key().is_ok();
+            let unaccepted = if key_readable { db.unaccepted_blockers(&issue.key, &r)?.len() } else { usize::MAX };
+            crate::submit_rules::meanwhile(true, key_readable, unaccepted, db.recorded_acceptances_cover(&issue.key, &r)?)
+        }
+        _ => Meanwhile::No,
+    };
     out.state = now_in.clone();
     out.next = next.into();
-    match crate::submit_rules::final_move(state, &now_in, decided_meanwhile) {
+    match crate::submit_rules::final_move(state, &now_in, meanwhile) {
         Some(to) if issue.origin == "nitely" => out.state = db.move_issue(&issue.key, to, None, None, actor)?.state,
-        _ if decided_meanwhile => out.next = format!("The person accepted the review's blocking findings while this submit ran, so it goes on as their acceptance moved it ({now_in})."),
+        _ if meanwhile == Meanwhile::Accepted => out.next = format!("The person accepted the review's blocking findings while this submit ran, so it goes on as their acceptance moved it ({now_in})."),
+        _ if meanwhile == Meanwhile::Unverified => {
+            out.next = format!("The person accepted the review's blocking findings while this submit ran. This machine cannot read the approval key to verify that, so it keeps their decision ({now_in}) and leaves the check and the land to the app.")
+        }
         _ => {}
     }
 
-    // In a project that lands by Nitely, what is ready to land lands now, in this submit. An
-    // approved change waits for the app where only the app can check approvals (macOS).
+    // In a project that lands by Nitely, what is ready to land lands now, in this submit, from the
+    // state it ended in (one the person's acceptance kept counts). An approved change waits for the
+    // app where only the app can check approvals (macOS).
+    let state = crate::submit_rules::land_state(state, &now_in, meanwhile).unwrap_or("");
     let app_lands = state == "Approved" && !crate::approval::agents_can_verify();
     if by_nitely && matches!(state, "In Review" | "Approved") && !app_lands {
         let root_dir = root.to_string_lossy().into_owned();
