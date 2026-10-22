@@ -94,7 +94,13 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
             Some(gb) => gb.branch,
             None => pb.integration_branch().to_string(),
         };
-        let ahead = branch_of(&root, &issue.key).ok().and_then(|(b, _)| git(&root, &["rev-list", "--count", &format!("{target}..{b}")]).ok()).map(|n| n.trim() != "0");
+        // Only a branch that is gone counts as nothing beyond; several that name it, or a git that
+        // cannot compare, is said, never taken for landed (NIT-580 review).
+        let ahead = match branch_of(&root, &issue.key) {
+            Ok((b, _)) => Some(git(&root, &["rev-list", "--count", &format!("{target}..{b}")])?.trim() != "0"),
+            Err(e) if branch_gone(&format!("{e:#}")) => None,
+            Err(e) => return Err(e.context(format!("{} is Done; land cannot tell whether its branch holds anything new", issue.key))),
+        };
         let event = db.timeline(&issue.key)?.into_iter().rev().find(|e| e.kind == "landed").and_then(|e| e.summary);
         if let Some(said) = already_landed(true, ahead, event.as_deref()) {
             let head = event.as_deref().and_then(|s| s.rsplit_once(" at ")).map(|(_, h)| h.trim().to_string()).filter(|h| h != "?");
@@ -1253,6 +1259,14 @@ fn check_item(pb: &Playbook, worktree: &Path, base: &str, gb: &crate::goal_branc
     Ok(format!("an item of goal {}: it is reviewed, and approved where a person must, with the goal's checkpoint into {}", gb.goal, pb.integration_branch()))
 }
 
+/// How `branch_of` says no branch names the issue: the one error that means it is gone.
+const NO_BRANCH: &str = "no local branch names";
+
+/// Whether a `branch_of` error says the branch is gone, not that it is ambiguous or unreadable.
+fn branch_gone(err: &str) -> bool {
+    err.starts_with(NO_BRANCH)
+}
+
 /// The issue's branch, and the worktree it is checked out in: the one the issue's worktree has,
 /// else the only local branch that names the issue.
 pub(crate) fn branch_of(root: &Path, key: &str) -> Result<(String, Option<PathBuf>)> {
@@ -1264,7 +1278,7 @@ pub(crate) fn branch_of(root: &Path, key: &str) -> Result<(String, Option<PathBu
             let branches: Vec<String> = git(root, &["branch", "--format=%(refname:short)"])?.lines().filter(|b| named(b)).map(str::to_string).collect();
             match branches.as_slice() {
                 [one] => one.clone(),
-                [] => bail!("no local branch names {key}"),
+                [] => bail!("{NO_BRANCH} {key}"),
                 many => bail!("several branches name {key}: {}", many.join(", ")),
             }
         }
@@ -1695,6 +1709,10 @@ mod tests {
         assert!(already_landed(true, None, None).is_some(), "a cleaned-up branch is landed too");
         assert_eq!(already_landed(true, Some(true), event), None, "new commits land");
         assert_eq!(already_landed(false, Some(false), event), None, "not Done: the land decides");
+        // Only a missing branch is gone; several naming the issue is an error to say (NIT-580 review).
+        assert!(branch_gone("no local branch names APP-7"));
+        assert!(!branch_gone("several branches name APP-7: claude/app-7-a, codex/app-7-b"));
+        assert!(!branch_gone("several worktrees have a branch that names APP-7"));
     }
 
     /// NIT-582: a background submit job starts in the task's worktree and lands it from there, and

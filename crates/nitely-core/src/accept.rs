@@ -227,6 +227,14 @@ impl Db {
 
     /// Whether `review` lets the change go on: it did not ask for changes, or every P0/P1 finding it
     /// asked them for is accepted by the person, signed for its patch.
+    /// Whether recorded acceptances for `review`'s patch, verified or not, cover each of its P0/P1
+    /// findings: what a machine that cannot read the approval key can still tell (NIT-580 review).
+    pub fn recorded_acceptances_cover(&self, key: &str, review: &ReviewRecord) -> Result<bool> {
+        let mut stmt = self.conn.prepare("SELECT finding FROM accepted_finding WHERE issue_key = ?1 COLLATE NOCASE AND patch_id = ?2")?;
+        let recorded: Vec<String> = stmt.query_map(rusqlite::params![key, review.patch_id], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+        Ok(review.findings.iter().filter(|f| f.priority <= 1).all(|f| recorded.contains(&f.text)))
+    }
+
     pub fn review_passes(&self, key: &str, review: &ReviewRecord) -> Result<bool> {
         Ok(review.verdict != "changes" || self.unaccepted_blockers(key, review)?.is_empty())
     }
