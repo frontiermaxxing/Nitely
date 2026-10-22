@@ -97,6 +97,57 @@ fn test_infrastructure(p: &str) -> bool {
         .any(|s| p.contains(s))
 }
 
+/// One file of a diff, for `small_verdict`: its changed lines (None for a binary file) and, for a
+/// new file, whether its directory already held files before the change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile { pub path: String, pub added: Option<usize>, pub removed: Option<usize>, pub added_file: bool, pub dir_existed: bool }
+
+/// Whether a change is small enough for the quick path, and why (NIT-622).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SmallVerdict { pub small: bool, pub reason: String }
+
+/// Decides `small` or `normal` from the diff alone: within the mode's quick limits, no binary
+/// file, no protected, human or blocked path (`protected` names the hit), and no new file outside
+/// a directory that already had files (the repo's root never counts). Without limits nothing is
+/// small.
+pub fn small_verdict(files: &[DiffFile], limits: Option<crate::project_modes::QuickLimits>, protected: impl Fn(&str) -> Result<Option<String>>) -> Result<SmallVerdict> {
+    let normal = |reason: String| Ok(SmallVerdict { small: false, reason });
+    let Some(limits) = limits else { return normal("The review mode has no quick limits.".into()) };
+    if files.is_empty() { return normal("The change has no files.".into()); }
+    if files.len() > limits.files as usize { return normal(format!("{} files, over the limit of {}.", files.len(), limits.files)); }
+    let mut lines = 0;
+    for f in files {
+        let (Some(a), Some(r)) = (f.added, f.removed) else { return normal(format!("{} is a binary file.", f.path)) };
+        lines += a + r;
+        if let Some(hit) = protected(&f.path)? { return normal(format!("{} is protected: {hit}.", f.path)); }
+        if f.added_file && (!f.path.contains('/') || !f.dir_existed) { return normal(format!("{} is a new file outside an existing directory.", f.path)); }
+    }
+    if lines > limits.lines as usize { return normal(format!("{lines} changed lines, over the limit of {}.", limits.lines)); }
+    Ok(SmallVerdict { small: true, reason: format!("{lines} changed line{} in {} file{}.", if lines == 1 { "" } else { "s" }, files.len(), if files.len() == 1 { "" } else { "s" }) })
+}
+
+/// `small_verdict` for the change from `base` to `head`, against the integration branch's
+/// committed playbook (never the candidate's) and its protected, human and blocked paths.
+pub fn small_change(repo: &Path, base: &str, head: &str, limits: Option<crate::project_modes::QuickLimits>) -> Result<SmallVerdict> {
+    let pb = Playbook::parse(&blob(repo, base, PLAYBOOK_PATH).unwrap_or_default())?;
+    let base = git(repo, &["merge-base", base, head])?.trim().to_string();
+    let mut files = Vec::new();
+    for row in git(repo, &["diff", "--numstat", "--no-renames", "--no-ext-diff", &base, head, "--"])?.lines().filter(|l| !l.is_empty()) {
+        let mut cells = row.splitn(3, '\t');
+        let (a, r, path) = (cells.next().unwrap_or("-"), cells.next().unwrap_or("-"), cells.next().unwrap_or("").to_string());
+        files.push(DiffFile { path, added: a.parse().ok(), removed: r.parse().ok(), added_file: false, dir_existed: true });
+    }
+    for path in git(repo, &["diff", "--name-only", "--diff-filter=A", "--no-renames", &base, head, "--"])?.lines().filter(|l| !l.is_empty()) {
+        let dir = path.rsplit_once('/').map(|(d, _)| d);
+        let existed = dir.is_some_and(|d| git(repo, &["rev-parse", "--verify", "-q", &format!("{base}:{d}^{{tree}}")]).is_ok());
+        if let Some(f) = files.iter_mut().find(|f| f.path == path) { f.added_file = true; f.dir_existed = existed; }
+    }
+    small_verdict(&files, limits, |path| {
+        if let Some(hit) = pb.approval.protected_hit(&[path.to_string()])? { return Ok(Some(hit)); }
+        Ok((built_in_protected(path) || matches(&pb.verification.protected, path)?).then(|| "a protected path".to_string()))
+    })
+}
+
 fn ordinary_comment(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
     !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("/**") && !t.starts_with("/*!")
@@ -536,6 +587,24 @@ pub fn recent(db: &Db, key: &str) -> Result<Vec<Plan>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// NIT-622: what makes a change small, as pure cases over the diff.
+    #[test]
+    fn a_change_is_small_only_within_the_limits_and_off_protected_paths() {
+        use crate::project_modes::QuickLimits;
+        let file = |path: &str, lines: usize| DiffFile { path: path.into(), added: Some(lines), removed: Some(0), added_file: false, dir_existed: true };
+        let verdict = |files: &[DiffFile]| small_verdict(files, Some(QuickLimits::default()), |p: &str| Ok(p.starts_with("src/billing/").then(|| "money".to_string()))).unwrap();
+        assert!(verdict(&[file("scripts/build.mjs", 20), file("docs/build.md", 10)]).small, "30 lines in 2 files");
+        let over = verdict(&[file("scripts/build.mjs", 21), file("docs/build.md", 10)]);
+        assert!(!over.small && over.reason.contains("31 changed lines"), "{over:?}");
+        assert!(!verdict(&[file("a/x.rs", 1), file("a/y.rs", 1), file("a/z.rs", 1)]).small, "three files");
+        let paid = verdict(&[file("src/billing/pay.ts", 2)]);
+        assert!(!paid.small && paid.reason.contains("money"), "{paid:?}");
+        assert!(!verdict(&[DiffFile { added_file: true, ..file("notes.txt", 3) }]).small, "a new top-level file");
+        assert!(!verdict(&[DiffFile { added_file: true, dir_existed: false, ..file("tools/new/x.mjs", 3) }]).small, "a new directory");
+        assert!(verdict(&[DiffFile { added_file: true, ..file("scripts/extra.mjs", 3) }]).small, "a new file beside others");
+        assert!(!verdict(&[DiffFile { added: None, removed: None, ..file("src-tauri/icons/icon.png", 0) }]).small, "a binary file");
+        assert!(!small_verdict(&[file("scripts/build.mjs", 1)], None, |_: &str| Ok(None)).unwrap().small, "Release has no quick limits");
+    }
     fn rules() -> Rules { Rules { mode: "shadow".into(), version: 1, prose: vec!["docs/.*\\.md".into()], comments: vec!["src/.*".into()], display_copy: vec!["src/.*\\.tsx".into()], ..Default::default() } }
     #[test]
     fn comments_preserve_code_directives_strings_and_doc_tests() {
