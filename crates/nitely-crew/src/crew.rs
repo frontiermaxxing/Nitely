@@ -1437,7 +1437,7 @@ impl Supervisor {
 /// The brief every worker gets on stdin.
 pub fn brief(issue: &IssueRecord, project: &str, worktree: &Path, branch: &str, repo: &Path, port: Option<u16>) -> String {
     if issue.labels.iter().any(|l| l == nitely_core::test_sweep::LABEL) {
-        return format!("Read-only test sweep for [{}]({}) in {}. Worktree: {}.\n{}", issue.key, issue.url, project, worktree.display(), nitely_core::test_sweep::GUIDE);
+        return format!("Report-only test health check for [{}]({}) in {}: report what the evidence shows and propose nothing on your own. Worktree: {}.\n{}", issue.key, issue.url, project, worktree.display(), nitely_core::test_sweep::GUIDE);
     }
     if nitely_core::goal_plans::is_planning(issue) {
         return planner_brief(issue, project, worktree, repo);

@@ -138,6 +138,20 @@ pub fn parse(log: &str) -> Timings {
             out.suites.push(SuiteTime { suite: "node".into(), seconds: c[1].parse::<f64>().unwrap_or(0.0) / 1000.0 });
         }
     }
+    // pytest with --durations and `go test -v` print each test's time too (NIT-567).
+    let plain: String = log.lines().map(plain_line).collect::<Vec<_>>().join("\n");
+    for format in crate::test_evidence::detect(&plain) {
+        let (suite, run) = match format {
+            crate::test_evidence::Format::Pytest => ("pytest", crate::test_evidence::pytest(&plain)),
+            crate::test_evidence::Format::Gotest => ("go", crate::test_evidence::gotest(&plain)),
+            _ => continue,
+        };
+        for t in run.tests {
+            if let Some(seconds) = t.seconds {
+                out.tests.push(TestTime { suite: suite.into(), name: t.id, seconds });
+            }
+        }
+    }
     out
 }
 
@@ -326,6 +340,21 @@ pub fn run_test_binary(args: &[OsString]) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// pytest with --durations and `go test -v` give gates their per-test times too.
+    #[test]
+    fn reads_pytest_and_go_times() {
+        let py = "t.py::test_a PASSED [100%]
+==== slowest durations ====
+3.50s call     t.py::test_a
+==== 1 passed in 3.6s ====
+";
+        let go = "=== RUN   TestSlow
+--- PASS: TestSlow (2.50s)
+";
+        let got: Vec<(String, f64)> = parse(&format!("{py}{go}")).tests.into_iter().map(|t| (t.name, t.seconds)).collect();
+        assert_eq!(got, [("t.py::test_a".to_string(), 3.5), ("TestSlow".into(), 2.5)]);
+    }
 
     #[test]
     fn reads_cargo_and_node_times_from_a_lane_log_and_a_ci_log() {
