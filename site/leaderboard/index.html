@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#141413">
   <link rel="icon" href="../assets/icon.svg" type="image/svg+xml">
   <link rel="preload" href="../assets/geist.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../styles.css?v=2">
+  <link rel="stylesheet" href="../styles.css?v=3">
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-E79GE90HZG"></script>
   <script>
     window.dataLayer = window.dataLayer || [];
@@ -167,6 +167,45 @@
     return box;
   }
 
+  // The picture is only a choice of link (NIT-630): its address is built here from the handle, it
+  // loads straight from that site without a referrer, and initials stand in without one or on error.
+  function pictureUrl(e) {
+    var l = e.links || {}, h;
+    if (e.avatar === "github" && typeof l.github === "string") {
+      h = l.github.replace(/^https:\/\/github\.com\//, "");
+      return /^[A-Za-z0-9-]{1,39}$/.test(h) ? "https://github.com/" + h + ".png?size=96" : null;
+    }
+    if (e.avatar === "x" && typeof l.x === "string") {
+      h = l.x.replace(/^https:\/\/x\.com\//, "");
+      return /^[A-Za-z0-9_]{1,15}$/.test(h) ? "https://unavatar.io/x/" + h + "?fallback=false" : null;
+    }
+    return null;
+  }
+
+  function initials(name) {
+    var w = String(name || "").trim().split(/\s+/).filter(Boolean);
+    if (w.length > 1) w = [w[0], w[w.length - 1]];
+    return w.map(function (x) { return Array.from(x)[0] || ""; }).join("").toUpperCase();
+  }
+
+  function avatar(e, size) {
+    var fallback = el("span", "avatar initials", initials(e.display_name));
+    fallback.setAttribute("aria-hidden", "true");
+    fallback.style.width = fallback.style.height = size + "px";
+    fallback.style.fontSize = Math.round(size * 0.4) + "px";
+    var url = pictureUrl(e);
+    if (!url) return fallback;
+    var img = el("img", "avatar");
+    img.alt = "";
+    img.width = img.height = size;
+    img.referrerPolicy = "no-referrer";
+    img.loading = "lazy";
+    img.decoding = "async";
+    img.addEventListener("error", function () { if (img.parentNode) img.parentNode.replaceChild(fallback, img); });
+    img.src = url;
+    return img;
+  }
+
   function links(e) {
     var l = e.links || {};
     var box = el("div", "lb-links");
@@ -236,6 +275,7 @@
       var card = el("section", "lb-card");
       var head = el("div", "lb-card-head");
       head.appendChild(el("span", "rank" + (i === 0 ? " first" : ""), String(i + 1)));
+      head.appendChild(avatar(e, 28));
       head.appendChild(el("span", "name", e.display_name));
       head.appendChild(crew(e));
       card.appendChild(head);
@@ -263,7 +303,10 @@
     r.rows.slice(0, SHOWN).forEach(function (e, i) {
       var tr = el("tr");
       tr.appendChild(el("td", "num quiet", String(i + 1)));
-      tr.appendChild(el("td", "name", e.display_name));
+      var name = el("td", "name");
+      name.appendChild(avatar(e, 22));
+      name.appendChild(document.createTextNode(e.display_name));
+      tr.appendChild(name);
       var c = el("td"); c.appendChild(crew(e)); tr.appendChild(c);
       ["landed", "first_pass", "lead", "hours", "tokens", "reply"].forEach(function (k) {
         tr.appendChild(el("td", "num" + (k === r.m.key ? " sorted" : " quiet"), valueOf(e, k)));

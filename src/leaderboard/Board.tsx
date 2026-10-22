@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { invoke } from "../backend";
 import { AgentMark, Button, EmptyState, Loading, Sparkline } from "../ui";
 import { openExternal } from "../util";
+import { Avatar, type AvatarChoice } from "./Avatar";
 import type { Profile } from "./profile";
 import { compact, duration, hours, percent, type PeriodKey } from "./stats";
 
@@ -19,6 +20,8 @@ export interface BoardEntry {
   id: string;
   display_name: string;
   links: { github?: string; x?: string; website?: string };
+  /** Which link gives the picture; the page builds its address (NIT-630). */
+  avatar?: AvatarChoice;
   projects: number;
   week: string;
   landed: number;
@@ -152,6 +155,7 @@ export function Board(props: { period: PeriodKey; profile: Profile | null; onEdi
           <section key={e.id} className={`lb-card lb-podium-card${e.id === mine ? " lb-me" : ""}`}>
             <div className="lb-podium-head">
               <span className={`lb-rank-badge${i === 0 ? " lb-first" : ""}`}>{i + 1}</span>
+              <Avatar name={e.display_name} choice={e.avatar} links={e.links ?? {}} size={28} />
               <span className="lb-podium-name">{e.display_name}</span>
               <Crew entry={e} />
             </div>
@@ -240,6 +244,7 @@ function Row(props: { entry: BoardEntry; rank: number; me: boolean; onEdit: () =
     <tr className={props.me ? "lb-me" : undefined}>
       <td className="lb-num lb-quiet">{props.rank}</td>
       <td className="lb-row-name">
+        <Avatar name={e.display_name} choice={e.avatar} links={e.links ?? {}} size={22} />
         {props.me ? (
           <button className="link lb-me-name" onClick={props.onEdit} title="Edit your leaderboard profile">
             {e.display_name}

@@ -33,6 +33,8 @@ pub struct Profile {
     pub x: Option<String>,
     /// An https address.
     pub website: Option<String>,
+    /// The picture the board shows (NIT-630): `github` or `x`, from that link's handle, or none.
+    pub avatar: Option<String>,
 }
 
 /// The shared report.
@@ -42,6 +44,11 @@ pub struct Report {
     pub schema: u32,
     pub display_name: String,
     pub links: Links,
+    /// Which of the links gives the person's picture: `github` or `x` (NIT-630). Only the choice:
+    /// pages build the image's address from the handle when they render, and nothing stores an
+    /// image. Absent when none is chosen, so such a report is the same as before it existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     /// The ISO week of the person's this week, like `2026-W43`.
     pub week: String,
     /// How many projects count.
@@ -130,6 +137,7 @@ pub fn build(board: &Leaderboard, projects: u64, profile: &Profile) -> Result<Re
         schema: SCHEMA,
         display_name: display_name(&profile.display_name)?,
         links: links(profile)?,
+        avatar: avatar(profile, &links(profile)?)?,
         week: iso_week(this_week),
         projects,
         periods: board.periods.iter().map(period).collect(),
@@ -153,7 +161,18 @@ pub fn report_now(config: &nitely_core::Config, db: &nitely_core::db::Db, projec
 /// Why `profile` can't be shared as it is, if it can't.
 pub fn check_profile(profile: &Profile) -> Result<()> {
     display_name(&profile.display_name)?;
-    links(profile).map(|_| ())
+    avatar(profile, &links(profile)?).map(|_| ())
+}
+
+/// The picture choice: none, or a link the profile gives (`github` or `x`).
+fn avatar(p: &Profile, links: &Links) -> Result<Option<String>> {
+    match p.avatar.as_deref().map(str::trim).filter(|a| !a.is_empty() && *a != "none") {
+        None => Ok(None),
+        Some("github") if links.github.is_some() => Ok(Some("github".into())),
+        Some("x") if links.x.is_some() => Ok(Some("x".into())),
+        Some("github" | "x") => bail!("the picture comes from the link it names: add that link, or choose no picture"),
+        Some(_) => bail!("the picture is from GitHub, from X, or none"),
+    }
 }
 
 fn period(p: &PeriodStats) -> Period {
@@ -269,7 +288,7 @@ mod tests {
     const DAY: i64 = 86_400;
 
     fn profile() -> Profile {
-        Profile { display_name: "Night Owl".into(), github: Some("octocat".into()), x: Some("@octo_cat".into()), website: Some("https://example.com/me".into()) }
+        Profile { display_name: "Night Owl".into(), github: Some("octocat".into()), x: Some("@octo_cat".into()), website: Some("https://example.com/me".into()), avatar: None }
     }
 
     /// A database full of distinctive names, paths and text: none of it reaches the report, only
@@ -396,5 +415,14 @@ mod tests {
         assert!(with(|p| p.website = Some("https://user@example.com".into())).is_err());
         assert!(with(|p| p.website = Some("https://example.com/a b".into())).is_err());
         assert!(with(|p| p.github = Some("https://github.com/octocat/".into())).is_ok());
+        // The picture is a choice of a link the profile gives, never an address or an image.
+        assert!(with(|p| p.avatar = Some("github".into())).is_ok());
+        assert!(with(|p| p.avatar = Some("none".into())).is_ok());
+        assert!(with(|p| p.avatar = Some("https://example.com/me.png".into())).is_err());
+        assert!(with(|p| {
+            p.avatar = Some("x".into());
+            p.x = None;
+        })
+        .is_err());
     }
 }

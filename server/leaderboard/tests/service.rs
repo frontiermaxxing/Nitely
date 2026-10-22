@@ -9,7 +9,7 @@ use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use nitely_crew::leaderboard_report::{self, Profile};
 use nitely_crew::leaderboard_send::{self, Sharing};
-use nitely_leaderboard::{handle, Request, Store};
+use nitely_leaderboard::{check, handle, Request, Store};
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -79,6 +79,29 @@ fn join_send_view_and_leave_against_a_local_instance() {
     assert_eq!(names, ["Early Bird"]);
     assert_eq!(me.status(now()).unwrap().id, None);
     assert!(me.send_report(&report("Night Owl")).is_err(), "nothing goes out after leaving");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// The picture is only the choice of a link the report gives, which the board passes on (NIT-630).
+#[test]
+fn the_picture_is_the_choice_of_a_given_link() {
+    let server = |r: &leaderboard_report::Report| -> nitely_leaderboard::Report { serde_json::from_value(serde_json::to_value(r).unwrap()).unwrap() };
+    let mut r = report("Night Owl");
+    assert!(serde_json::to_string(&r).unwrap().find("avatar").is_none(), "no choice, no field: the report is as before");
+    r.avatar = Some("github".into());
+    assert_eq!(check(&server(&r), now()), Ok(()));
+    r.avatar = Some("x".into());
+    assert!(check(&server(&r), now()).is_err(), "no X link to take it from");
+    r.avatar = Some("https://example.com/me.png".into());
+    assert!(check(&server(&r), now()).is_err(), "never an address");
+
+    let dir = nitely_core::paths::unique_temp("nitely-lb-avatar", "");
+    let store = store(&dir);
+    r.avatar = Some("github".into());
+    store.put("key-1", &server(&r), now()).unwrap();
+    store.rebuild(now()).unwrap();
+    let board: serde_json::Value = serde_json::from_str(&store.board("week").unwrap().unwrap()).unwrap();
+    assert_eq!(board["entries"][0]["avatar"], "github");
     std::fs::remove_dir_all(dir).ok();
 }
 

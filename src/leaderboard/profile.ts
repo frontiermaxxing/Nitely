@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "../backend";
+import type { AvatarChoice } from "./Avatar";
 
 // Your leaderboard profile: whether you joined, the name the board shows, your public links and
 // the projects that count. It lives in Nitely's data folder (crates/nitely-core/src/leaderboard_send.rs),
@@ -13,6 +14,8 @@ export interface Profile {
   github: string | null;
   x: string | null;
   website: string | null;
+  /** Which link gives the board your picture, if any: only the choice is kept and sent. */
+  avatar: AvatarChoice | null;
   /** The projects that count (their keys); empty counts every project. */
   projects: string[];
   /** The ISO week of the last report the service took, if one was sent. */
@@ -26,7 +29,7 @@ export interface Profile {
 /** `leaderboard_status`, as much of it as the page reads. */
 interface Status {
   joined: boolean;
-  profile: { display_name: string; github?: string | null; x?: string | null; website?: string | null };
+  profile: { display_name: string; github?: string | null; x?: string | null; website?: string | null; avatar?: AvatarChoice | null };
   projects: string[];
   last_sent_week?: string | null;
   last_error?: string | null;
@@ -36,7 +39,7 @@ interface Status {
 function profileOf(s: Status): Profile | null {
   if (!s.joined) return null;
   const p = s.profile;
-  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null, last_error: s.last_error ?? null, id: s.id ?? null };
+  return { display_name: p.display_name, github: p.github ?? null, x: p.x ?? null, website: p.website ?? null, avatar: p.avatar ?? null, projects: s.projects, last_sent_week: s.last_sent_week ?? null, last_error: s.last_error ?? null, id: s.id ?? null };
 }
 
 // One copy for the whole app (the sidebar's tag and the page read the same), undefined until read.
@@ -90,7 +93,10 @@ export function useProfile(): Profile | null | undefined {
 }
 
 /** Joins, or saves changed choices. Sends nothing; refuses a name or link the report would refuse. */
-export async function join(profile: { display_name: string; github: string | null; x: string | null; website: string | null }, projects: string[]): Promise<Profile | null> {
+export async function join(
+  profile: { display_name: string; github: string | null; x: string | null; website: string | null; avatar?: AvatarChoice | null },
+  projects: string[],
+): Promise<Profile | null> {
   const s = await invoke<Status>("leaderboard_join", { profile, projects });
   const p = profileOf(s);
   changed(p);

@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "../backend";
 import type { Project } from "../types";
-import { Button, Checkbox, RemoveButton, Switch, TextField } from "../ui";
+import { Button, Checkbox, RemoveButton, Segmented, Switch, TextField } from "../ui";
+import { Avatar, type AvatarChoice } from "./Avatar";
 import { Json, LinkField, fieldOf, type Field } from "./OptIn";
 import { join, leave, sendNow, sharing, stopSharing, type Profile } from "./profile";
 
@@ -15,16 +16,20 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
   const [github, setGithub] = useState(p.github ?? "");
   const [x, setX] = useState(p.x ?? "");
   const [website, setWebsite] = useState(p.website ?? "");
+  const [avatar, setAvatar] = useState<AvatarChoice | "none">(p.avatar ?? "none");
   // Empty means every project; otherwise the keys that count.
   const all = props.projects.map((q) => q.key);
   const [counted, setCounted] = useState<string[]>(p.projects.length ? p.projects.filter((k) => all.includes(k)) : all);
   const projects = counted.length === all.length ? [] : counted;
-  const edited = { display_name: name.trim(), github: github.trim() || null, x: x.trim() || null, website: website.trim() || null };
+  // A picture from a link that is now empty means none.
+  const picture: AvatarChoice | null = avatar === "github" ? (github.trim() ? "github" : null) : avatar === "x" ? (x.trim() ? "x" : null) : null;
+  const edited = { display_name: name.trim(), github: github.trim() || null, x: x.trim() || null, website: website.trim() || null, avatar: picture };
   const changed =
     edited.display_name !== p.display_name ||
     edited.github !== (p.github ?? null) ||
     edited.x !== (p.x ?? null) ||
     edited.website !== (p.website ?? null) ||
+    edited.avatar !== (p.avatar ?? null) ||
     projects.join(",") !== p.projects.join(",") ||
     // No project chosen is not "every project" (the empty list's meaning): it can't be saved or shared.
     counted.length === 0;
@@ -125,6 +130,30 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
               <LinkField label="X" prefix="@" value={x} onChange={setX} placeholder="handle" error={errorFor("x")} clearable />
               <LinkField label="Website" value={website} onChange={setWebsite} placeholder="https://example.com" error={errorFor("website")} clearable />
               <span className="lb-sub">Shown on your row and card. Nitely only keeps the link; it never signs in to these sites.</span>
+            </div>
+          </div>
+          <div className="lb-dialog-row lb-form-top">
+            <span className="lb-form-label">Picture</span>
+            <div className="lb-picture-form">
+              <Avatar name={edited.display_name || "?"} choice={picture} links={{ github: edited.github, x: edited.x }} size={36} />
+              <div className="lb-picture-choice">
+                <Segmented<AvatarChoice | "none">
+                  aria-label="Picture"
+                  value={picture ?? "none"}
+                  onChange={setAvatar}
+                  options={[
+                    { value: "none", label: "Initials" },
+                    { value: "github", label: "GitHub", disabled: !github.trim() },
+                    { value: "x", label: "X", disabled: !x.trim() },
+                  ]}
+                />
+                <span className="lb-sub">
+                  {picture === "x"
+                    ? "Loaded from unavatar.io, a public avatar service, since X has no public picture address. Nitely keeps only the choice."
+                    : "Loaded from that site when the board shows. Nitely keeps only the choice, never the image."}
+                </span>
+                {errorFor("avatar") && <span className="ui-field-error">{errorFor("avatar")}</span>}
+              </div>
             </div>
           </div>
           <div className="lb-dialog-row">

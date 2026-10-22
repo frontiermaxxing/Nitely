@@ -311,6 +311,7 @@ mod tests {
             schema: 1,
             display_name: "x".into(),
             links: Default::default(),
+            avatar: None,
             week: "2026-W42".into(),
             projects: 0,
             periods: vec![],
@@ -396,6 +397,7 @@ Connection: close
             schema: 1,
             display_name: "x".into(),
             links: Default::default(),
+            avatar: None,
             week: "2026-W43".into(),
             projects: 0,
             periods: vec![],
@@ -412,7 +414,7 @@ Connection: close
         assert_eq!(service.connections(), 0, "before joining");
 
         // Joining and changing the profile: still nothing, and no weekly send before one by hand.
-        let profile = Profile { display_name: "Night Owl".into(), github: Some("octocat".into()), x: None, website: None };
+        let profile = Profile { display_name: "Night Owl".into(), github: Some("octocat".into()), x: None, website: None, avatar: None };
         sharing.join(&profile, &[], Some(&service.url)).unwrap();
         sharing.join(&Profile { display_name: "Owl".into(), ..profile.clone() }, &["NIT".into()], None).unwrap();
         assert!(sharing.status(1_792_000_000).unwrap().state.joined);

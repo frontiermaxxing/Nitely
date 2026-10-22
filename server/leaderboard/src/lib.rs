@@ -54,6 +54,10 @@ pub struct Report {
     pub schema: u32,
     pub display_name: String,
     pub links: Links,
+    /// `github` or `x`: which link gives the picture (NIT-630). Pages build its address from the
+    /// handle; nothing here stores or fetches an image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     pub week: String,
     pub projects: u64,
     pub periods: Vec<Period>,
@@ -148,6 +152,12 @@ pub fn check(r: &Report, now: i64) -> std::result::Result<(), String> {
         })
     {
         return Err("links: a GitHub or X user name and an https website".into());
+    }
+    match r.avatar.as_deref() {
+        None => {}
+        Some("github") if r.links.github.is_some() => {}
+        Some("x") if r.links.x.is_some() => {}
+        _ => return Err("avatar: github or x, with that link given".into()),
     }
     let this = week_of(now);
     if !valid_week(&r.week) || r.week.as_str() > week_of(now + 86_400).as_str() || r.week.as_str() < week_of(now - 8 * 86_400).as_str() {
@@ -325,6 +335,9 @@ fn entry(key: &str, r: &Report, period: &str) -> Option<Value> {
     o.insert("id".into(), json!(key));
     o.insert("display_name".into(), json!(r.display_name));
     o.insert("links".into(), serde_json::to_value(&r.links).ok()?);
+    if let Some(a) = &r.avatar {
+        o.insert("avatar".into(), json!(a));
+    }
     o.insert("projects".into(), json!(r.projects));
     o.insert("week".into(), json!(r.week));
     o.insert("weekly".into(), json!(r.weekly));

@@ -31,11 +31,12 @@ const NEVER = [
   "Your time zone, and which days and hours you worked",
 ];
 
-export type Field = "name" | "github" | "x" | "website";
+export type Field = "name" | "github" | "x" | "website" | "avatar";
 
 /** Which field a refusal from the report builder is about. */
 export function fieldOf(error: string): Field | null {
   if (/display name/i.test(error)) return "name";
+  if (/\bpicture\b/.test(error)) return "avatar";
   if (/github/i.test(error)) return "github";
   if (/\bX link\b/.test(error)) return "x";
   if (/website/i.test(error)) return "website";
