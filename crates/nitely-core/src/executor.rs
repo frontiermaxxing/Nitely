@@ -1515,10 +1515,22 @@ fn suite_result(view: &serde_json::Value, commands: &[String]) -> Option<(bool, 
     Some((passed, results))
 }
 
-/// The setup step a failed CI job stopped in, before its command's own step ran (NIT-641): the
-/// last step named `Run` or `Run ...` (the suite job's command), with an earlier step that failed,
-/// timed out or was cancelled. None when the command's step itself failed, or the job lists no
-/// steps to tell by.
+/// The steps of the suite job that set up the machine and never depend on the change: a step
+/// failing there is the runner's, not the tree's (NIT-641).
+const MACHINE_STEPS: &[&str] = &["Set up job", "The exact tree", "Linux prerequisites cache", "Linux prerequisites", "Rust toolchain", "Git identity"];
+
+/// Whether a CI step only sets up the machine: one of `MACHINE_STEPS`, or an action the workflow
+/// uses (`Run actions/checkout@v5`, `Run Swatinem/rust-cache@v2`). A step that runs a command on
+/// the tree (`Run npm ci`, `Run npm run build`) is the change's: a broken lockfile or build fails
+/// there, and that is a real failure.
+fn machine_step(name: &str) -> bool {
+    MACHINE_STEPS.contains(&name) || name.strip_prefix("Run ").is_some_and(|a| !a.contains(' ') && a.contains('@') && a.contains('/'))
+}
+
+/// The machine step a failed CI job stopped in, before its command's own step ran (NIT-641): the
+/// last step named `Run` or `Run ...` is the command's, and the first step before it that failed,
+/// timed out or was cancelled is a machine step. None when the command's step failed, a step that
+/// works on the tree (npm ci, a build) failed, or the job lists no steps to tell by.
 pub fn setup_failure(job: &serde_json::Value) -> Option<String> {
     let steps = job["steps"].as_array()?;
     let name = |s: &serde_json::Value| s["name"].as_str().unwrap_or_default().to_string();
@@ -1530,7 +1542,7 @@ pub fn setup_failure(job: &serde_json::Value) -> Option<String> {
     if stopped(&steps[command]) {
         return None;
     }
-    steps[..command].iter().find(|s| stopped(s)).map(name)
+    steps[..command].iter().find(|s| stopped(s)).map(name).filter(|n| machine_step(n))
 }
 
 fn evidence(pending: &Pending, view: &serde_json::Value, (passed, jobs): (bool, Vec<Job>)) -> SuiteEvidence {
@@ -1852,6 +1864,15 @@ mod tests {
         assert_eq!(setup_failure(&job("npm test", "timed_out", "skipped")).as_deref(), Some("Linux prerequisites"));
         assert_eq!(setup_failure(&job("npm test", "success", "failure")), None, "the command ran and failed: the change's");
         assert_eq!(setup_failure(&serde_json::json!({"conclusion": "failure"})), None, "no steps to tell by: as before");
+        // A step that works on the tree fails because of the tree: npm ci on a broken lockfile, a
+        // build that does not compile. That is the change's failure (NIT-641 review).
+        let mut broken = job("npm test", "success", "skipped");
+        broken["steps"][5]["conclusion"] = "failure".into();
+        assert_eq!(broken["steps"][5]["name"], "Run npm ci");
+        assert_eq!(setup_failure(&broken), None);
+        let mut checkout = job("npm test", "success", "skipped");
+        checkout["steps"][1]["conclusion"] = "failure".into();
+        assert_eq!(setup_failure(&checkout).as_deref(), Some("Run actions/checkout@v5"), "an action the workflow uses is the machine's");
 
         let commands = vec!["npm test".to_string(), "cargo clippy".to_string()];
         let view = serde_json::json!({"status": "completed", "conclusion": "failure", "url": "u", "jobs": [job("npm test", "failure", "skipped"), job("cargo clippy", "failure", "skipped")]});
