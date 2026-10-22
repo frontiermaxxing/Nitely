@@ -9,7 +9,7 @@
   <meta name="theme-color" content="#141413">
   <link rel="icon" href="../assets/icon.svg" type="image/svg+xml">
   <link rel="preload" href="../assets/geist.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="../styles.css?v=3">
+  <link rel="stylesheet" href="../styles.css?v=4">
   <script async src="https://www.googletagmanager.com/gtag/js?id=G-E79GE90HZG"></script>
   <script>
     window.dataLayer = window.dataLayer || [];
@@ -274,10 +274,14 @@
     r.rows.slice(0, 3).forEach(function (e, i) {
       var card = el("section", "lb-card");
       var head = el("div", "lb-card-head");
-      head.appendChild(el("span", "rank" + (i === 0 ? " first" : ""), String(i + 1)));
-      head.appendChild(avatar(e, 28));
-      head.appendChild(el("span", "name", e.display_name));
-      head.appendChild(crew(e));
+      head.appendChild(avatar(e, 40));
+      var who = el("div", "who");
+      who.appendChild(el("span", "name", e.display_name));
+      who.appendChild(crew(e));
+      head.appendChild(who);
+      var rank = el("span", "rank" + (i === 0 ? " first" : ""), String(i + 1));
+      rank.setAttribute("aria-label", "Rank " + (i + 1));
+      head.appendChild(rank);
       card.appendChild(head);
       var fig = el("div", "lb-figure");
       fig.appendChild(el("span", "big", valueOf(e, r.m.key)));
@@ -285,7 +289,7 @@
       card.appendChild(fig);
       card.appendChild(bars(e.weekly));
       var meta = el("div", "lb-meta");
-      meta.appendChild(el("span", "", hours(num(e.agent_hours) || 0) + " agent hours"));
+      var h = el("span", "", hours(num(e.agent_hours) || 0) + " h"); h.title = "Agent hours"; meta.appendChild(h);
       meta.appendChild(el("span", "", compact(num(e.tokens) || 0) + " tokens"));
       meta.appendChild(el("span", "", percent(num(e.first_pass_rate)) + " first pass"));
       card.appendChild(meta);

@@ -157,18 +157,22 @@ export function Board(props: { period: PeriodKey; profile: Profile | null; onEdi
         {rows.slice(0, 3).map((e, i) => (
           <section key={e.id} className={`lb-card lb-podium-card${e.id === mine ? " lb-me" : ""}`}>
             <div className="lb-podium-head">
-              <span className={`lb-rank-badge${i === 0 ? " lb-first" : ""}`}>{i + 1}</span>
-              <Avatar name={e.display_name} choice={e.avatar} links={e.links ?? {}} size={28} />
-              <span className="lb-podium-name">{e.display_name}</span>
-              <Crew entry={e} />
+              <Avatar name={e.display_name} choice={e.avatar} links={e.links ?? {}} size={40} />
+              <div className="lb-podium-who">
+                <span className="lb-podium-name">{e.display_name}</span>
+                <Crew entry={e} />
+              </div>
+              <span className={`lb-rank-badge${i === 0 ? " lb-first" : ""}`} aria-label={`Rank ${i + 1}`}>
+                {i + 1}
+              </span>
             </div>
             <div className="lb-podium-figure">
               <span className="lb-figure">{valueOf(e, metric)}</span>
               <span className="lb-unit">{m.label.toLowerCase()}</span>
             </div>
-            <Sparkline kind="bars" values={e.weekly.slice(-WEEKS)} width={180} height={28} color="var(--fg-3)" label={`Landed per week, the last ${WEEKS} weeks: ${e.weekly.slice(-WEEKS).join(", ")}`} />
+            <Sparkline fill kind="bars" values={e.weekly.slice(-WEEKS)} width={240} height={32} color="var(--fg-3)" label={`Landed per week, the last ${WEEKS} weeks: ${e.weekly.slice(-WEEKS).join(", ")}`} />
             <div className="lb-podium-meta">
-              <span>{hours(e.agent_hours)} agent hours</span>
+              <span title="Agent hours">{hours(e.agent_hours)} h</span>
               <span>{compact(e.tokens)} tokens</span>
               <span>{percent(e.first_pass_rate)} first pass</span>
             </div>

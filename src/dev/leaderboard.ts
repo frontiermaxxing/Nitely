@@ -204,7 +204,8 @@ const BOARD_NAMES = ["nightshift", "kestrel", "mergequeen", "tidepool", "paperpl
 
 /**
  * The preview's public board, in board.json's shape (server/leaderboard/README.md). With
- * `?leaderboard=sharing` your own row is on it; `?board=fail` makes the fetch fail.
+ * `?leaderboard=sharing` your own row is on it; `?board=fail` makes the fetch fail;
+ * `?people=1` (or any count) keeps that many people, to check a short board.
  */
 export function leaderboardBoardFixture(args: Record<string, unknown>) {
   if (new URLSearchParams(location.search).get("board") === "fail") throw "reaching the Leaderboard at https://api.nitely.net: connection refused";
@@ -239,6 +240,8 @@ export function leaderboardBoardFixture(args: Record<string, unknown>) {
     };
   };
   const entries = BOARD_NAMES.map((n, i) => entry(`key-${i}`, n, i));
+  const people = Number(new URLSearchParams(location.search).get("people"));
+  if (people > 0) entries.splice(people);
   const s = sharingState();
   if (s.joined && s.last_sent_week) entries.push({ ...entry("preview-key", String(s.profile.display_name), 33), links: { github: "https://github.com/lowtide" }, ...(s.profile.avatar === "github" ? { avatar: "github" as const } : {}) });
   entries.sort((a, b) => b.landed - a.landed);
