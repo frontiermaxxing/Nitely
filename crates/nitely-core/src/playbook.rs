@@ -1448,6 +1448,12 @@ pub struct CommandResult {
     pub step: Option<String>,
 }
 
+/// Whether a gate's steps came to no answer: one did not finish (a timeout, CI failing in setup)
+/// and none failed on its own, which would be the change's however the rest went (NIT-641).
+pub fn stalled(results: &[CommandResult]) -> bool {
+    results.iter().any(|r| r.timed_out) && !results.iter().any(|r| !r.ok && !r.skipped && !r.timed_out)
+}
+
 /// How the output of a command whose CI job failed before it ran begins (NIT-641).
 pub const CI_SETUP_FAILED: &str = "CI setup failed in";
 
@@ -1472,7 +1478,7 @@ impl GateResult {
     /// failed in setup), when no other step failed on its own: a real failure beside it is still
     /// the change's (NIT-641).
     pub fn timed_out(&self) -> Option<&CommandResult> {
-        if self.results.iter().any(|r| !r.ok && !r.skipped && !r.timed_out) {
+        if !stalled(&self.results) {
             return None;
         }
         self.results.iter().find(|r| r.timed_out)
