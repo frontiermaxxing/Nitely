@@ -1279,7 +1279,7 @@ mod tests {
 
     #[test]
     fn check_file_parses_json_and_toml() {
-        let dir = std::env::temp_dir().join(format!("nitely-check-file-{}", std::process::id()));
+        let dir = crate::paths::unique_temp("nitely-check-file", "");
         std::fs::create_dir_all(&dir).unwrap();
         let write = |name: &str, text: &str| { let p = dir.join(name); std::fs::write(&p, text).unwrap(); p };
         assert!(check_file(&write("ok.json", "{\"a\": [1, 2]}")).is_ok());
