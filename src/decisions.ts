@@ -317,6 +317,17 @@ export function groupFindings(decisions: Decision[]): Decision[] {
   return out === decisions ? decisions : out.sort(byUrgency);
 }
 
+/**
+ * The card that carries on a picked findings card (`groupFindings`) that is gone from the list:
+ * once one of its two findings is decided, the one left is its own card again, under its own id,
+ * and the Inbox stays on that issue rather than jumping to an unrelated decision (NIT-590 review).
+ */
+export function findingsLeft(decisions: Decision[], picked: string | null): Decision | undefined {
+  if (!picked?.startsWith(FINDINGS)) return undefined;
+  const key = picked.slice(FINDINGS.length);
+  return decisions.find((d) => d.kind === "ask" && d.ask?.finding && d.ask.issue_key?.toUpperCase() === key);
+}
+
 /** Most urgent first and, at the same urgency, the one that has waited longest first. */
 const byUrgency = (a: Decision, b: Decision) => a.urgency - b.urgency || a.since - b.since;
 
