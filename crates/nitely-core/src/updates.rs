@@ -222,6 +222,8 @@ const PAGE: usize = 5000;
 /// `read`, `page` events at a time: past pages that tell nothing (tool calls, statuses) to the first
 /// that does, so an update after many quiet events is told now, not on the next read.
 fn read_paged(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usize, page: usize) -> Result<Digest> {
+    // At least one line: a cap of 0 would tell nothing and never move past an update (NIT-597 review).
+    let cap = cap.max(1);
     let key = cursor_key(reader, projects, whole);
     let cursor: Option<i64> = db.conn.query_row("SELECT event_id FROM update_cursor WHERE reader = ?1", [&key], |r| r.get(0)).optional()?;
     let after = match cursor {
@@ -247,7 +249,8 @@ fn read_paged(db: &Db, reader: &str, projects: &[String], whole: bool, cap: usiz
             .collect::<rusqlite::Result<_>>()?;
         let mut digest = digest(&events, reader, &scope, cap);
         digest.cursor = digest.cursor.max(from);
-        if !read_on(!digest.lines.is_empty(), events.len(), page) {
+        // A page that did not move the cursor is read once: reading it again would end the same.
+        if !read_on(!digest.lines.is_empty(), events.len(), page) || digest.cursor == from {
             break digest;
         }
         from = digest.cursor;
@@ -432,6 +435,9 @@ mod tests {
         let read = read_paged(&db, "claude:coord", &["APP".into()], true, 8, 3).unwrap();
         assert_eq!(read.lines.len(), 1, "told now, past two quiet pages: {read:?}");
         assert!(read_paged(&db, "claude:coord", &["APP".into()], true, 8, 3).unwrap().lines.is_empty(), "and only once");
+        // A cap of 0 still tells the update and ends (NIT-597 review).
+        db.log_event(&crate::issues::Actor::Human, None, None, "project_focus_changed", "Focus on APP again").unwrap();
+        assert_eq!(read_paged(&db, "claude:coord", &["APP".into()], true, 0, 3).unwrap().lines.len(), 1);
         drop(db);
         std::fs::remove_dir_all(&dir).ok();
     }
