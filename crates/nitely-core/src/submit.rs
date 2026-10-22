@@ -528,13 +528,27 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     });
     // Stalled rounds never hold the agent (NIT-568): under `ask` the person decides each open
     // finding while it goes on fixing; under `fix` they are told it splits the change.
+    let mut split_follow_up: Option<String> = None;
     if let Some(why) = &stalled {
         match route {
             crate::project_modes::StalledReviews::Ask => {
                 db.ask_to_decide_findings(&issue.key, why, actor)?;
             }
             crate::project_modes::StalledReviews::Fix => {
-                db.add_note(&issue.key, &crate::submit_rules::stalled_notice(&issue.key, why), "note", actor)?;
+                // The findings go to a follow-up filed now, so the notice can name it (NIT-634 review).
+                let follow_up = match &out.review {
+                    Some(r) => {
+                        let accepted: Vec<String> = db.accepted_for(&issue.key, &out.patch_id)?.into_iter().map(|a| a.finding).collect();
+                        Some(file_follow_up(db, &issue, r, &accepted, actor)?)
+                    }
+                    None => None,
+                };
+                let notice = match &follow_up {
+                    Some(f) => crate::submit_rules::stalled_notice_for(&issue.key, why, f),
+                    None => crate::submit_rules::stalled_notice(&issue.key, why),
+                };
+                db.add_note(&issue.key, &notice, "note", actor)?;
+                split_follow_up = follow_up;
             }
         }
     }
@@ -553,7 +567,11 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         _ => Meanwhile::No,
     };
     out.state = now_in.clone();
-    out.next = if out.quick && state == "In Review" { "A quick change: its own checks passed. Call land; it is reviewed after landing.".into() } else { next.into() };
+    out.next = match &split_follow_up {
+        Some(f) => crate::submit_rules::split_into(f),
+        None if out.quick && state == "In Review" => "A quick change: its own checks passed. Call land; it is reviewed after landing.".into(),
+        None => next.into(),
+    };
     match crate::submit_rules::final_move(state, &now_in, meanwhile) {
         Some(to) if issue.origin == "nitely" => out.state = db.move_issue(&issue.key, to, None, None, actor)?.state,
         _ if meanwhile == Meanwhile::Accepted => out.next = format!("The person accepted the review's blocking findings while this submit ran, so it goes on as their acceptance moved it ({now_in})."),
@@ -685,13 +703,16 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
             let open_p0 = review.findings.iter().any(|f| f.priority == 0 && !accepted.contains(&f.text));
             let route = crate::submit_rules::stalled_route(mode_stalled, open_p0);
             let stalled_reviews = Some(route);
+            let mut split_follow_up: Option<String> = None;
             if let Some(why) = &stalled {
                 match route {
                     crate::project_modes::StalledReviews::Ask => {
                         db.ask_to_decide_findings(&issue.key, why, actor)?;
                     }
                     crate::project_modes::StalledReviews::Fix => {
-                        db.add_note(&issue.key, &crate::submit_rules::stalled_notice(&issue.key, why), "note", actor)?;
+                        let f = file_follow_up(db, issue, &review, &accepted, actor)?;
+                        db.add_note(&issue.key, &crate::submit_rules::stalled_notice_for(&issue.key, why, &f), "note", actor)?;
+                        split_follow_up = Some(f);
                     }
                 }
             }
@@ -721,7 +742,10 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
                 pr_error: None,
                 land: None,
                 state,
-                next: crate::submit_rules::item_sent_back(stalled.is_some(), stalled_reviews).to_string(),
+                next: match &split_follow_up {
+                    Some(f) => crate::submit_rules::split_into(f),
+                    None => crate::submit_rules::item_sent_back(stalled.is_some(), stalled_reviews).to_string(),
+                },
             });
         }
         if !open.is_empty() {
@@ -899,6 +923,35 @@ fn after_failed_gate(gate: &GateResult) -> String {
     // The step that failed: CI runs its steps side by side, so it need not be the last one reported.
     let failed = gate.results.iter().find(|r| !r.ok && !r.skipped).or(gate.results.last()).map(|r| r.command.as_str()).unwrap_or("");
     format!("The gate failed at `{failed}`. Fix it, commit, and submit again.")
+}
+
+/// The follow-up issue that takes `issue`'s open P0/P1 findings when its review rounds stop
+/// converging under `fix`, in the same goal: the one filed at an earlier stall while it is still
+/// open, with this stall's new findings added to it, else a new one. Filed before the notice, so
+/// the notice names it (NIT-634 review).
+fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &[String], actor: &Actor) -> Result<String> {
+    let evidence = crate::submit_rules::follow_up_evidence(&issue.key);
+    let open = crate::submit_rules::blocking(&review.findings, accepted);
+    if let Some(existing) = db.list_issues(issue.project.as_deref(), false)?.into_iter().find(|i| i.evidence == evidence) {
+        if let Some(body) = crate::submit_rules::follow_up_with(&existing.body, &open) {
+            db.edit_issue(&existing.key, None, Some(&body), actor)?;
+        }
+        return Ok(existing.key);
+    }
+    let p0 = review.findings.iter().any(|f| f.priority == 0 && !accepted.contains(&f.text));
+    let new = crate::issues::NewIssue {
+        project: issue.project.clone().unwrap_or_default(),
+        title: format!("Open review findings of {}: {}", issue.key, issue.title),
+        body: crate::submit_rules::follow_up_body(&issue.key, &open),
+        kind: "bug".into(),
+        source: issue.source.clone().unwrap_or_else(|| "nitely".into()),
+        evidence,
+        priority: if p0 { 1 } else { 2 },
+        allow_similar: true,
+        goal: issue.goal,
+        ..Default::default()
+    };
+    Ok(db.create_issue(&new, actor)?.key)
 }
 
 /// The note on a review run fresh, without the rounds before it, before stalled rounds escalate.

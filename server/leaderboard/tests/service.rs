@@ -83,7 +83,8 @@ fn join_send_view_and_leave_against_a_local_instance() {
 }
 
 /// NIT-632: a sharer's page at /u/<id> tells a link preview who they are and where they stand,
-/// with what they chose escaped, and its card is a 1200x630 PNG; leaving takes both away.
+/// with what they chose escaped (even a name that reads like the page's own markers), and its card
+/// is a 1200x630 PNG that follows their rank as others send; leaving takes both away.
 #[test]
 fn a_sharers_page_and_card_come_and_go_with_their_reports() {
     let dir = nitely_core::paths::unique_temp("nitely-lb-page", "");
@@ -99,26 +100,36 @@ fn a_sharers_page_and_card_come_and_go_with_their_reports() {
         handle_page(&store, &req, "https://example.com").expect("a page path")
     };
     let me = Sharing::new(&dir.join("me"));
-    let name = "Night <Owl> & \"co\"";
+    let name = "Night <Owl> & \"co\" {{person}}";
     let id = me.join(&Profile { display_name: name.into(), ..Default::default() }, &[], Some(&url)).unwrap().id.unwrap();
     assert_eq!(get(&format!("/u/{id}")).0, 404, "joined, nothing sent: no page yet");
     me.send_report(&report(name)).unwrap();
-    Sharing::new(&dir.join("other")).join(&Profile { display_name: "Early Bird".into(), ..Default::default() }, &[], Some(&url)).unwrap();
+    let other = Sharing::new(&dir.join("other"));
+    other.join(&Profile { display_name: "Early Bird".into(), ..Default::default() }, &[], Some(&url)).unwrap();
 
     let (status, kind, html) = get(&format!("/u/{id}"));
     let html = String::from_utf8(html).unwrap();
     assert_eq!((status, kind), (200, "text/html; charset=utf-8"));
-    assert!(html.contains("<title>Night &lt;Owl&gt; &amp; &quot;co&quot; · Nitely Leaderboard</title>"), "{html}");
+    assert!(html.contains("<title>Night &lt;Owl&gt; &amp; &quot;co&quot; {{person}} · Nitely Leaderboard</title>"), "{html}");
     assert!(html.contains(&format!("<meta property=\"og:image\" content=\"https://example.com/u/{id}/card.png?v=")), "{html}");
     assert!(html.contains("of 1 on the Nitely Leaderboard"), "{html}");
-    assert!(!html.contains("<Owl>") && !html.contains("{{"), "nothing from a report lands raw, and no marker is left");
+    assert!(!html.contains("<Owl>"), "nothing from a report lands raw");
+    assert!(html.contains("<script type=\"application/json\" id=\"person\">{"), "the numbers are in their block, whatever the name");
+    let image = |html: &str| html.split("og:image\" content=\"").nth(1).and_then(|r| r.split('"').next()).map(str::to_string);
 
     let (status, kind, png) = get(&format!("/u/{id}/card.png"));
     assert_eq!((status, kind), (200, "image/png"));
     assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
     let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
     assert_eq!((size(16), size(20)), (1200, 630), "the IHDR's width and height");
-    assert_eq!(get(&format!("/u/{id}/card.png")).2, png, "drawn once per report");
+    assert_eq!(get(&format!("/u/{id}/card.png")).2, png, "drawn once while nothing changes");
+
+    // Someone else's send moves them to #2: the card and its address follow, though they sent nothing.
+    other.send_report(&report("Early Bird")).unwrap();
+    let after = String::from_utf8(get(&format!("/u/{id}")).2).unwrap();
+    assert!(after.contains("#2 of 2 on the Nitely Leaderboard"), "{after}");
+    assert_ne!(image(&after), image(&html), "a new address for the new card");
+    assert_ne!(get(&format!("/u/{id}/card.png")).2, png, "drawn again with the new rank");
 
     assert_eq!(get("/u/not-an-id").0, 404);
     assert!(handle_page(&store, &Request { method: "GET".into(), path: "/v1/leaderboard/health".into(), key: None, time: None, signature: None, body: vec![] }, "").is_none());

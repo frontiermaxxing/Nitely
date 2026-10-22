@@ -28,7 +28,7 @@ const STATE_FILE: &str = "leaderboard.json";
 const KEY_FILE: &str = "leaderboard-key";
 const WEEK: i64 = 7 * 86_400;
 const DAY: i64 = 86_400;
-/// The local hour from which the day's send goes (NIT-629): the first time the app runs after it.
+/// The local hour on Sunday from which a send closes the week (NIT-629).
 const SEND_HOUR: i64 = 18;
 
 /// What joining saved.
@@ -259,10 +259,11 @@ impl Sharing {
 /// When the sends go (NIT-629).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Plan {
-    /// Joined, sent by hand at least once, past today's send hour (18:00 local), and nothing sent
-    /// since it.
+    /// Joined, sent by hand at least once, and a day since the last send, or Sunday 18:00 local
+    /// passed since it.
     pub due: bool,
-    /// When the next automatic send goes: now when due, else today's or tomorrow's send hour.
+    /// When the next automatic send goes: now when due, else a day after the last, or Sunday
+    /// 18:00 when that is sooner.
     pub next_send_at: Option<i64>,
     /// This week's Sunday at the send hour, when its entry closes; the next week's once the
     /// closing send went.
@@ -282,8 +283,8 @@ pub fn closes_week(now: i64, utc_offset: i64) -> bool {
     local.weekday() == chrono::Weekday::Sun && now >= send_hour_of(now, utc_offset)
 }
 
-/// When the sends go: once a day, the first time the app runs after the send hour, and Sunday
-/// evening's closes the week. Nothing goes before the first send by hand.
+/// When the sends go: once a day, at any hour, and at Sunday 18:00 local when that comes sooner, a
+/// send then closing the week. Nothing goes before the first send by hand.
 pub fn plan(state: &State, now: i64, utc_offset: i64) -> Plan {
     use chrono::Datelike;
     let today = send_hour_of(now, utc_offset);
@@ -293,9 +294,22 @@ pub fn plan(state: &State, now: i64, utc_offset: i64) -> Plan {
     let Some(last) = state.last_sent_at.filter(|_| state.joined) else {
         return Plan { due: false, next_send_at: None, week_closes_at };
     };
-    let due = now >= today && last < today;
-    let next_send_at = Some(if due { now } else if now < today { today } else { today + DAY });
-    Plan { due, next_send_at, week_closes_at }
+    let next = next_send(last, utc_offset);
+    let due = now >= next;
+    Plan { due, next_send_at: Some(if due { now } else { next }), week_closes_at }
+}
+
+/// When the send after one at `last` goes (NIT-634 review): a day later, at any hour the app is
+/// running then, so someone who runs it only in the morning still shares daily; and at the next
+/// Sunday 18:00 when that comes sooner, so the week closes with a send made then.
+fn next_send(last: i64, utc_offset: i64) -> i64 {
+    use chrono::Datelike;
+    let local = chrono::DateTime::from_timestamp(last + utc_offset, 0).unwrap_or_default();
+    let mut sunday = send_hour_of(last, utc_offset) + i64::from(6 - local.weekday().num_days_from_monday()) * DAY;
+    if sunday <= last {
+        sunday += WEEK;
+    }
+    (last + DAY).min(sunday)
 }
 
 /// The install's id: its public key, base64url without padding.
@@ -327,34 +341,39 @@ mod tests {
     /// NIT-629: after a first send by hand, a send goes once a day from 18:00 local, and Sunday
     /// evening's closes the week.
     #[test]
-    fn the_send_goes_once_a_day_after_the_send_hour_and_sunday_evening_closes_the_week() {
+    fn the_send_goes_once_a_day_at_any_hour_and_sunday_evening_closes_the_week() {
         let h = 3600;
         let mut s = State { joined: true, ..Default::default() };
         let sunday_evening = MONDAY + 6 * DAY + 19 * h;
         let p = plan(&s, sunday_evening, 0);
         assert!(!p.due && p.next_send_at.is_none(), "never sent by hand: never automatic");
-        // Sent by hand Monday 10:00.
+        // Sent by hand Monday 10:00: the next goes a day later, at whatever hour the app runs then.
         s.last_sent_at = Some(MONDAY + 10 * h);
-        let p = plan(&s, MONDAY + 12 * h, 0);
-        assert_eq!((p.due, p.next_send_at), (false, Some(MONDAY + 18 * h)), "before the send hour: tonight");
         let p = plan(&s, MONDAY + 20 * h, 0);
-        assert_eq!((p.due, p.next_send_at), (true, Some(MONDAY + 20 * h)), "after it, nothing sent since: now");
-        s.last_sent_at = Some(MONDAY + 20 * h);
-        let p = plan(&s, MONDAY + 22 * h, 0);
-        assert_eq!((p.due, p.next_send_at), (false, Some(MONDAY + DAY + 18 * h)), "once a day: tomorrow");
-        assert!(plan(&s, MONDAY + DAY + 9 * h, 0).next_send_at == Some(MONDAY + DAY + 18 * h) && !plan(&s, MONDAY + DAY + 9 * h, 0).due);
-        assert!(plan(&s, MONDAY + 3 * DAY + 18 * h, 0).due, "a day the app did not run is skipped, not made up");
-        // The week closes Sunday 18:00, and the send then is the closing one.
-        assert_eq!(plan(&s, MONDAY + 22 * h, 0).week_closes_at, MONDAY + 6 * DAY + 18 * h);
+        assert_eq!((p.due, p.next_send_at), (false, Some(MONDAY + DAY + 10 * h)), "once a day: tomorrow at 10:00");
+        let p = plan(&s, MONDAY + DAY + 9 * h, 0);
+        assert!(!p.due, "not a day yet");
+        let p = plan(&s, MONDAY + DAY + 11 * h, 0);
+        assert_eq!((p.due, p.next_send_at), (true, Some(MONDAY + DAY + 11 * h)), "a day since: now");
+        // NIT-634 review: someone who runs the app only in the morning, weeks after the last send,
+        // still sends.
+        assert!(plan(&s, MONDAY + 3 * WEEK + 8 * h, 0).due);
+        // Saturday 20:00's send: the next comes Sunday 18:00, sooner than a day, to close the week.
+        s.last_sent_at = Some(MONDAY + 5 * DAY + 20 * h);
+        let p = plan(&s, MONDAY + 6 * DAY + 12 * h, 0);
+        assert_eq!((p.due, p.next_send_at), (false, Some(MONDAY + 6 * DAY + 18 * h)));
+        assert!(plan(&s, sunday_evening, 0).due);
+        assert_eq!(p.week_closes_at, MONDAY + 6 * DAY + 18 * h);
         assert!(closes_week(sunday_evening, 0) && !closes_week(MONDAY + 6 * DAY + 17 * h, 0) && !closes_week(MONDAY + 20 * h, 0));
         s.last_sent_at = Some(sunday_evening);
         assert_eq!(plan(&s, sunday_evening + h, 0).week_closes_at, MONDAY + 13 * DAY + 18 * h, "closed: the next week's");
-        // Local time: at UTC-2 it is 17:00 there at 19:00 UTC.
-        s.last_sent_at = Some(MONDAY + 10 * h);
-        assert!(!plan(&s, MONDAY + 19 * h, -2 * h).due && plan(&s, MONDAY + 20 * h, -2 * h).due);
+        assert_eq!(plan(&s, sunday_evening + h, 0).next_send_at, Some(sunday_evening + DAY), "and a day later after the closing send");
+        // Local time: at UTC-2, 19:00 UTC on Sunday is 17:00 there, before the week closes.
         assert!(!closes_week(sunday_evening, -2 * h));
+        s.last_sent_at = Some(MONDAY + 5 * DAY + 20 * h);
+        assert_eq!(plan(&s, MONDAY + 6 * DAY + 12 * h, -2 * h).next_send_at, Some(MONDAY + 6 * DAY + 20 * h), "Sunday 18:00 there is 20:00 UTC");
         s.joined = false;
-        assert!(!plan(&s, MONDAY + 20 * h, 0).due);
+        assert!(!plan(&s, MONDAY + 3 * WEEK, 0).due);
     }
 
     #[test]

@@ -227,13 +227,14 @@ pub fn message(method: &str, path: &str, key: &str, time: i64, body: &[u8]) -> S
 
 pub struct Store {
     conn: Mutex<Connection>,
-    /// Share cards as drawn, by key, with the report time they were drawn from: a new send makes
-    /// a new one, and a delete leaves no page to ask for it.
+    /// Share cards as drawn, by key, with what each showed: a card is drawn again whenever what it
+    /// would show changes (their send, someone else's that moves their rank, a new week), and a
+    /// delete leaves no page to ask for it.
     cards: Mutex<HashMap<String, Drawn>>,
 }
 
-/// A share card and the report time it was drawn from.
-type Drawn = (i64, Arc<Vec<u8>>);
+/// A share card's content and its PNG.
+type Drawn = (card::Card, Arc<Vec<u8>>);
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
@@ -333,22 +334,21 @@ impl Store {
         })))
     }
 
-    /// `key`'s share card as a PNG, drawn once per report.
+    /// `key`'s share card as a PNG, drawn again only when what it shows has changed.
     pub fn card(&self, key: &str, site: &str) -> Result<Option<Arc<Vec<u8>>>> {
         let Some(person) = self.person(key)? else { return Ok(None) };
-        let version = person["updated_at"].as_i64().unwrap_or(0);
+        let Some(card) = page::card(&person, site) else { return Ok(None) };
         let mut cards = self.cards.lock().unwrap_or_else(|p| p.into_inner());
-        if let Some((v, png)) = cards.get(key) {
-            if *v == version {
+        if let Some((drawn, png)) = cards.get(key) {
+            if *drawn == card {
                 return Ok(Some(png.clone()));
             }
         }
-        let Some(card) = page::card(&person, site) else { return Ok(None) };
         let png = Arc::new(card::render(&card)?);
         if cards.len() >= CARDS_KEPT {
             cards.clear();
         }
-        cards.insert(key.to_string(), (version, png.clone()));
+        cards.insert(key.to_string(), (card, png.clone()));
         Ok(Some(png))
     }
 

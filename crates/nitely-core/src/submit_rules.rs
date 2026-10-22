@@ -73,6 +73,38 @@ pub const ASKED_KEEP_FIXING: &str = "The review rounds are not converging, so Ni
 
 /// What the person reads when an issue's review rounds stalled under `stalled_reviews = "fix"`:
 /// a notice, which nothing waits on.
+/// The stalled-rounds notice once the open findings are filed as `follow_up` (NIT-634 review): it
+/// names the follow-up and links it, so the person can open where the findings went.
+pub fn stalled_notice_for(key: &str, why: &str, follow_up: &str) -> String {
+    format!(
+        "{key}{STALLED_NOTICE_START}{why}). The agreed part lands; the open findings moved to [{follow_up}]({}).{STALLED_NOTICE_END}",
+        crate::links::issue_url(follow_up)
+    )
+}
+
+/// What the follow-up for `key`'s open findings carries as its evidence: how a later stall of the
+/// same issue finds it again instead of filing another.
+pub fn follow_up_evidence(key: &str) -> String {
+    format!("The open review findings of {key} when its review rounds stopped converging.")
+}
+
+/// The follow-up's body: each open finding (`[P1] text`), one per line, and where they came from.
+pub fn follow_up_body(key: &str, open: &[String]) -> String {
+    format!("{key}'s review rounds stopped converging. Its agent lands the part the reviews agree on; these findings are what is left:\n\n{}", open.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n"))
+}
+
+/// An open follow-up's body with the findings of a later stall it does not list yet, one per line
+/// as `follow_up_body` writes them, or None when it lists them all already (NIT-634 review).
+pub fn follow_up_with(body: &str, open: &[String]) -> Option<String> {
+    let new: Vec<String> = open.iter().map(|f| format!("- {f}")).filter(|line| !body.lines().any(|l| l.trim() == line)).collect();
+    (!new.is_empty()).then(|| format!("{}\n{}", body.trim_end(), new.join("\n")))
+}
+
+/// What the agent is told to do under `fix` once Nitely filed the follow-up itself.
+pub fn split_into(follow_up: &str) -> String {
+    format!("The review rounds are not converging, so split the change: keep what the reviews agree on and take out what the open P0/P1 findings are about. Nitely filed those findings as {follow_up} in the same goal ({}); do not file them again. Then commit and submit the smaller change. The person is told, and nothing waits on them.", crate::links::issue_url(follow_up))
+}
+
 pub fn stalled_notice(key: &str, why: &str) -> String {
     format!("{key}{STALLED_NOTICE_START}{why}). The agreed part lands; the open findings move to a follow-up issue in the same goal.{STALLED_NOTICE_END}")
 }
@@ -297,6 +329,22 @@ mod tests {
 
     /// NIT-633: stalled rounds go as the mode says, except that an open P0 always asks the person;
     /// the notice is one line with no finding pasted in.
+    #[test]
+    fn the_notice_names_and_links_the_follow_up_the_findings_moved_to() {
+        let notice = stalled_notice_for("APP-7", "7 review rounds in a row asked for changes; 2 open findings (1 P0, 1 P1)", "APP-9");
+        assert!(notice.contains("moved to [APP-9](http://127.0.0.1:7423/i/APP-9)"), "{notice}");
+        assert!(notice.starts_with(&format!("APP-7{STALLED_NOTICE_START}")) && notice.ends_with(STALLED_NOTICE_END), "the Inbox still finds it: {notice}");
+        assert_eq!(notice.lines().count(), 1);
+        let body = follow_up_body("APP-7", &["[P0] Leaks the token: b.rs".into(), "[P1] Drops the last row: a.rs".into()]);
+        assert!(body.ends_with("- [P0] Leaks the token: b.rs\n- [P1] Drops the last row: a.rs"), "{body}");
+        assert!(split_into("APP-9").contains("filed those findings as APP-9") && split_into("APP-9").contains("do not file them again"));
+        assert_ne!(follow_up_evidence("APP-7"), follow_up_evidence("APP-8"), "one follow-up per issue");
+        // A later stall adds only the findings the open follow-up does not list yet.
+        let later = ["[P0] Leaks the token: b.rs".to_string(), "[P1] Off by one: c.rs".to_string()];
+        assert_eq!(follow_up_with(&body, &later).unwrap(), format!("{body}\n- [P1] Off by one: c.rs"));
+        assert_eq!(follow_up_with(&body, &later[..1]), None, "nothing new: left as it is");
+    }
+
     #[test]
     fn an_open_p0_asks_the_person_and_the_notice_is_one_line() {
         assert_eq!(stalled_route(Some(StalledReviews::Fix), false), StalledReviews::Fix);

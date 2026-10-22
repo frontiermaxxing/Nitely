@@ -512,7 +512,7 @@ function fakeSession(seed: string): string {
 function build(): World {
   const world: World = {
     // A goal item whose review rounds stalled under `stalled_reviews = "fix"` (NIT-570).
-    notices: [{ id: 9001, issue_key: "ORB-261", ts: NOW - 25 * 60, summary: "ORB-261: the review rounds are not converging (5 review rounds in a row asked for changes; 3 open findings (1 P0, 2 P1)). The agreed part lands; the open findings move to a follow-up issue in the same goal. Nothing waits on you." }],
+    notices: [{ id: 9001, issue_key: "ORB-261", ts: NOW - 25 * 60, summary: "ORB-261: the review rounds are not converging (5 review rounds in a row asked for changes; 3 open findings (1 P0, 2 P1)). The agreed part lands; the open findings moved to [ORB-275](http://127.0.0.1:7423/i/ORB-275). Nothing waits on you." }],
     issues: [], timelines: new Map(), reviews: new Map(), prs: new Map(), asks: [], projects: [], repos: REPOS };
   for (const spec of ISSUES) {
     const repo = repoOf(spec.key);

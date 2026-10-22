@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke, isPreview } from "./backend";
 import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { GoalPlanDecision } from "./GoalPlanDecision";
+import { issueKeyOf, parseInline } from "./markdown";
 import {
   APPROVALS,
   askPlaces,
@@ -1227,7 +1228,19 @@ function Notices(props: { notices: Notice[]; now: number; onOpenIssue: (key: str
                 {n.issue_key}
               </button>
             )}
-            <span className="inbox-notice-text">{n.issue_key && n.summary.startsWith(`${n.issue_key}: `) ? n.summary.slice(n.issue_key.length + 2) : n.summary}</span>
+            <span className="inbox-notice-text">
+              {/* A link to another issue (the follow-up a stalled change's findings moved to) opens it. */}
+              {parseInline(n.issue_key && n.summary.startsWith(`${n.issue_key}: `) ? n.summary.slice(n.issue_key.length + 2) : n.summary).map((p, i) => {
+                const issue = p.t === "link" ? issueKeyOf(p.href) : null;
+                return issue ? (
+                  <button key={i} className="link mono" onClick={() => props.onOpenIssue(issue)} title="Open the issue">
+                    {p.s}
+                  </button>
+                ) : (
+                  p.s
+                );
+              })}
+            </span>
             <span className="muted small">{ago(props.now, n.ts)}</span>
             <button className="btn small" onClick={() => dismiss(n.id)}>
               Dismiss

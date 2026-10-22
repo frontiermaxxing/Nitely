@@ -19,8 +19,6 @@ import {
 } from "./stats";
 
 const IN_PERIOD: Record<PeriodKey, string> = { week: "this week", "30d": "in the last 30 days", all: "since you started" };
-/** Where people's pages live: the Leaderboard service serves them there (NIT-632). */
-const PAGES = "https://nitely.net/u/";
 
 /** L3: your own numbers, always here, sharing or not. */
 export function You(props: { stats: LeaderboardStats; period: PeriodKey; profile: Profile | null; now: number; onJoin?: () => void; onEdit?: () => void; onLeave?: () => Promise<void> }) {
@@ -154,7 +152,7 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
           )}
         </span>
       </div>
-      {p.id && p.last_sent_week && <CopyLink url={PAGES + p.id} />}
+      {p.page && <CopyLink url={p.page} />}
       {props.onEdit && <Button onClick={props.onEdit}>Edit profile</Button>}
       {props.onLeave &&
         (confirming ? (
@@ -192,7 +190,7 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
   );
 }
 
-/** Your page on nitely.net, once a report is there: your numbers, ranks and series, with a card for link previews. */
+/** Your public page, once a report is there: your numbers, ranks and series, with a card for link previews. */
 function CopyLink(props: { url: string }) {
   const [copied, setCopied] = useState<"yes" | "failed" | null>(null);
   useEffect(() => {
