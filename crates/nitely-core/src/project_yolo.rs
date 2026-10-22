@@ -31,21 +31,42 @@ pub(crate) fn skipped_gate(db: &Db, worktree: &Path, keys: &[&str], actor: &Acto
 
 
 #[derive(Debug, Clone)]
-pub struct ReviewGuard { pub database: PathBuf, pub project: String, pub authority: Option<String> }
+pub struct ReviewGuard {
+    pub database: PathBuf,
+    pub project: String,
+    pub authority: Option<String>,
+    /// It guards a goal item's review (NIT-563): the mode's item review decides, not its review of
+    /// changes with no goal.
+    pub item: bool,
+}
+
+/// Whether the mode runs this review: a goal item's when its item review is on, any other change's
+/// unless its pre-merge review is off.
+pub(crate) fn review_on(pre_review: Option<crate::project_modes::PreReview>, item_review: Option<crate::project_modes::ItemReview>, item: bool) -> bool {
+    if item {
+        item_review.is_some_and(|r| r != crate::project_modes::ItemReview::Off)
+    } else {
+        pre_review != Some(crate::project_modes::PreReview::Off)
+    }
+}
 impl ReviewGuard {
     pub(crate) fn for_issue(db: &Db, key: &str) -> Result<Option<Self>> {
         let Some(project) = db.issue(key)?.and_then(|i| i.project) else { return Ok(None) };
         let database = db.conn.path().context("review needs the project's persistent settings database")?;
-        Ok(Some(Self { database: database.into(), authority: db.project_review_mode(&project)?.authority()?, project }))
+        Ok(Some(Self { database: database.into(), authority: db.project_review_mode(&project)?.authority()?, project, item: false }))
     }
     pub(crate) fn enabled_override(&self)->Result<Option<bool>> {
         let conn=Connection::open_with_flags(&self.database,rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-        Ok(crate::project_modes::read(&conn,&self.project)?.options().pre_review.map(|r|r!=crate::project_modes::PreReview::Off))
+        let o = crate::project_modes::read(&conn,&self.project)?.options();
+        if self.item { return Ok(Some(review_on(o.pre_review, o.item_review, true))); }
+        Ok(o.pre_review.map(|r|r!=crate::project_modes::PreReview::Off))
     }
     pub(crate) fn require_review(&self) -> Result<()> {
         let conn = Connection::open_with_flags(&self.database, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
         let mode=crate::project_modes::read(&conn,&self.project)?;
-        if mode.options().pre_review==Some(crate::project_modes::PreReview::Off) {
+        if self.item {
+            if !review_on(None, mode.options().item_review, true) {bail!(crate::review::Disabled);}
+        } else if mode.options().pre_review==Some(crate::project_modes::PreReview::Off) {
             if mode.options().test_depth==Some(crate::project_modes::TestDepth::Off) {bail!(SkipReview);} else {bail!(crate::review::Disabled);}
         }
         if !crate::project_modes::covers_authority(&conn,&self.project,&self.authority)? {bail!("project review mode changed before reviewer launch; submit again");}
@@ -88,7 +109,12 @@ mod tests {
         let path = dir.join("test.db");
         let mut db = Db::open(&path).unwrap();
         db.create_project("APP", "App").unwrap();
-        let guard = ReviewGuard { database: path, project: "APP".into(), authority: None };
+        let guard = ReviewGuard { database: path, project: "APP".into(), authority: None, item: false };
+        // NIT-563: an item review runs on the mode's item review, whatever its pre-merge review.
+        use crate::project_modes::{ItemReview, PreReview};
+        assert!(review_on(Some(PreReview::Off), Some(ItemReview::Blocking), true));
+        assert!(!review_on(Some(PreReview::Individual), Some(ItemReview::Off), true));
+        assert!(!review_on(Some(PreReview::Off), Some(ItemReview::Blocking), false));
         guard.require_review().unwrap();
         let off = Options { test_depth: Some(TestDepth::Off), pre_review: Some(PreReview::Off), ..Default::default() };
         db.set_project_review_mode("APP", Mode::Custom, off, 0, &Actor::Human).unwrap();

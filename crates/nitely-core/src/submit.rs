@@ -181,7 +181,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     }
     // An item of a goal with a goal branch has no pull request of its own: its hop is the land into
     // the goal branch, with item checks and the item review the mode asks for (goal_branch.rs).
-    if let Some(gb) = db.goal_branch_of_issue(&key)?.filter(|g| g.repo == crate::paths::normalize(&root.to_string_lossy())) {
+    if let Some(gb) = crate::goal_branch::route_of_issue(db, &root, &key, Some(&branch))? {
         return submit_into_goal(db, config, &issue, &root, &worktree, &branch, &gb.branch, opts.local_only, actor);
     }
     crate::submodules::check_pointers(&pb, &worktree)?;
@@ -357,11 +357,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // Read before this round is recorded: the rounds before it, since the human last decided on the
     // issue's findings or handed it back (their decision to go on starts a new count).
     let mut stalled = match &out.review {
-        Some(r) if verdict == "changes" && issue.origin == "nitely" => {
-            let decided = [db.handed_back_event(&issue.key)?, db.findings_decided_event(&issue.key)?].into_iter().flatten().max_by_key(|d| (d.ts, d.id));
-            let earlier: Vec<ReviewRecord> = db.reviews(&issue.key)?.into_iter().filter(|r| decided.is_none_or(|d| d.came_before(r))).collect();
-            not_converging(&earlier, r)
-        }
+        Some(r) if verdict == "changes" && issue.origin == "nitely" => stalled_rounds(db, &issue.key, r)?,
         _ => None,
     };
     // Before stalled rounds go to the person, a fresh review that has not seen them looks (NIT-245):
@@ -548,19 +544,29 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     Ok(out)
 }
 
+/// Why `key`'s review rounds stopped converging, with `review` the newest, which asks for changes,
+/// read before it is recorded: the rounds since the person last decided on its findings or handed
+/// it back (their decision to go on starts a new count). Change reviews and item reviews alike.
+pub(crate) fn stalled_rounds(db: &Db, key: &str, review: &Review) -> Result<Option<String>> {
+    let decided = [db.handed_back_event(key)?, db.findings_decided_event(key)?].into_iter().flatten().max_by_key(|d| (d.ts, d.id));
+    let earlier: Vec<ReviewRecord> = db.reviews(key)?.into_iter().filter(|r| decided.is_none_or(|d| d.came_before(r))).collect();
+    Ok(not_converging(&earlier, review))
+}
+
 /// The item review the issue's mode asks for (Off with no mode).
-fn item_review_of(db: &Db, key: &str) -> Result<ItemReview> {
+pub(crate) fn item_review_of(db: &Db, key: &str) -> Result<ItemReview> {
     Ok(crate::project_modes::for_issue(db, key)?.and_then(|m| m.options().item_review).unwrap_or(ItemReview::Off))
 }
 
 /// The item review of a goal item, against its goal branch `goal_branch` (NIT-563), recorded as
-/// any review is, so the next round, acceptances and land read it. Returns the review and the
-/// patch it reviewed.
-fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, branch: &str, goal_branch: &str, actor: &Actor) -> Result<(Review, String)> {
+/// any review is, so the next round, acceptances and land read it. Returns the review, the patch
+/// it reviewed, and why the rounds stopped converging, when they did (NIT-568).
+fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, branch: &str, goal_branch: &str, actor: &Actor) -> Result<(Review, String, Option<String>)> {
     let mut pb = Playbook::load(root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
     pb.review.policy_root = Some(root.to_path_buf());
-    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.into_iter().collect();
+    // Guarded by the item review the mode asks for, not the review of changes with no goal.
+    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.map(|g| crate::project_yolo::ReviewGuard { item: true, ..g }).into_iter().collect();
     // The mode asked for it, whether or not changes with no goal are reviewed.
     pb.review.enabled = true;
     let since = playbook::diff_base(worktree, goal_branch);
@@ -577,6 +583,7 @@ fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, b
     let mut review = rules.run(&choice.reviewer, worktree, &since, previous.as_ref())?;
     review.note = choice.note.clone();
     let patch = patch_id_range(worktree, &since, &head)?;
+    let stalled = if review.verdict == "changes" && issue.origin == "nitely" { stalled_rounds(db, &issue.key, &review)? } else { None };
     let record = Submitted {
         verification: None,
         issue: issue.key.clone(),
@@ -603,7 +610,7 @@ fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, b
     };
     db.record_review(&record)?;
     db.close_superseded_requests(&issue.key, &review.findings)?;
-    Ok((review, patch))
+    Ok((review, patch, stalled))
 }
 
 /// `submit` for an item of a goal with a goal branch: the item review its mode asks for, then the
@@ -614,12 +621,26 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
     let mode = item_review_of(db, &issue.key)?;
     let mut reviewed: Option<Review> = None;
     if mode != ItemReview::Off {
-        let (review, patch) = review_item(db, root, worktree, issue, branch, goal_branch, actor)?;
+        let (review, patch, stalled) = review_item(db, root, worktree, issue, branch, goal_branch, actor)?;
         let accepted: Vec<String> = db.accepted_for(&issue.key, &patch)?.into_iter().map(|a| a.finding).collect();
         let open = crate::submit_rules::blocking(&review.findings, &accepted);
         let by = format!("{}{}", review.reviewer, noted(&review.note));
         if !crate::submit_rules::item_lands(mode, &review.findings, &accepted) {
-            db.add_note(&issue.key, &format!("Item review by {by} requested changes: {}", open.join("; ")), "submit", actor)?;
+            // Rounds that stop converging go as a change's do (NIT-568): never held, and the mode's
+            // `stalled_reviews` says whether the person decides each finding or the agent splits.
+            let stalled_reviews = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_else(crate::project_modes::builtin).stalled_reviews;
+            if let Some(why) = &stalled {
+                match stalled_reviews.unwrap_or(crate::project_modes::StalledReviews::Ask) {
+                    crate::project_modes::StalledReviews::Ask => {
+                        db.ask_to_decide_findings(&issue.key, why, actor)?;
+                    }
+                    crate::project_modes::StalledReviews::Fix => {
+                        db.add_note(&issue.key, &crate::submit_rules::stalled_notice(&issue.key, why), "note", actor)?;
+                    }
+                }
+            }
+            let stalled_line = stalled.as_ref().map(|why| format!(". The review rounds are not converging: {why}")).unwrap_or_default();
+            db.add_note(&issue.key, &format!("Item review by {by} requested changes: {}{stalled_line}", open.join("; ")), "submit", actor)?;
             let state = if issue.state != "In Progress" && issue.origin == "nitely" { db.move_issue(&issue.key, "In Progress", None, None, actor)?.state } else { issue.state.clone() };
             return Ok(Submitted {
                 verification: None,
@@ -643,7 +664,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
                 pr_error: None,
                 land: None,
                 state,
-                next: crate::submit_rules::next_state(&crate::submit_rules::Outcome { changes: true, ..Default::default() }).1.to_string(),
+                next: crate::submit_rules::item_sent_back(stalled.is_some(), stalled_reviews).to_string(),
             });
         }
         if !open.is_empty() {

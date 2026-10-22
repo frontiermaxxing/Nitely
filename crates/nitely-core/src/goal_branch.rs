@@ -446,12 +446,37 @@ pub(crate) fn start_point(db: &Db, root: &Path, pb: &Playbook, issue: &IssueReco
             db.enable_goal_branch(goal, root, None, Some(items), actor)?;
         }
     }
-    let Some(gb) = db.goal_branch_of_issue(&issue.key)? else { return Ok(None) };
-    if !same_repo(&gb, root) {
-        return Ok(None);
-    }
+    let Some(gb) = route_of_issue(db, root, &issue.key, None)? else { return Ok(None) };
     let gb = prepare(db, root, pb, &gb, actor)?;
     Ok(Some((gb.branch.clone(), gb.branch)))
+}
+
+/// Whether a goal item lands through its goal's branch (NIT-563), decided the same way when it
+/// starts, is submitted, lands and says where it lands: the branch is open, and either the item
+/// already started from it (its branch holds the goal branch's commits, which must not reach main
+/// with it) or the mode routes goal items through goal branches here.
+pub fn item_route(open: bool, mode_routes: bool, started_from_goal: bool) -> bool {
+    open && (started_from_goal || mode_routes)
+}
+
+/// The goal branch `key`'s change lands into from `root` (`item_route`), or None for main.
+/// `branch` is the item's own branch, once it has one. A project whose mode the person never chose
+/// keeps a goal branch opened by hand.
+pub fn route_of_issue(db: &Db, root: &Path, key: &str, branch: Option<&str>) -> Result<Option<GoalBranch>> {
+    let Some(gb) = db.goal_branch_of_issue(key)?.filter(|g| same_repo(g, root)) else { return Ok(None) };
+    let pb = Playbook::load(root)?;
+    let mode_routes = match crate::project_modes::for_issue(db, key)? {
+        Some(m) if m.explicit => goal_items_route(m.options().goal_branches, !pb.submodules.is_empty()).is_ok(),
+        _ => true,
+    };
+    let started = branch.is_some_and(|b| started_from(root, b, &gb.branch, pb.integration_branch()));
+    Ok(item_route(true, mode_routes, started).then_some(gb))
+}
+
+/// Whether `item` started from `goal_branch`: where they meet holds commits `main` does not.
+fn started_from(root: &Path, item: &str, goal_branch: &str, main: &str) -> bool {
+    let Ok(met) = crate::playbook::git(root, &["merge-base", item, goal_branch]) else { return false };
+    crate::playbook::git(root, &["rev-list", "--count", &format!("{main}..{}", met.trim())]).is_ok_and(|n| n.trim() != "0")
 }
 
 /// Whether a mode's goal items go through goal branches in a repo, or why they land on main: the
@@ -478,7 +503,8 @@ pub(crate) fn engage(routes: bool, checkpoint_items: Option<u32>, active: bool, 
 /// The branch `issue`'s change lands into from `root`: its goal's branch, or the integration
 /// branch (a checkpoint, an item of a goal without one, any other issue).
 pub(crate) fn lands_into(db: &Db, root: &Path, pb: &Playbook, issue: &str) -> Result<String> {
-    Ok(db.goal_branch_of_issue(issue)?.filter(|g| same_repo(g, root)).map_or_else(|| pb.integration_branch().to_string(), |g| g.branch))
+    let branch = crate::land::branch_of(root, issue).ok().map(|(b, _)| b);
+    Ok(route_of_issue(db, root, issue, branch.as_deref())?.map_or_else(|| pb.integration_branch().to_string(), |g| g.branch))
 }
 
 fn same_repo(gb: &GoalBranch, root: &Path) -> bool {
@@ -1162,6 +1188,11 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
         assert!(route(Mode::Release, false).is_err());
         assert!(route(Mode::Fast, true).unwrap_err().contains("managed submodules"));
         assert_eq!(goal_items_route(None, false).is_err(), true, "no mode set: as before");
+        // NIT-563: an open branch takes an item the mode routes, or one that started from it.
+        assert!(item_route(true, true, false));
+        assert!(item_route(true, false, true), "started from the goal branch: never onto main with its commits");
+        assert!(!item_route(true, false, false), "the mode moved to main: a new item lands there");
+        assert!(!item_route(false, true, true), "no open branch");
 
         assert_eq!(engage(true, Some(10), true, false, false), Some(10));
         assert_eq!(engage(true, None, true, false, false), Some(CHECKPOINT_ITEMS));
@@ -1240,7 +1271,9 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
         assert!(s.land.as_ref().is_some_and(|l| l.landed) && f.has("goal-1", "risky.txt"), "advisory: it lands as it is: {:?}", s.next);
         assert!(f.told(&a, "advisory, found: [P1] Risky default"), "its findings are on the issue");
 
-        let blocking = Options { goal_branches: Some(true), item_review: Some(ItemReview::Blocking), ..Default::default() };
+        // Custom with the pre-merge review off and a blocking item review: the item review still
+        // runs, guarded by the item review (NIT-563's rework).
+        let blocking = Options { goal_branches: Some(true), pre_review: Some(crate::project_modes::PreReview::Off), item_review: Some(ItemReview::Blocking), ..Default::default() };
         crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Custom, blocking);
         let b = f.issue("B", Some(f.goal));
         let wt = f.work(&b, "risky.txt", "hello again
@@ -1248,6 +1281,9 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
         let s = f.submit(&wt);
         assert!(s.land.is_none() && s.state == "In Progress", "blocking: sent back for its P1: {s:?}");
         assert!(f.told(&b, "Item review by fake requested changes: [P1] Risky default"));
+        // A direct land meets the same review, and does not land.
+        let direct = f.land(&b);
+        assert!(!direct.landed && direct.error.as_deref().is_some_and(|e| e.contains("blocking item review")), "{direct:?}");
         // Fixed, it goes in.
         sh(&wt, &["rm", "-q", "risky.txt"]);
         std::fs::write(wt.join("safe.txt"), "hello
