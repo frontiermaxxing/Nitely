@@ -966,6 +966,9 @@ pub struct SuiteEvidence {
     /// Each test's time, read from the test jobs' whole logs (NIT-522).
     #[serde(skip)]
     pub timings: crate::test_budget::Timings,
+    /// The test jobs' whole logs, by command, for test evidence (NIT-554).
+    #[serde(skip)]
+    pub logs: Vec<(String, String)>,
 }
 
 pub enum Dispatch {
@@ -974,6 +977,7 @@ pub enum Dispatch {
     Unavailable(String),
 }
 
+#[allow(clippy::large_enum_variant)] // one per CI run, never stored in bulk
 pub enum Suite {
     Ran(SuiteEvidence),
     Unavailable(String),
@@ -991,6 +995,8 @@ pub struct Pending {
     workflow_run: u64,
     dispatched: Instant,
     timeout: Duration,
+    /// Keep every command's whole log, not only test jobs' (NIT-554).
+    every_log: bool,
 }
 
 /// The gate's commands that go to CI: those `[lanes] ci_commands` names exactly, that are not
@@ -1085,6 +1091,150 @@ fn gh(args: &[&str], timeout: Duration) -> Result<String> {
     Ok(String::from_utf8_lossy(&process(cmd, &[], timeout, MAX_REQUEST)?).into_owned())
 }
 
+/// The repo's GitHub `owner/name` when CI can be reached from this machine, else why not.
+fn ci_reachable(settings: &Settings, root: &Path, project: &str) -> std::result::Result<String, String> {
+    // The approved playbook's ci_commands are the opt-in: the push goes to the repo's own origin,
+    // which submit pushes to anyway (NIT-515). A machine can still keep a project local.
+    if allowed(&settings.no_ci_projects, project) {
+        return Err(format!("executors.json keeps {project} local (no_ci_projects)"));
+    }
+    let Some(slug) = crate::git::github_slug(&root.to_string_lossy()) else {
+        return Err("the repo's origin is not on GitHub".into());
+    };
+    if let Err(e) = gh(&["auth", "status", "--hostname", "github.com"], Duration::from_secs(30)) {
+        return Err(format!("the gh CLI is missing or not signed in to github.com ({e:#})"));
+    }
+    Ok(slug)
+}
+
+/// Whether CI can take a suite for `project`: its GitHub `owner/name`, else why not.
+pub fn ci_available(root: &Path, project: &str) -> std::result::Result<String, String> {
+    if cfg!(test) {
+        return Err("tests never reach CI".into());
+    }
+    let settings = Settings::load().map_err(|e| format!("{e:#}"))?;
+    ci_reachable(&settings, root, project)
+}
+
+/// Where CI stands for `project`, for measuring tests (NIT-554).
+#[derive(Debug, Clone, PartialEq)]
+pub enum CiState {
+    /// Reachable: its GitHub `owner/name`.
+    Ready(String),
+    /// The repo has none Nitely can use (its origin is not on GitHub), or this machine keeps the
+    /// project local (`no_ci_projects`): a build lane may measure it.
+    Absent(String),
+    /// It has CI that cannot be reached from here (`gh` missing or signed out): fix that first.
+    Blocked(String),
+}
+
+pub fn ci_state(root: &Path, project: &str) -> CiState {
+    if cfg!(test) {
+        return CiState::Absent("tests never reach CI".into());
+    }
+    let settings = match Settings::load() {
+        Ok(s) => s,
+        Err(e) => return CiState::Blocked(format!("{e:#}")),
+    };
+    if allowed(&settings.no_ci_projects, project) {
+        return CiState::Absent(format!("executors.json keeps {project} local (no_ci_projects)"));
+    }
+    if crate::git::github_slug(&root.to_string_lossy()).is_none() {
+        return CiState::Absent("the repo's origin is not on GitHub".into());
+    }
+    match ci_reachable(&settings, root, project) {
+        Ok(slug) => CiState::Ready(slug),
+        Err(why) => CiState::Blocked(why),
+    }
+}
+
+/// One CI job's whole log, or one JUnit XML file from its artifacts, from a finished run at one
+/// commit (NIT-554).
+#[derive(Debug, Clone)]
+pub struct CiLog {
+    pub workflow_run: u64,
+    pub attempt: u64,
+    pub job: String,
+    pub commit: String,
+    pub url: String,
+    pub text: String,
+}
+
+/// The logs, and the JUnit XML its artifacts hold, of up to `limit` finished CI runs that tested
+/// `commit` itself, newest first, read with `gh` and nothing run. Only push and scheduled runs
+/// test the commit GitHub records for them: a pull request's run tests its merge with the base,
+/// and a dispatched run (Nitely's own suites among them) checks out whatever it was asked to. Artifacts named for tests or JUnit and under
+/// 16 MiB are downloaded into `scratch`; reading stops past `max_bytes` in all. Best effort per
+/// run: one that cannot be read is skipped.
+pub fn ci_logs(slug: &str, commit: &str, limit: u32, scratch: &Path, max_bytes: usize) -> Result<Vec<CiLog>> {
+    let listed = gh(&["run", "list", "--repo", slug, "--commit", commit, "--status", "completed", "--limit", &(limit * 5).min(100).to_string(), "--json", "databaseId,attempt,url,event"], Duration::from_secs(60))?;
+    let runs: Vec<serde_json::Value> = serde_json::from_str(&listed)?;
+    let runs = runs.into_iter().filter(|r| tested_its_commit(r["event"].as_str().unwrap_or_default())).take(limit as usize);
+    let mut logs: Vec<CiLog> = Vec::new();
+    let full = |logs: &[CiLog]| logs.iter().map(|l| l.text.len()).sum::<usize>() > max_bytes;
+    for run in runs {
+        let (Some(id), Some(url)) = (run["databaseId"].as_u64(), run["url"].as_str()) else { continue };
+        let attempt = run["attempt"].as_u64().unwrap_or(1);
+        let log = |job: String, text: String| CiLog { workflow_run: id, attempt, job, commit: commit.to_string(), url: url.to_string(), text };
+        let artifacts = gh(&["api", &format!("repos/{slug}/actions/runs/{id}/artifacts"), "--jq", ".artifacts[] | [.name, .size_in_bytes] | @tsv"], Duration::from_secs(60)).unwrap_or_default();
+        for line in artifacts.lines() {
+            let Some((name, size)) = line.split_once('\t') else { continue };
+            let lower = name.to_lowercase();
+            if !(lower.contains("junit") || lower.contains("test")) || size.trim().parse::<usize>().map_or(true, |s| s > 16 << 20) || full(&logs) {
+                continue;
+            }
+            let dir = scratch.join(format!("{id}-{}", logs.len()));
+            if gh(&["run", "download", &id.to_string(), "--repo", slug, "--name", name, "--dir", &dir.to_string_lossy()], Duration::from_secs(300)).is_err() {
+                continue;
+            }
+            for file in xml_files(&dir, 4) {
+                if let Ok(text) = std::fs::read_to_string(&file) {
+                    let leaf = file.file_name().unwrap_or_default().to_string_lossy().into_owned();
+                    logs.push(log(format!("{name}/{leaf}"), text));
+                }
+            }
+        }
+        let Ok(view) = gh(&["run", "view", &id.to_string(), "--repo", slug, "--json", "jobs"], Duration::from_secs(60)) else { continue };
+        let view: serde_json::Value = serde_json::from_str(&view).unwrap_or_default();
+        for job in view["jobs"].as_array().into_iter().flatten() {
+            let Some(j) = job["databaseId"].as_u64() else { continue };
+            if full(&logs) {
+                return Ok(logs);
+            }
+            if let Ok(text) = gh(&["run", "view", "--repo", slug, "--job", &j.to_string(), "--log"], Duration::from_secs(120)) {
+                logs.push(log(job["name"].as_str().unwrap_or("job").to_string(), text));
+            }
+        }
+    }
+    Ok(logs)
+}
+
+/// Whether a run of this event tests the commit GitHub records as its head.
+pub fn tested_its_commit(event: &str) -> bool {
+    matches!(event, "push" | "schedule")
+}
+
+/// The newest commit on `branch` that a finished push or scheduled CI run tested, if any.
+pub fn tested_commit(slug: &str, branch: &str) -> Option<String> {
+    let listed = gh(&["run", "list", "--repo", slug, "--branch", branch, "--status", "completed", "--limit", "50", "--json", "headSha,event"], Duration::from_secs(60)).ok()?;
+    let runs: Vec<serde_json::Value> = serde_json::from_str(&listed).ok()?;
+    runs.into_iter().find(|r| tested_its_commit(r["event"].as_str().unwrap_or_default())).and_then(|r| r["headSha"].as_str().map(String::from))
+}
+
+/// The `.xml` files under `dir`, `depth` folders down at most.
+fn xml_files(dir: &Path, depth: u32) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+        let path = entry.path();
+        if path.is_dir() && depth > 0 {
+            found.extend(xml_files(&path, depth - 1));
+        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")) {
+            found.push(path);
+        }
+    }
+    found
+}
+
 fn dispatch_with(settings: &Settings, db: &Db, root: &Path, pb: &Playbook, req: &SuiteRequest, actor: &Actor) -> Result<Dispatch> {
     let unavailable = |why: String| -> Result<Dispatch> {
         if let Some(key) = req.issue {
@@ -1101,17 +1251,10 @@ fn dispatch_with(settings: &Settings, db: &Db, root: &Path, pb: &Playbook, req: 
     } else {
         req.project.to_string()
     };
-    // The approved playbook's ci_commands are the opt-in: the push goes to the repo's own origin,
-    // which submit pushes to anyway (NIT-515). A machine can still keep a project local.
-    if allowed(&settings.no_ci_projects, &project) {
-        return unavailable(format!("executors.json keeps {project} local (no_ci_projects)"));
-    }
-    let Some(slug) = crate::git::github_slug(&root.to_string_lossy()) else {
-        return unavailable("the repo's origin is not on GitHub".into());
+    let slug = match ci_reachable(settings, root, &project) {
+        Ok(slug) => slug,
+        Err(why) => return unavailable(why),
     };
-    if let Err(e) = gh(&["auth", "status", "--hostname", "github.com"], Duration::from_secs(30)) {
-        return unavailable(format!("the gh CLI is missing or not signed in to github.com ({e:#})"));
-    }
     let rules = pb.lanes.clone().unwrap_or_default();
     let workflow = rules.ci_workflow.clone();
     let workflow_ref = req.workflow_ref.map(str::to_string).or(rules.ci_ref.clone()).unwrap_or_else(|| pb.integration_branch().to_string());
@@ -1187,7 +1330,22 @@ fn dispatch_with(settings: &Settings, db: &Db, root: &Path, pb: &Playbook, req: 
         workflow_run,
         dispatched,
         timeout: Duration::from_secs((rules.timeout_minutes.clamp(1, 120) + 30) * 60),
+        every_log: false,
     }))
+}
+
+impl Pending {
+    /// Caps how long the run may take, queue included: past it, `wait` cancels it (NIT-554).
+    pub fn cap(mut self, minutes: u64) -> Pending {
+        self.timeout = self.timeout.min(Duration::from_secs(minutes.max(1) * 60));
+        self
+    }
+
+    /// Keeps every command's whole log in the evidence, whatever its runner (NIT-554).
+    pub fn every_log(mut self) -> Pending {
+        self.every_log = true;
+        self
+    }
 }
 
 /// Best effort: removes a request's ref, only while it still points at its commit.
@@ -1228,9 +1386,10 @@ pub fn wait(db: &Db, pending: Pending) -> Result<SuiteEvidence> {
             for result in evidence.results.iter_mut() {
                 let job = result.output.rsplit('/').next().and_then(|j| j.parse::<u64>().ok());
                 // A test job's whole log, for each test's time; best effort.
-                if result.command.contains("test") {
+                if pending.every_log || result.command.contains("test") {
                     if let Some(log) = job.and_then(|j| gh(&["run", "view", "--repo", &pending.slug, "--job", &j.to_string(), "--log"], Duration::from_secs(120)).ok()) {
                         evidence.timings.extend(crate::test_budget::parse(&log));
+                        evidence.logs.push((result.command.clone(), log));
                     }
                 }
                 if result.ok {
@@ -1326,6 +1485,7 @@ fn evidence(pending: &Pending, view: &serde_json::Value, (passed, jobs): (bool, 
         queued_seconds: pending.dispatched.elapsed().as_secs().saturating_sub(run_seconds),
         run_seconds,
         timings: Default::default(),
+        logs: vec![],
     }
 }
 
