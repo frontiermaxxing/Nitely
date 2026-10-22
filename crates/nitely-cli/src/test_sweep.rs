@@ -443,7 +443,8 @@ pub fn run(command: Command) -> Result<()> {
             // where no Nitely project is found here.
             let record = (|| -> Result<Vec<nitely_core::test_catches::TestCatches>> {
                 let (config, db) = (Config::load()?, Db::open_default()?);
-                let project = nitely_core::resolve_project(&config, &db, project.as_deref(), &crate::cwd()?)?;
+                let project =
+                    nitely_core::resolve_project(&config, &db, project.as_deref(), &crate::cwd()?)?;
                 db.catches_by_test(&project)
             })()
             .unwrap_or_default();
@@ -497,6 +498,7 @@ pub fn run(command: Command) -> Result<()> {
                 has_lanes: repo.has_lanes,
                 playbook: repo.target.as_ref(),
                 record: &record,
+                package: repo.package.as_ref(),
             };
             crate::print_json(&Report::read(&file)?.propose(
                 &mut db,
