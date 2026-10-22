@@ -433,6 +433,9 @@ pub struct BatchItem {
     /// Issues the duplicate check passes over for this item: a goal plan's own issues, which
     /// describe the very work it files.
     pub not_duplicates: Vec<String>,
+    /// The batch's items are distinct by design (a goal plan's cards, which the person reads and
+    /// edits together), so they are not checked as duplicates of one another.
+    pub distinct_in_batch: bool,
 }
 
 /// What a batch filed: each ref's key (the new issue, or the one it duplicates), the issues filed in
@@ -998,7 +1001,7 @@ impl Db {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for &i in &order {
             let (item, c) = (&items[i], &checked[i]);
-            let earlier = if item.issue.allow_similar {
+            let earlier = if item.issue.allow_similar || item.distinct_in_batch {
                 None
             } else {
                 out.filed.iter().find_map(|f| {
@@ -2744,7 +2747,7 @@ mod tests {
         let topics = ["billing", "search", "export", "import", "login", "audit", "themes", "alerts", "uploads", "reports", "webhooks"];
         let items: Vec<BatchItem> = topics
             .iter()
-            .map(|t| BatchItem { local_ref: t.to_string(), not_duplicates: vec![], issue: NewIssue { allow_similar: true, ..new(&format!("Build the {t} page")) } })
+            .map(|t| BatchItem { local_ref: t.to_string(), not_duplicates: vec![], distinct_in_batch: false, issue: NewIssue { allow_similar: true, ..new(&format!("Build the {t} page")) } })
             .collect();
         assert_eq!(db.create_issues(&items, &Actor::Agent("claude:a".into())).unwrap().filed.len(), 11);
         std::fs::remove_dir_all(dir).ok();
@@ -2757,7 +2760,7 @@ mod tests {
         let agent = Actor::Agent("claude:a".into());
         let existing = db.create_issue(&new("Wire the settings page"), &agent).unwrap();
         let item = |r: &str, title: &str, blocked_by: &[&str]| BatchItem {
-            not_duplicates: vec![],
+            not_duplicates: vec![], distinct_in_batch: false,
             local_ref: r.into(),
             issue: NewIssue { blocked_by: blocked_by.iter().map(|b| b.to_string()).collect(), ..new(title) },
         };

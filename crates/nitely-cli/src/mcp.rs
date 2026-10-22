@@ -562,9 +562,23 @@ fn tools() -> Value {
             } }
         },
         {
-            "name": "test_sweep_guide",
-            "description": "Report-only Rust/Node test hygiene sweep, bounded evidence collection and editable human proposal. No automatic test deletion.",
+            "name": "test_optimize_guide",
+            "description": "How to make a repo's tests cost what they are worth (/nitely-test-optimize), in any language: measure from CI logs or JUnit XML under a cost cap, classify the slow, flaky, clock-waiting and UI-presence tests, and propose one goal with `test_optimize_propose`. Nothing is deleted or refactored before the person approves.",
             "inputSchema": { "type": "object", "properties": {} }
+        },
+        {
+            "name": "test_optimize_propose",
+            "description": "Propose one goal from a sweep report and the classes of its flagged tests (`nitely test-sweep map`): a refactor card per module with the decisions to lift, the scenarios kept and the time measured; a clock-wait card; the test budget; one deletion card that names what covers each test and waits for the refactors; and, where the repo has CI, a playbook proposal routing every test command to CI. The person approves; nothing is applied.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "report": { "type": "string", "description": "Path of the sweep report (collect's --output)." },
+                    "classes": { "type": "string", "description": "Path of the JSON array of {test, class, ...} for every flagged test." },
+                    "slow": { "type": "number", "description": "Seconds past which a test is slow; the budget's per-test limit. Default 2." },
+                    "issue": { "type": "string", "description": "The sweep issue this answers, if any." }
+                },
+                "required": ["report", "classes"]
+            }
         },
         {
             "name": "setup_guide",
@@ -1465,7 +1479,29 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let issues: Vec<_> = db.list_issues(Some(&project), include_closed)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))).collect();
             json!(issues)
         }
-        "test_sweep_guide" => json!({ "guide": nitely_core::test_sweep::GUIDE }),
+        // `test_sweep_guide`, its old name, for agents with older instructions (NIT-558).
+        "test_optimize_guide" | "test_sweep_guide" => json!({ "guide": nitely_core::test_sweep::GUIDE, "classify": nitely_core::test_sweep::OPTIMIZE_GUIDE }),
+        "test_optimize_propose" => {
+            use nitely_core::test_sweep;
+            let project = project(&db)?;
+            let root = playbook::repo_for_issue(&config, Some(&project), &server.cwd)?;
+            let here = std::path::Path::new(&server.cwd);
+            let report = test_sweep::Report::read(&here.join(req(args, "report")?))?;
+            let classes = test_sweep::read_classes(&here.join(req(args, "classes")?))?;
+            let repo = test_sweep::repo_facts(&config, &root)?;
+            let record = db.catches_by_test(&project)?;
+            let facts = test_sweep::OptimizeFacts {
+                slow_seconds: args.get("slow").and_then(Value::as_f64).unwrap_or(2.0),
+                tests: &repo.tests,
+                ci_commands: &repo.ci_commands,
+                has_ci: repo.has_ci,
+                has_lanes: repo.has_lanes,
+                playbook: repo.target.as_ref(),
+                record: &record,
+                package: repo.package.as_ref(),
+            };
+            json!(report.propose(&mut db, &project, str_arg(args, "issue").map(String::from), &classes, &facts, &actor)?)
+        }
         "setup_guide" => json!({ "guide": nitely_core::instructions::SETUP_GUIDE }),
         "goals" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => json!(db.goal_detail(id)?),
@@ -1591,7 +1627,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                             issue.review_source = Some("author".into());
                         }
                     }
-                    Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue, not_duplicates: vec![] })
+                    Ok(BatchItem { local_ref: str_arg(item, "ref").unwrap_or_default().to_string(), issue, not_duplicates: vec![], distinct_in_batch: false })
                 })
                 .collect::<Result<Vec<_>>>()?;
             let before = db.project_labels(&project)?;

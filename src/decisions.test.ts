@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { APPROVALS, FINDINGS, groupFindings, askPlaces, decisionsOf, detailFingerprints, detailsToRead, folderOf, sessionOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
+import { APPROVALS, FINDINGS, findingsLeft, groupFindings, askPlaces, decisionsOf, detailFingerprints, detailsToRead, folderOf, sessionOf, groupApprovals, inProject, issueDecision, keyProject, nextProject, projectCounts, projectOf, firstLine, outcomeOf, shownDecisions, trackAfter, type Decision, type Resolved } from "./decisions.ts";
 import type { Ask, Board, IssueDetail, IssueRecord } from "./types.ts";
 import type { Track } from "./ui/lifecycle.ts";
 
@@ -197,7 +197,12 @@ test("NIT-571: one issue's review findings are one card, each finding decided on
   assert.equal(card.since, NOW - 98, "waiting since the oldest");
   // A finding alone and an ordinary question stay cards of their own.
   assert.deepEqual(shown.filter((d) => d !== card).map((d) => d.id).sort(), ["ask-4", "ask-5"]);
-  assert.equal(groupFindings(ds.filter((d) => d.id !== "ask-2")).length, 3, "one finding left: its own card again");
+  const left = groupFindings(ds.filter((d) => d.id !== "ask-2"));
+  assert.equal(left.length, 3, "one finding left: its own card again");
+  // The open card stays on the issue whose findings card shrank, not the first decision (NIT-590 review).
+  assert.equal(findingsLeft(left, `${FINDINGS}X-7`)?.id, "ask-3");
+  assert.equal(findingsLeft(left, `${FINDINGS}X-9`), undefined, "nothing of that issue is left");
+  assert.equal(findingsLeft(left, "ask-5"), undefined, "only a findings card carries on");
 });
 
 test("the human's own work is its own kind of decision, in any open state outside Backlog", () => {

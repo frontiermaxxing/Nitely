@@ -10,6 +10,7 @@ import {
   decisionsOf,
   detailFingerprints,
   detailsToRead,
+  findingsLeft,
   firstLine,
   folderOf,
   groupApprovals,
@@ -137,6 +138,7 @@ export function Inbox(props: {
   const open =
     ordered.find((d) => d.id === picked || d.group?.some((m) => m.id === picked)) ??
     (picked === APPROVALS ? ordered.find((d) => d.kind === "approve") : undefined) ??
+    findingsLeft(ordered, picked) ??
     ordered[0] ??
     null;
   useEffect(() => {

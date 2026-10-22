@@ -11,7 +11,6 @@ use std::path::Path;
 use crate::db::{now, Db};
 use crate::issues::{Actor, IssueRecord};
 use crate::playbook::{self, git, git_remote, GateResult, Playbook};
-use crate::project_modes::ItemReview;
 use crate::review::{Finding, PreviousRound, Review};
 
 /// The submitter's explanation, captured with the revision handed in, never guessed from an issue.
@@ -179,10 +178,10 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if !dirty.trim().is_empty() {
         bail!("{} has uncommitted changes; commit them first:\n{}", worktree.display(), dirty.trim_end());
     }
-    // An item of a goal with a goal branch has no pull request of its own: its hop is the land into
-    // the goal branch, with item checks and the item review the mode asks for (goal_branch.rs).
-    if let Some(gb) = db.goal_branch_of_issue(&key)?.filter(|g| g.repo == crate::paths::normalize(&root.to_string_lossy())) {
-        return submit_into_goal(db, config, &issue, &root, &worktree, &branch, &gb.branch, opts.local_only, actor);
+    // An item of a goal with a goal branch has no review or pull request of its own: its hop is the
+    // land into the goal branch, with item checks (goal_branch.rs).
+    if db.goal_branch_of_issue(&key)?.is_some_and(|g| g.repo == crate::paths::normalize(&root.to_string_lossy())) {
+        return submit_into_goal(db, config, &issue, &root, &branch, opts.local_only, actor);
     }
     crate::submodules::check_pointers(&pb, &worktree)?;
     let wt = worktree.to_string_lossy().into_owned();
@@ -258,11 +257,6 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // A queued gate may outlive a human settings change. Read the authoritative policy again.
     let mut pb = Playbook::load(&root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
-    // A goal item on main still gets the blocking item review its mode asks for, though changes
-    // with no goal land unreviewed (NIT-563).
-    if issue.goal.is_some() && item_review_of(db, &issue.key)? == ItemReview::Blocking {
-        pb.review.enabled = true;
-    }
     pb.review.policy_root = Some(root.clone());
     pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.into_iter().collect();
     crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
@@ -548,117 +542,16 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     Ok(out)
 }
 
-/// The item review the issue's mode asks for (Off with no mode).
-fn item_review_of(db: &Db, key: &str) -> Result<ItemReview> {
-    Ok(crate::project_modes::for_issue(db, key)?.and_then(|m| m.options().item_review).unwrap_or(ItemReview::Off))
-}
-
-/// The item review of a goal item, against its goal branch `goal_branch` (NIT-563), recorded as
-/// any review is, so the next round, acceptances and land read it. Returns the review and the
-/// patch it reviewed.
-fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, branch: &str, goal_branch: &str, actor: &Actor) -> Result<(Review, String)> {
-    let mut pb = Playbook::load(root)?;
-    crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
-    pb.review.policy_root = Some(root.to_path_buf());
-    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.into_iter().collect();
-    // The mode asked for it, whether or not changes with no goal are reviewed.
-    pb.review.enabled = true;
-    let since = playbook::diff_base(worktree, goal_branch);
-    let head = git(worktree, &["rev-parse", "HEAD"])?.trim().to_string();
-    let gate = GateResult { mode_authority: None, passed: true, plan: None, skipped: None, commit: head[..head.len().min(7)].to_string(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
-    let (vendor, _) = crate::git::parse_branch(branch);
-    let vendor = vendor.unwrap_or_default();
-    let previous = previous_round(db, &issue.key, worktree)?;
-    let mut rules = pb.review.clone();
-    rules.context = review_context(db, issue, &gate)?;
-    let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, worktree), &[])?;
-    let wt = worktree.to_string_lossy().into_owned();
-    db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &format!("Item review by {}{} started", choice.reviewer, noted(&choice.note)))?;
-    let mut review = rules.run(&choice.reviewer, worktree, &since, previous.as_ref())?;
-    review.note = choice.note.clone();
-    let patch = patch_id_range(worktree, &since, &head)?;
-    let record = Submitted {
-        verification: None,
-        issue: issue.key.clone(),
-        branch: branch.to_string(),
-        base: goal_branch.to_string(),
-        patch_id: patch.clone(),
-        commit: gate.commit.clone(),
-        files: 0,
-        gate,
-        solution: None,
-        review: Some(review.clone()),
-        review_disabled: false,
-        review_batched: false,
-        yolo: false,
-        approver: "agent".into(),
-        reasons: vec![],
-        approval_stands: false,
-        pushed: false,
-        pr_url: None,
-        pr_error: None,
-        land: None,
-        state: issue.state.clone(),
-        next: String::new(),
-    };
-    db.record_review(&record)?;
-    db.close_superseded_requests(&issue.key, &review.findings)?;
-    Ok((review, patch))
-}
-
-/// `submit` for an item of a goal with a goal branch: the item review its mode asks for, then the
-/// land into that branch, as `land` would, and says so. The goal's checkpoint gets the blocking
-/// review of the whole slice and goes into main.
-#[allow(clippy::too_many_arguments)]
-fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, root: &Path, worktree: &Path, branch: &str, goal_branch: &str, local_only: bool, actor: &Actor) -> Result<Submitted> {
-    let mode = item_review_of(db, &issue.key)?;
-    let mut reviewed: Option<Review> = None;
-    if mode != ItemReview::Off {
-        let (review, patch) = review_item(db, root, worktree, issue, branch, goal_branch, actor)?;
-        let accepted: Vec<String> = db.accepted_for(&issue.key, &patch)?.into_iter().map(|a| a.finding).collect();
-        let open = crate::submit_rules::blocking(&review.findings, &accepted);
-        let by = format!("{}{}", review.reviewer, noted(&review.note));
-        if !crate::submit_rules::item_lands(mode, &review.findings, &accepted) {
-            db.add_note(&issue.key, &format!("Item review by {by} requested changes: {}", open.join("; ")), "submit", actor)?;
-            let state = if issue.state != "In Progress" && issue.origin == "nitely" { db.move_issue(&issue.key, "In Progress", None, None, actor)?.state } else { issue.state.clone() };
-            return Ok(Submitted {
-                verification: None,
-                issue: issue.key.clone(),
-                branch: branch.to_string(),
-                base: goal_branch.to_string(),
-                patch_id: patch,
-                commit: String::new(),
-                files: 0,
-                gate: GateResult { mode_authority: None, passed: true, plan: None, skipped: Some("not run: the item review asked for changes".into()), commit: String::new(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None },
-                solution: None,
-                review: Some(review),
-                review_disabled: false,
-                review_batched: false,
-                yolo: false,
-                approver: "agent".into(),
-                reasons: vec![],
-                approval_stands: false,
-                pushed: false,
-                pr_url: None,
-                pr_error: None,
-                land: None,
-                state,
-                next: crate::submit_rules::next_state(&crate::submit_rules::Outcome { changes: true, ..Default::default() }).1.to_string(),
-            });
-        }
-        if !open.is_empty() {
-            db.add_note(&issue.key, &format!("Item review by {by}, advisory, found: {}. It lands into {goal_branch} as it is; the checkpoint review sees the whole slice.", open.join("; ")), "note", actor)?;
-        }
-        reviewed = Some(review);
-    }
+/// `submit` for an item of a goal with a goal branch: it lands into that branch now, as `land`
+/// would, and says so. The goal's checkpoint is what gets reviewed and goes into main.
+fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, root: &Path, branch: &str, local_only: bool, actor: &Actor) -> Result<Submitted> {
     let dir = root.to_string_lossy().into_owned();
     let landed = crate::land::land(db, config, &crate::land::LandOptions { dir: &dir, issue_key: &issue.key, push: !local_only, keep: false, break_lock: false }, actor)?;
     let target = landed.goal_branch.clone().unwrap_or_else(|| landed.base.clone());
     let gate = landed.gate.clone().unwrap_or(GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: String::new(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
     let next = if landed.landed {
         let mut next = format!(
-            "An item of a goal lands into {target} with item checks{}, with no pull request of its own: it landed there at {}. The goal's checkpoint reviews it and lands it into main; nothing is left to do.",
-            if reviewed.is_some() { " and its item review" } else { " and no review of its own" },
+            "An item of a goal lands into {target} with item checks, with no review or pull request of its own: it landed there at {}. The goal's checkpoint reviews it and lands it into main; nothing is left to do.",
             landed.head.as_deref().unwrap_or("?")
         );
         for said in &landed.goals {
@@ -678,7 +571,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
         files: 0,
         gate,
         solution: None,
-        review: reviewed,
+        review: None,
         review_disabled: false,
         review_batched: false,
         yolo: false,
