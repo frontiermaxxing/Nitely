@@ -87,6 +87,20 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let mut pb = Playbook::load(&root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
+    // A land asked again after the change landed (a retry loop, a late `--after` job) ends here,
+    // recording nothing: it is no send-back (NIT-577).
+    if issue.state == "Done" {
+        let target = match db.goal_branch_of_issue(&issue.key)? {
+            Some(gb) => gb.branch,
+            None => pb.integration_branch().to_string(),
+        };
+        let ahead = branch_of(&root, &issue.key).ok().and_then(|(b, _)| git(&root, &["rev-list", "--count", &format!("{target}..{b}")]).ok()).map(|n| n.trim() != "0");
+        let event = db.timeline(&issue.key)?.into_iter().rev().find(|e| e.kind == "landed").and_then(|e| e.summary);
+        if let Some(said) = already_landed(true, ahead, event.as_deref()) {
+            let head = event.as_deref().and_then(|s| s.rsplit_once(" at ")).map(|(_, h)| h.trim().to_string()).filter(|h| h != "?");
+            return Ok(Landed { issue: issue.key.clone(), base: target, landed: true, head, warnings: vec![said], ..Default::default() });
+        }
+    }
     // This land is the issue's land now: a `land --after` job still waiting for it ends (NIT-513).
     // A job's own land runs with its row `landing`, so it is not one of them.
     crate::land_job::end_waiting(db, &issue.key, "landed directly instead")?;
@@ -1163,6 +1177,19 @@ fn clean_up_landed(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOp
     Ok(())
 }
 
+/// What a land of an issue that may have landed already says instead of landing, if anything. A
+/// Done issue whose branch has nothing beyond its target (or is gone, `ahead` None) has landed;
+/// one with new commits on its branch lands them. `event` is its last landed event, to say where.
+fn already_landed(done: bool, ahead: Option<bool>, event: Option<&str>) -> Option<String> {
+    if !done || ahead == Some(true) {
+        return None;
+    }
+    Some(match event {
+        Some(e) => format!("already landed: {e}; nothing to do"),
+        None => "already Done, with nothing on its branch to land; nothing to do".to_string(),
+    })
+}
+
 /// An item's land into its goal branch: no review and no human approval (both come at the
 /// checkpoint into main), but a blocked path is still refused.
 fn check_item(pb: &Playbook, worktree: &Path, base: &str, gb: &crate::goal_branch::GoalBranch) -> Result<String> {
@@ -1584,6 +1611,17 @@ pub(crate) fn first_line(e: &anyhow::Error) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A land asked again once its issue is Done ends as already landed, never a send-back; new
+    /// commits on a Done issue's branch still land (NIT-577).
+    #[test]
+    fn a_landed_issue_lands_again_as_already_landed() {
+        let event = Some("Landed claude/app-7-x on main at 1a2b3c4");
+        assert_eq!(already_landed(true, Some(false), event).as_deref(), Some("already landed: Landed claude/app-7-x on main at 1a2b3c4; nothing to do"));
+        assert!(already_landed(true, None, None).is_some(), "a cleaned-up branch is landed too");
+        assert_eq!(already_landed(true, Some(true), event), None, "new commits land");
+        assert_eq!(already_landed(false, Some(false), event), None, "not Done: the land decides");
+    }
 
     /// The main checkout's fast-forward clears an index.lock a killed land left (its mark names a
     /// process that is gone), and leaves anyone else's, saying where it is (NIT-341).
