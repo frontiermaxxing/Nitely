@@ -1060,6 +1060,22 @@ fn ask_build(from: &std::path::Path) -> Option<(Option<i32>, String)> {
     Some((out.status.code(), String::from_utf8_lossy(&out.stderr).trim().to_string()))
 }
 
+/// The agent starting `issue` from the CLI holds it, as from MCP (NIT-274): as its Claude Code
+/// session when the shell names one, else as `<agent>:<folder>`, the id a nitely MCP server in
+/// that folder acts under before its calls name their session. Its own claims also go by `<agent>`
+/// (what `nitely issue next --agent` claims as) and `<agent>:<worktree>` (what the crew claims for
+/// the worker it starts through here). Says why when it took the issue over.
+fn claim_for_start(db: &Db, root: &std::path::Path, cwd: &str, agent: &str, issue: &nitely_core::IssueRecord, take_over: bool) -> Result<Option<String>> {
+    let folder = format!("{agent}:{}", paths::normalize(cwd));
+    let holder = match std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|s| !s.is_empty()) {
+        Some(session) => format!("claude:{session}"),
+        None => folder.clone(),
+    };
+    let worktree = playbook::Playbook::load(root)?.worktree_for(root, agent, issue);
+    let mine = [folder, agent.to_string(), format!("{agent}:{}", paths::normalize(&worktree.to_string_lossy()))];
+    db.claim_for_start(&issue.key, &holder, &mine, take_over)
+}
+
 fn run(cmd: Cmd) -> Result<()> {
     // Agents run the CLI too, so it never acts as the human: approving and answering asks happen
     // only in the app.
@@ -1683,7 +1699,10 @@ fn run(cmd: Cmd) -> Result<()> {
                 (None, None) => anyhow::bail!("pass the change's title, or --key for its issue"),
             };
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &cwd)?;
-            let started = nitely_core::quick::start(&db, &root, &issue, &agent, &me)?;
+            // It holds the issue as `nitely start` does, so next_task hands it to no one else (NIT-644).
+            let took = claim_for_start(&db, &root, &cwd, &agent, &issue, false)?;
+            let mut started = nitely_core::quick::start(&db, &root, &issue, &agent, &me)?;
+            started.warnings.extend(took);
             for w in &started.warnings {
                 eprintln!("warning: {w}");
             }
@@ -1724,19 +1743,7 @@ fn run(cmd: Cmd) -> Result<()> {
             let cwd = cwd()?;
             let issue = db.issue(&key)?.ok_or_else(|| anyhow::anyhow!("no issue {key}"))?;
             let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &cwd)?;
-            // The agent starting it holds it, as from MCP (NIT-274): as its Claude Code session
-            // when the shell names one, else as `<agent>:<folder>`, the id a nitely MCP server in
-            // that folder acts under before its calls name their session. Its own claims also go by
-            // `<agent>` (what `nitely issue next --agent` claims as) and `<agent>:<worktree>` (what
-            // the crew claims for the worker it starts through here).
-            let folder = format!("{agent}:{}", paths::normalize(&cwd));
-            let holder = match std::env::var("CLAUDE_CODE_SESSION_ID").ok().filter(|s| !s.is_empty()) {
-                Some(session) => format!("claude:{session}"),
-                None => folder.clone(),
-            };
-            let worktree = playbook::Playbook::load(&root)?.worktree_for(&root, &agent, &issue);
-            let mine = [folder, agent.clone(), format!("{agent}:{}", paths::normalize(&worktree.to_string_lossy()))];
-            let took = db.claim_for_start(&issue.key, &holder, &mine, take_over)?;
+            let took = claim_for_start(&db, &root, &cwd, &agent, &issue, take_over)?;
             let mut started = playbook::start_task(&db, &root, &issue, &agent, &me)?;
             started.warnings.extend(took);
             for w in &started.warnings {
