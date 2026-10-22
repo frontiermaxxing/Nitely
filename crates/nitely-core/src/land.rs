@@ -363,6 +363,10 @@ pub(crate) fn record_landed(db: &mut Db, root: &Path, issue: &IssueRecord, repor
         report.warnings.push(format!("periodic review record needs recovery: {e:#}"));
         db.log_event(actor,Some(&issue.key),None,"periodic_review_record_failed",&format!("{e:#}"))?;
     }
+    // A quick change waits for its review after landing (NIT-625).
+    if let Err(e)=crate::quick_review::on_landed(db,root,issue,report) {
+        report.warnings.push(format!("the quick change's review after landing was not recorded: {e:#}"));
+    }
     Ok(())
 }
 

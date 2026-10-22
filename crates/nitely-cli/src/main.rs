@@ -485,6 +485,12 @@ enum QuickCmd {
         #[arg(long)]
         message: Option<String>,
     },
+    /// Review now, in one reviewer call, the quick changes of this repo that landed and wait for
+    /// their review after landing (the app does it once five wait or the oldest waited 3 hours).
+    Review {
+        #[arg(long)]
+        project: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1683,6 +1689,20 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             println!("{} started in {}", started.issue, started.worktree);
             println!("Make the change there, then run `nitely quick land` in it.");
+            Ok(())
+        }
+        Cmd::Quick { command: QuickCmd::Review { project } } => {
+            let config = Config::load()?;
+            let mut db = Db::open_default()?;
+            let cwd = cwd()?;
+            let root = playbook::repo_for_issue(&config, Some(&project), &cwd)?;
+            let branch = Playbook::load(&root)?.integration_branch().to_string();
+            match nitely_core::quick_review::review(&mut db, &root, &project, &branch)? {
+                Some(r) => println!("{} reviewed {} quick change(s): {} finding(s){}", r.reviewer, r.changes.len(), r.findings, if r.filed.is_empty() { String::new() } else { format!("; reopened or filed {}", r.filed.join(", ")) }),
+                None => println!("No quick change waits for its review after landing."),
+            }
+            let (reviewed, escaped) = nitely_core::quick_review::escape_rate(&db, &project)?;
+            println!("{project}: {escaped} of {reviewed} quick changes reviewed after landing had findings.");
             Ok(())
         }
         Cmd::Quick { command: QuickCmd::Land { message } } => {

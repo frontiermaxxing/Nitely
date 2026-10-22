@@ -77,6 +77,7 @@ pub mod affected_tests;
 pub mod release_verification;
 pub mod push;
 pub mod quick;
+pub mod quick_review;
 pub mod watch;
 pub mod submit;
 pub mod submit_rules;
