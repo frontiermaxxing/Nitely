@@ -115,6 +115,13 @@ Andrew", and once it read the code to confirm a finding was stale (lanes.rs:78 o
    Inbox (on the phone too), priority and order on the goal view. A question like "why can't I click
    done" or "is the disk the worktrees?" was a product bug or a missing view each time (NIT-220,
    NIT-227, the disk guard), and should be fixed as one.
+9. **A small change stays with the agent already there (NIT-626).** A change of a few lines in one
+   or two files that needs no new test is made in the session that found it, through the quick
+   path: `quick_start`, the edit, `quick_land` (NIT-624). A coordinator does not start a worker,
+   or a new session with its own worktree, for it; the person once had to say "we can just make it
+   here" about a three-line script change. A new agent is for work big enough to deserve one. When
+   `quick_land` finds the change is not small, or that a person must approve it, the same agent
+   submits it from the same worktree; when its own checks fail, it fixes them and lands again.
 
 ## What stays the person's
 
