@@ -916,8 +916,8 @@ does not.\n",
 fn after_failed_gate(gate: &GateResult) -> String {
     if let Some(r) = gate.timed_out() {
         return format!(
-            "The gate did not finish: `{}` ran past the lane's time limit and was stopped, which says nothing about this change. Read its log for where it hung, then submit again; a gate that needs longer needs a larger `[lanes] timeout_minutes`.",
-            r.command
+            "The gate did not finish: {}, which says nothing about this change. Read its log for where it stopped, then submit again; a gate that needs longer needs a larger `[lanes] timeout_minutes`.",
+            r.stopped()
         );
     }
     // The step that failed: CI runs its steps side by side, so it need not be the last one reported.

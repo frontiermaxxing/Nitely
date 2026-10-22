@@ -120,6 +120,21 @@ future filtered runner must discover actual test IDs and prove they executed bef
 can become reduced execution evidence. A passing command alone does not prove nonzero
 JavaScript tests ran.
 
+## Rule tests run with every change
+
+Some tests read the whole tree rather than any one module, so no change reaches them through
+its own files. These include a git run outside `run_git`, a keychain opened anywhere but
+`entry`, and this map out of step with the tree. The map lists the suites that hold them under
+the top-level `always` key, as `component/suite`:
+
+```toml
+always = ["core/repo-rules"]
+```
+
+Every reduced selection runs those suites: a mapped one, and a small change's own-file checks
+alike. The full gate runs them anyway. The repo's rule tests are named `repo_rule_*`, so one
+Cargo filter finds them all.
+
 ## Small changes to files no test reaches
 
 A file no component owns, or a build script's input, normally sends the change to Full. Under
