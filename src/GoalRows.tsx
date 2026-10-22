@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { GoalDetail, GoalRisk } from "./types";
 import { crewOnGoal, finishLine, goalBranchLine, goalCounts, goalOrder, riskTone, targetLine } from "./goals";
-import { IssueToken, Meter } from "./ui";
+import { IssueToken, Meter, Switch } from "./ui";
 import { ProjectFocus } from "./ProjectFocus";
 import "./goal-rows.css";
 
@@ -18,16 +18,24 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   const [error, setError] = useState<string | null>(null);
   // Bumped after the person reorders, to read the goals again.
   const [reordered, setReordered] = useState(0);
+  // Completed and dropped goals stay hidden unless asked for (NIT-611).
+  const [showCompleted, setShowCompleted] = useState(false);
 
   useEffect(() => {
     let live = true;
-    invoke<GoalDetail[]>("goals", { project: props.project ?? null })
+    invoke<GoalDetail[]>("goals", { project: props.project ?? null, includeClosed: showCompleted })
       .then((g) => live && (setGoals(g), setError(null)))
       .catch((e) => live && setError(String(e)));
     return () => {
       live = false;
     };
-  }, [props.project, props.version, reordered]);
+  }, [props.project, props.version, reordered, showCompleted]);
+
+  const reopen = (id: number) => {
+    invoke("goal_state", { id, state: "active" })
+      .then(() => setReordered((n) => n + 1))
+      .catch((e) => setError(String(e)));
+  };
 
   // The crew works a project's goals in this order: the person puts one first (NIT-243).
   const first = (id: number) => {
@@ -42,7 +50,13 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   if (!props.project && goals.length === 0) return null;
   const rows = (
     <>
-      {props.project && <ProjectFocus key={props.project} project={props.project} version={props.version} goals={goals} />}
+      {/* The focus picker never offers a completed goal. */}
+      {props.project && <ProjectFocus key={props.project} project={props.project} version={props.version} goals={goals.filter((g) => g.goal.state === "active")} />}
+      {props.project && (
+        <div className="goal-rows-tools">
+          <Switch checked={showCompleted} onChange={setShowCompleted} label="Show completed" />
+        </div>
+      )}
       <div className="goal-rows">
         {goals.map((g, n) => (
           <GoalRow
@@ -52,7 +66,8 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
             showProject={!props.project}
             focused={g.goal.id === props.focus?.id}
             onOpenIssue={props.onOpenIssue}
-            onFirst={props.project && n > 0 ? () => first(g.goal.id) : undefined}
+            onFirst={props.project && n > 0 && g.goal.state === "active" ? () => first(g.goal.id) : undefined}
+            onReopen={g.goal.state !== "active" ? () => reopen(g.goal.id) : undefined}
           />
         ))}
       </div>
@@ -96,7 +111,7 @@ function GoalBranchChip(props: { goal: GoalDetail["goal"] }) {
 }
 
 /** One goal: its title and date, a meter of whose move its issues are, then the issues in station order. */
-export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focused?: boolean; onOpenIssue: (key: string) => void; onFirst?: () => void }) {
+export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focused?: boolean; onOpenIssue: (key: string) => void; onFirst?: () => void; onReopen?: () => void }) {
   const { goal } = props.detail;
   // Opened from an issue's goal: scrolled to and marked for a moment.
   const row = useRef<HTMLDivElement>(null);
@@ -112,11 +127,17 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
   const pace = finishLine(props.detail.finish, goal.target_date, today);
   const risks = props.detail.risks ?? [];
   return (
-    <div className={`goal-row${props.focused ? " goal-focus" : ""}`} ref={row} id={`goal-${goal.id}`}>
+    <div className={`goal-row${props.focused ? " goal-focus" : ""}${goal.state !== "active" ? " goal-row-closed" : ""}`} ref={row} id={`goal-${goal.id}`}>
       <div className="goal-head">
         <span className="goal-title" title={goal.outcome}>
           {goal.title}
         </span>
+        {goal.state !== "active" && <span className="goal-state">{goal.state === "done" ? "Completed" : "Dropped"}</span>}
+        {props.onReopen && (
+          <button className="link goal-reopen" onClick={props.onReopen} title="Make it active again: agents take its open issues, and it can be the focus">
+            Reopen
+          </button>
+        )}
         {props.showProject && <span className="mono goal-project">{goal.project}</span>}
         {when && <span className={`goal-when${when.late ? " goal-late" : ""}`}>{when.text}</span>}
         {pace && (
