@@ -238,6 +238,8 @@ export function Inbox(props: {
   };
 
   return (
+    // A container of its own: the split follows the Inbox's width, not the window's (NIT-591).
+    <div className="inbox-frame">
     <div className="inbox-split" onKeyDown={onKeyDown}>
       <div className="inbox-list" ref={list}>
         <div className="inbox-head">
@@ -277,7 +279,10 @@ export function Inbox(props: {
                   document.querySelector<HTMLElement>(`[data-decision="${CSS.escape(next.id)}"]`)?.focus();
                 }}
                 now={now}
-                onPick={() => setPicked(d.id)}
+                onPick={() => {
+                  setPicked(d.id);
+                  showDecisionWhenStacked();
+                }}
                 place={places.get(d.id)}
                 onOpenIssue={props.onOpenIssue}
               />
@@ -341,6 +346,7 @@ export function Inbox(props: {
           waiting={open.issue ? waitOf(open.issue.key, waits) : null}
         />
       )}
+    </div>
     </div>
   );
 }
@@ -1232,6 +1238,20 @@ function Notices(props: { notices: Notice[]; now: number; onOpenIssue: (key: str
       {error && <p className="error small">{error}</p>}
     </section>
   );
+}
+
+/**
+ * When the Inbox is too narrow for the list and the decision side by side, they stack (NIT-591), and
+ * the decision a click opens would sit below the whole list: bring it into view. Keys that move
+ * through the list leave the page where it is.
+ */
+function showDecisionWhenStacked() {
+  // The decision's place below the list is the same whichever decision opens in it, so it is
+  // scrolled to now, not after the new one renders.
+  const split = document.querySelector<HTMLElement>(".inbox-split");
+  const detail = document.querySelector<HTMLElement>(".inbox-detail");
+  if (!split || !detail || getComputedStyle(split).gridTemplateColumns.trim().split(/\s+/).length > 1) return;
+  detail.scrollIntoView({ block: "start" });
 }
 
 /** When nothing needs the human: what the agents are doing meanwhile. */

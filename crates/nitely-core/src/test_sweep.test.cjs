@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { merged, parseLog, classify, bodies, hints, timingMethod, inventory } = require('./test_sweep.cjs');
+const { merged, parseLog, classify, bodies, hints, timingMethod, inventory, untimed } = require('./test_sweep.cjs');
 const revision = 'a'.repeat(40);
 test('same-revision distinct runs distinguish flakes from repeats and ambiguous names', () => {
  const passed = parseLog('test parser::roundtrip ... ok', '1', revision, 'lane 1');
@@ -68,6 +68,10 @@ test('test bodies in each language carry hints of waits, UI presence and real I/
   const js = bodies("test('shows the board', () => { expect(screen.getByText('Board')).toBeInTheDocument(); });", '.tsx');
   assert.deepEqual(js.map(t => [t.name, t.hints]), [['shows the board', { ui: 2 }]]);
   assert.deepEqual(hints('assert_eq!(decide(&a, &b), Verdict::Land);'), {});
+  // NIT-559: a duration or a timeout passed as a value is no wait, and the word html alone names a
+  // file or a field; a blocking receive is a wait.
+  assert.deepEqual(hints('assert!(keep_waiting(false, Duration::from_secs(5))); run(cap, timeout); write(dir.join("index.html"), page);'), {});
+  assert.deepEqual(hints('let got = rx.recv_timeout(Duration::from_millis(50));'), { waits: 1 });
 });
 test('one CI run is one execution, and its failure on one platform outweighs a pass on another', () => {
   const at = (run, outcome, source) => ({ id: 'cart::adds', name: 'adds', outcome, run, revision, source, method: 'ci-log', ambiguous: false });
@@ -103,4 +107,24 @@ test('a report on an earlier commit reads that commit\'s tests, not the checkout
     assert.deepEqual(inventory(root, first).tests.map(t => [t.name, t.hints]), [['adds', { waits: 1 }]]);
     assert.deepEqual(inventory(root).tests.map(t => t.name), ['totals']);
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
+});
+test('a test written inside a string is a fixture, not a test', () => {
+  const js = "test('real', () => { const fixture = \"test('fake', () => { waitFor(x); })\"; expect(run(fixture)).toBe(1); });";
+  assert.deepEqual(bodies(js, '.js').map(t => t.name), ['real']);
+  const py = 'def test_real():\n    src = """\ndef test_fake():\n    time.sleep(1)\n"""\n    assert run(src)\n';
+  assert.deepEqual(bodies(py, '.py').map(t => t.name), ['test_real']);
+  // An apostrophe in a regex literal opens no string: the tests after it are still read.
+  const re = "test('one', () => { assert.match(said, /a machine's 25 ms/); });\ntest('two', () => { ok(); });";
+  assert.deepEqual(bodies(re, '.ts').map(t => t.name), ['one', 'two']);
+  const rs = "#[test]\nfn a() { let r: &'static str = x; }\n#[test]\nfn b() { ok(); }";
+  assert.deepEqual(bodies(rs, '.rs').map(t => t.name), ['a', 'b'], 'a lifetime is no string');
+  // A raw string ends at its quote, whatever backslash comes before it.
+  const raw = '#[test]\nfn a() { let p = r"\\\\?\\"; let q = r#"say "hi""#; let c = \'"\'; }\n#[test]\nfn b() { ok(); }';
+  assert.deepEqual(bodies(raw, '.rs').map(t => t.name), ['a', 'b'], 'raw strings and a quote char');
+});
+test('a source whose tests carry no time is named, since none of them can be found slow', () => {
+  const o = (source, ms, outcome = 'pass') => ({ id: 'x', source, outcome, ...(ms === undefined ? {} : { duration_ms: ms }) });
+  const said = untimed([o('Gate (ubuntu-latest)', undefined), o('Gate (ubuntu-latest)', undefined), o('Gate (ubuntu-latest)', 12), o('suite', 40), o('suite', undefined, 'skip')]);
+  assert.equal(said.length, 1, 'the timed source, whose only untimed test was skipped, is not named');
+  assert.match(said[0], /^Gate \(ubuntu-latest\): 2 of 3 tests carry no time/);
 });
