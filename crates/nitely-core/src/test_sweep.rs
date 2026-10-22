@@ -564,16 +564,32 @@ pub fn budget_reads(command: &str, package: Option<&serde_json::Value>) -> Budge
     reads_within(command, package, 0)
 }
 
+/// The commands of a compound command line, split at `&&`, `||`, `|` and `;` outside quotes: a
+/// quoted `'TestFoo|TestBar'` is one argument, not a pipe.
+fn command_parts(command: &str) -> Vec<&str> {
+    let (mut parts, mut start, mut quote) = (Vec::new(), 0, None);
+    for (i, c) in command.char_indices() {
+        match (quote, c) {
+            (Some(q), c) if c == q => quote = None,
+            (Some(_), _) => {}
+            (None, '\'' | '"') => quote = Some(c),
+            (None, '&' | '|' | ';') => {
+                parts.push(&command[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&command[start..]);
+    parts.into_iter().map(str::trim).filter(|p| !p.is_empty()).collect()
+}
+
 /// `budget_reads` of each part of a compound command (`npm run build && node --test ...`), its
 /// npm scripts followed `depth` deep at most: timed if any part is, else the first flag that would
 /// make one so.
 fn reads_within(command: &str, package: Option<&serde_json::Value>, depth: u32) -> BudgetReads {
     let mut best = BudgetReads::Not;
-    for part in command
-        .split(['&', '|', ';'])
-        .map(str::trim)
-        .filter(|p| !p.is_empty())
-    {
+    for part in command_parts(command) {
         let words: Vec<&str> = part.split_whitespace().collect();
         let script = match words.as_slice() {
             ["npm", "test" | "t", ..] => Some("test"),
@@ -1938,6 +1954,9 @@ mod tests {
         let built = serde_json::json!({"scripts": {"test": "npm run build && node --test dist/tests", "build": "tsc", "loop": "npm run loop"}});
         assert_eq!(budget_reads("npm test", Some(&built)), BudgetReads::Timed);
         assert_eq!(budget_reads("npm run loop", Some(&built)), BudgetReads::Not);
+        // A quoted pipe is an argument, not a second command (NIT-601 review).
+        assert_eq!(command_parts("go test ./... -run 'TestFoo|TestBar' -v && echo \"a;b\""), ["go test ./... -run 'TestFoo|TestBar' -v", "echo \"a;b\""]);
+        assert_eq!(budget_reads("go test ./... -run 'TestFoo|TestBar' -v", None), budget_reads("go test ./... -v", None));
         // A failing scenario gets a repair card even when nothing else is planned for it.
         let mut broken = report.clone();
         broken.observations = vec![obs("core::land::pushes", 4000.0)];

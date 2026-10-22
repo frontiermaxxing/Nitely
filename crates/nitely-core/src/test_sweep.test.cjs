@@ -113,6 +113,11 @@ test('a test written inside a string is a fixture, not a test', () => {
   assert.deepEqual(bodies(js, '.js').map(t => t.name), ['real']);
   const py = 'def test_real():\n    src = """\ndef test_fake():\n    time.sleep(1)\n"""\n    assert run(src)\n';
   assert.deepEqual(bodies(py, '.py').map(t => t.name), ['test_real']);
+  // An apostrophe in a regex literal opens no string: the tests after it are still read.
+  const re = "test('one', () => { assert.match(said, /a machine's 25 ms/); });\ntest('two', () => { ok(); });";
+  assert.deepEqual(bodies(re, '.ts').map(t => t.name), ['one', 'two']);
+  const rs = "#[test]\nfn a() { let r: &'static str = x; }\n#[test]\nfn b() { ok(); }";
+  assert.deepEqual(bodies(rs, '.rs').map(t => t.name), ['a', 'b'], 'a lifetime is no string');
 });
 test('a source whose tests carry no time is named, since none of them can be found slow', () => {
   const o = (source, ms, outcome = 'pass') => ({ id: 'x', source, outcome, ...(ms === undefined ? {} : { duration_ms: ms }) });

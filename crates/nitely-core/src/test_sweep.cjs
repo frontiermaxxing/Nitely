@@ -74,7 +74,10 @@ function bodies(text, ext) {
   const start = STARTS.find(([file]) => file.test(ext)); if (!start) return [];
   const [, pattern, group] = start; pattern.lastIndex = 0;
   // Conservatively extract named test bodies, balancing braces while masking comments/strings.
-  const masked = text.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|`(?:\\.|[^`\\])*`/g, x => x.replace(/[^\n]/g, ' '));
+  // A regex literal is masked too, where only one can start (after `(`, `,`, `=` and the like): an
+  // apostrophe in `/a machine's 25 ms/` opened a "string" that hid the tests after it. A
+  // single-quoted string or char ends at its line: a Rust lifetime (`'a`) has no closing quote.
+  const masked = text.replace(/(?<=[(,=:!&|?;{}\[]\s*)\/(?![/*])(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\\n])+\/[a-z]*|\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\\n])*'|`(?:\\.|[^`\\])*`/g, x => x.replace(/[^\n]/g, ' '));
   const out = []; let m;
   while ((m = pattern.exec(text))) {
     // A match that starts inside a string or comment is a fixture's text, not a test (NIT-594).
