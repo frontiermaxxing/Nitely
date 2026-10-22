@@ -608,7 +608,49 @@ pub fn optimize_plan(
     if !uncovered.is_empty() {
         bail!("a test that restates the implementation needs `covered_by`, the behaviour test that covers it, before its deletion is proposed: {}", uncovered.join(", "));
     }
+    // A decision's old test goes once its refactor lands: the pure test of that decision covers it.
+    for (n, (module, decisions)) in modules.iter().enumerate() {
+        for (decision, f) in decisions {
+            deletions.push((
+                f,
+                format!(
+                    "the pure test of \"{decision}\" in {module} (refactor-{})",
+                    n + 1
+                ),
+            ));
+        }
+    }
     let mut items = Vec::new();
+    // Failing and flaky tests that stay (scenarios, kept tests, decisions until their refactor)
+    // are repaired, whatever else is planned for them.
+    let failing: Vec<&Flagged> = flagged
+        .iter()
+        .filter(|f| {
+            f.why
+                .iter()
+                .any(|w| w.starts_with("failing") || w.starts_with("flaky"))
+        })
+        .filter(|f| {
+            !matches!(
+                by_test[f.test.as_str()].class,
+                Class::Duplicate { .. } | Class::Presence | Class::Restates
+            )
+        })
+        .collect();
+    if !failing.is_empty() {
+        let mut body = "These tests fail, or pass and fail at one revision. Find why and fix the cause; a failure is a finding, never a reason to delete:\n\n".to_string();
+        for f in &failing {
+            body.push_str(&format!("- `{}` ({})\n", f.test, f.why.join("; ")));
+        }
+        items.push(item(
+            "repair".into(),
+            format!("Repair {} failing or flaky tests", failing.len()),
+            body,
+            paths(&failing),
+            failing.len(),
+            vec![],
+        ));
+    }
     for (n, (module, decisions)) in modules.iter().enumerate() {
         let measured: f64 = decisions.iter().filter_map(|(_, f)| f.seconds).sum();
         let timed = decisions
@@ -698,7 +740,7 @@ pub fn optimize_plan(
         let fs: Vec<&Flagged> = deletions.iter().map(|(f, _)| *f).collect();
         let blockers = items
             .iter()
-            .filter(|i| i.local_ref != "budget")
+            .filter(|i| i.local_ref != "budget" && i.local_ref != "repair")
             .map(|i| i.local_ref.clone())
             .collect();
         items.push(item(
@@ -1583,6 +1625,28 @@ mod tests {
                 .body
                 .contains("covered by nothing it should keep"),
             "a presence test is covered by nothing it should keep"
+        );
+        assert!(planned.plan.issues[2].body.contains("`src/land.rs::batches` (9.0 s): covered by the pure test of \"which changes land together\" in land_rules (refactor-1)"), "{}", planned.plan.issues[2].body);
+        // A failing scenario gets a repair card even when nothing else is planned for it.
+        let mut broken = report.clone();
+        broken.observations = vec![obs("core::land::pushes", 4000.0)];
+        broken.observations[0]["outcome"] = "fail".into();
+        let only = [class(
+            serde_json::json!({"test": "src/land.rs::pushes", "class": "scenario", "module": "land_rules"}),
+        )];
+        let flagged_broken: Vec<Flagged> = broken
+            .flagged(2.0)
+            .into_iter()
+            .filter(|f| f.test == "src/land.rs::pushes")
+            .collect();
+        let repair = optimize_plan(&rev, &flagged_broken, &only, &facts).unwrap();
+        assert_eq!(repair.plan.issues[0].local_ref, "repair");
+        assert!(
+            repair.plan.issues[0]
+                .body
+                .contains("`src/land.rs::pushes` (slow: 4.0 s median by ci-log; failing)"),
+            "{}",
+            repair.plan.issues[0].body
         );
         assert_eq!(
             planned.ci_commands,
