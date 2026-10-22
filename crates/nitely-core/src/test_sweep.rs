@@ -561,18 +561,44 @@ pub enum BudgetReads {
 /// `npm test` and `npm run <script>` are read through `package` (package.json) as the script
 /// they run.
 pub fn budget_reads(command: &str, package: Option<&serde_json::Value>) -> BudgetReads {
-    let words: Vec<&str> = command.split_whitespace().collect();
-    let script = match words.as_slice() {
-        ["npm", "test" | "t", ..] => Some("test"),
-        ["npm", "run" | "run-script", name, ..] => Some(*name),
-        _ => None,
-    };
-    if let Some(name) = script {
-        return match package.and_then(|p| p["scripts"][name].as_str()) {
-            Some(body) if !body.split_whitespace().any(|w| w == "npm") => budget_reads(body, None),
-            _ => BudgetReads::Not,
+    reads_within(command, package, 0)
+}
+
+/// `budget_reads` of each part of a compound command (`npm run build && node --test ...`), its
+/// npm scripts followed `depth` deep at most: timed if any part is, else the first flag that would
+/// make one so.
+fn reads_within(command: &str, package: Option<&serde_json::Value>, depth: u32) -> BudgetReads {
+    let mut best = BudgetReads::Not;
+    for part in command
+        .split(['&', '|', ';'])
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+    {
+        let words: Vec<&str> = part.split_whitespace().collect();
+        let script = match words.as_slice() {
+            ["npm", "test" | "t", ..] => Some("test"),
+            ["npm", "run" | "run-script", name, ..] => Some(*name),
+            _ => None,
         };
+        let reads = match script {
+            Some(name) if depth < 4 => match package.and_then(|p| p["scripts"][name].as_str()) {
+                Some(body) => reads_within(body, package, depth + 1),
+                None => BudgetReads::Not,
+            },
+            Some(_) => BudgetReads::Not,
+            None => runner_reads(&words),
+        };
+        match reads {
+            BudgetReads::Timed => return BudgetReads::Timed,
+            BudgetReads::Add(_) if best == BudgetReads::Not => best = reads,
+            _ => {}
+        }
     }
+    best
+}
+
+/// `budget_reads` of one command, its words.
+fn runner_reads(words: &[&str]) -> BudgetReads {
     let has = |w: &str| words.contains(&w);
     if words.first() == Some(&"cargo") && words.get(1) == Some(&"test")
         || has("node") && has("--test")
@@ -1908,6 +1934,10 @@ mod tests {
         let node = serde_json::json!({"scripts": {"test": "tsc && node --test dist"}});
         assert_eq!(budget_reads("npm test", Some(&jest)), BudgetReads::Not);
         assert_eq!(budget_reads("npm test", Some(&node)), BudgetReads::Timed);
+        // A script that builds with npm first is read part by part; a script calling itself stops.
+        let built = serde_json::json!({"scripts": {"test": "npm run build && node --test dist/tests", "build": "tsc", "loop": "npm run loop"}});
+        assert_eq!(budget_reads("npm test", Some(&built)), BudgetReads::Timed);
+        assert_eq!(budget_reads("npm run loop", Some(&built)), BudgetReads::Not);
         // A failing scenario gets a repair card even when nothing else is planned for it.
         let mut broken = report.clone();
         broken.observations = vec![obs("core::land::pushes", 4000.0)];
