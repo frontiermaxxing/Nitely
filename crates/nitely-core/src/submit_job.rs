@@ -332,7 +332,18 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::p
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        cmd.creation_flags(0x0800_0000 | 0x0000_0200); // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+        // Out of the caller's job too, where the job allows it: a host that runs the caller in a job
+        // which ends its processes when it closes (an MCP server restarted) would end this one with
+        // it, a land between its push and its records among them (NIT-600).
+        cmd.creation_flags(detached_flags(true));
+        match without_inherited_std(|| cmd.spawn()) {
+            Ok(child) => return Ok(child),
+            // ERROR_ACCESS_DENIED: the job allows no breakaway; started inside it, as before.
+            Err(e) if e.raw_os_error() == Some(5) => {
+                cmd.creation_flags(detached_flags(false));
+            }
+            Err(e) => return Err(e),
+        }
     }
     #[cfg(unix)]
     {
@@ -340,6 +351,14 @@ pub fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::p
         cmd.process_group(0);
     }
     without_inherited_std(|| cmd.spawn())
+}
+
+/// A detached process's creation flags on Windows: no console window, its own process group, and,
+/// with `breakaway`, out of the caller's job (CREATE_BREAKAWAY_FROM_JOB).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn detached_flags(breakaway: bool) -> u32 {
+    let base = 0x0800_0000 | 0x0000_0200; // CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP
+    if breakaway { base | 0x0100_0000 } else { base }
 }
 
 /// Runs `spawn` with this process's own standard handles kept from the child. Windows hands a new
@@ -508,6 +527,14 @@ pub fn wait(db: &Db, id: i64, limit: Duration) -> Result<Job> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NIT-600: a detached process asks to leave its caller's job, and can be started without that.
+    #[test]
+    fn a_detached_process_asks_to_leave_the_callers_job() {
+        assert_eq!(detached_flags(true) & 0x0100_0000, 0x0100_0000);
+        assert_eq!(detached_flags(false) & 0x0100_0000, 0);
+        assert_eq!(detached_flags(true) & !0x0100_0000, detached_flags(false), "otherwise the same: no window, its own group");
+    }
     use crate::issues::NewIssue;
     use crate::playbook;
     use std::path::Path;

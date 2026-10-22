@@ -47,6 +47,12 @@ pub fn is_test_path(path: &str) -> bool {
     file.contains(".test.") || file.contains(".spec.") || file.contains(".e2e.") || stem.ends_with("_test") || stem.ends_with("_spec") || (stem.starts_with("test_") && file.ends_with(".py")) || (stem.ends_with("test") && file.ends_with(".java"))
 }
 
+/// The files `git diff --name-only -z` names, as they are spelled: NUL-separated, so git quotes
+/// none, and a test file named outside ASCII (`tests/café.rs`) is still seen as a test (NIT-569).
+pub fn changed_files(out: &str) -> Vec<String> {
+    out.split('\0').map(|f| f.trim_matches(['\r', '\n'])).filter(|f| !f.is_empty()).map(str::to_string).collect()
+}
+
 /// A fix that changed any product file caught something; one that changed only tests (or nothing)
 /// was a false alarm.
 pub fn verdict(changed: &[String]) -> Verdict {
@@ -246,9 +252,9 @@ impl Db {
         for span in spans {
             let key = (span.failed.clone(), span.fixed.clone());
             let v = *diffs.entry(key).or_insert_with(|| {
-                crate::playbook::git(worktree, &["diff", "--name-only", "--no-renames", &format!("{}..{}", span.failed, span.fixed)])
+                crate::playbook::git(worktree, &["diff", "--name-only", "-z", "--no-renames", &format!("{}..{}", span.failed, span.fixed)])
                     .ok()
-                    .map(|d| verdict(&d.lines().filter(|l| !l.is_empty()).map(str::to_string).collect::<Vec<_>>()))
+                    .map(|d| verdict(&changed_files(&d)))
             });
             let Some(v) = v else { continue }; // A revision git cannot diff records nothing.
             self.conn.execute(
@@ -298,6 +304,11 @@ mod tests {
         assert_eq!(verdict(&[]), Verdict::FalseAlarm, "nothing changed: the test passed on its own");
         assert!(!is_test_path("src/latest.rs") && !is_test_path("src/contest/ranking.ts"), "a word containing test is not a test");
         assert!(!is_test_path("crates/nitely-core/src/test_budget.rs") && is_test_path("app/test_api.py"), "test_ marks a test only in Python");
+        // NIT-569: read unquoted, a fix only to a test named outside ASCII is still the test's own.
+        assert_eq!(changed_files("tests/café.rs\0web/naïve.test.ts\0"), ["tests/café.rs", "web/naïve.test.ts"]);
+        assert_eq!(verdict(&changed_files("tests/café.rs\0")), Verdict::FalseAlarm);
+        assert_eq!(verdict(&changed_files("tests/café.rs\0src/café.rs\0")), Verdict::Catch);
+        assert!(changed_files("").is_empty());
     }
 
     /// A test is settled where its step ran: a later gate that passed its step, a later failure of
