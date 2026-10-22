@@ -1361,6 +1361,10 @@ reason = "billing"
         assert!(r.landed && r.batch.is_none(), "{r:?}");
         assert_eq!(f.entry(&b).state, "landed", "{}", f.error(&b));
         assert!(f.db.latest_land_queue_entry(&a).unwrap().is_none(), "A never went in the queue");
+        // A is recorded before the queue behind it runs, not after (NIT-600): its issue is Done
+        // while B is still to land, whatever B's run costs.
+        let landed_at = |key: &str| f.db.conn.query_row("SELECT MIN(id) FROM event WHERE issue_key = ?1 AND type = 'landed'", [key], |r| r.get::<_, i64>(0)).unwrap();
+        assert!(landed_at(&a) < landed_at(&b), "A's land recorded first");
 
         // With a remote, a land kept local leaves the queue alone: landing it would push it.
         crate::test_repo::add_remote(&f.repo, &f.base.join("remote.git"));

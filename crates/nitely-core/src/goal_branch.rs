@@ -1205,6 +1205,32 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
     /// Under Fast, with no goal_branch call: the goal's first item makes its branch and lands into
     /// it, the next starts from it, and once the goal has nothing left open the checkpoint is filed
     /// without waiting for a day or the item count.
+    /// NIT-600: a checkpoint whose change reached main without its land recording it (its land died
+    /// after pushing main) closes, checkpoint record and all, when it is moved to Done.
+    #[test]
+    fn done_on_a_checkpoint_already_on_main_closes_its_checkpoint() {
+        let mut f = fixture("nitely-goal-checkpoint-recover", false);
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Fast, Default::default());
+        f.db.move_issue(&f.rest, "Canceled", None, Some("not in this test"), &Actor::Human).unwrap();
+        let a = f.issue("A", Some(f.goal));
+        f.work(&a, "a.txt", "a
+");
+        assert!(f.land(&a).landed);
+        let cp = f.db.open_checkpoint(f.goal).unwrap().expect("nothing left open: the checkpoint is filed");
+        let opened = checkpoint(&mut f.db, &crate::Config::default(), f.goal, &f.repo.to_string_lossy(), Some("claude"), &f.actor).unwrap();
+        let cp_wt = PathBuf::from(&opened.started.as_ref().unwrap().worktree);
+        f.submit(&cp_wt);
+        // Main takes the checkpoint's branch, as the land's push did, and nothing is recorded.
+        let branch = sh(&cp_wt, &["rev-parse", "--abbrev-ref", "HEAD"]).trim().to_string();
+        sh(&f.repo, &["merge", "-q", "--ff-only", &branch]);
+        assert!(f.has("main", "a.txt"));
+        let said = crate::landed_elsewhere::record(&mut f.db, &f.repo, &cp.issue, Some("on main"), &f.actor).unwrap().expect("recorded");
+        assert!(said.contains("Checkpoint landed 1 item of goal"), "{said}");
+        assert!(f.db.open_checkpoint(f.goal).unwrap().is_none(), "its checkpoint record is closed");
+        f.db.move_issue(&cp.issue, "Done", Some("on main"), None, &f.actor).unwrap();
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
     #[test]
     fn a_goal_under_fast_lands_its_items_through_its_branch_and_checkpoints_when_all_are_in() {
         let mut f = fixture("nitely-goal-branch-mode", false);

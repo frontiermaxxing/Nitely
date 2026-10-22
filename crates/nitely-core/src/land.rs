@@ -167,6 +167,14 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
             Err(e) => report.warnings.push(format!("the after-land steps did not run: {e:#}")),
         }
     }
+    // This land is recorded now, its own work done: what follows (the queue that waited behind it,
+    // the tidy, the steps outside the lock) can take many minutes, and its issue must not sit In
+    // Review with its change already on main meanwhile (NIT-600).
+    match &result {
+        Ok(()) => record_landed(db, &root, &issue, &mut report, actor)?,
+        Err(e) => record_stopped(db, &issue.key, &format!("{e:#}"), &mut report, actor)?,
+    }
+    let recorded = report.after.len();
     // Changes that queued while this land held the lock land now, under it: their own lands may
     // have stopped waiting. Not after a land kept local (--no-push): their push would publish it.
     drop(_telemetry);
@@ -189,10 +197,9 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
         // Main moved: it flows into each open goal branch (goal_branch.rs).
         report.goals.extend(crate::goal_branch::flow_main_in(db, &root, actor));
     }
-
-    match result {
-        Ok(()) => record_landed(db, &root, &issue, &mut report, actor)?,
-        Err(e) => record_stopped(db, &issue.key, &format!("{e:#}"), &mut report, actor)?,
+    // The steps that ran after the land was recorded go on its timeline too.
+    if result.is_ok() {
+        log_after_steps(db, actor, &issue.key, &report.after[recorded..])?;
     }
     Ok(report)
 }
