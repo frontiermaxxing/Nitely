@@ -2100,7 +2100,8 @@ function goals(args: Record<string, unknown>): GoalDetail[] {
   placeGoals();
   const project = args.project ? String(args.project).toUpperCase() : null;
   const rank = (id: number) => goalRanks.get(id) ?? Number.MAX_SAFE_INTEGER;
-  return GOALS.filter((g) => (!project || g.project === project) && (g.state ?? "active") === "active")
+  const closed = args.includeClosed === true;
+  return GOALS.filter((g) => (!project || g.project === project) && (closed || (g.state ?? "active") === "active"))
     .sort((a, b) => rank(a.id) - rank(b.id))
     .map((g) => {
       const goal = goalRecord(g);
@@ -2264,6 +2265,11 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return startGoal(args);
       case "goals":
         return goals(args);
+      case "goal_state": {
+        const g = GOALS.find((x) => x.id === Number(args.id));
+        if (g) g.state = String(args.state) as Goal["state"];
+        return g ? goalRecord(g) : null;
+      }
       case "project_focus":
         return projectFocus(String(args.project).toUpperCase());
       case "project_review_mode":
