@@ -229,10 +229,11 @@ pub struct Review {
     /// (NIT-185).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reused: Option<String>,
-    /// Findings set aside because everything they cite is code the base brought in when it was
-    /// merged into the branch (NIT-646): its code is context for the review, never the change's
-    /// problem. They count for nothing in the verdict, so nobody is asked to accept them; they are
-    /// listed so a real one can be filed against the base.
+    /// Defects the reviewer says are the base's own, there as they are and neither caused nor
+    /// worsened by this change (`- [BASE] ...`, or `PREVIOUS <n>: base` for a carried one; NIT-646):
+    /// after the base is merged into a branch, its code is context for the review, never the
+    /// change's problem. They count for nothing in the verdict, so nobody is asked to accept them;
+    /// they are listed so a real one can be filed against the base.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outside: Vec<Finding>,
 }
@@ -253,11 +254,9 @@ impl Review {
 
 /// How severities are judged, word for word in a single and a batched review, so batching does not
 /// change what a P1 is.
-/// What is the change's to answer for and what is the base's (NIT-646). The second sentence is how
-/// a finding names the changed code that causes it, so one that cites only code the base brought
-/// in by a merge can be set aside without hiding a regression the change caused.
-const BASE_RULES: &str = "A defect that shows in code the change does not touch, but that the change causes, also cites the changed \
-line that causes it. A defect that is already on the base as it is, which this change neither causes nor worsens, is not \
+/// What is the change's to answer for and what is the base's (NIT-646): the reviewer, who can tell
+/// a defect the change causes from one it only sits beside, says which.
+const BASE_RULES: &str = "A defect that is already on the base as it is, which this change neither causes nor worsens, is not \
 this change's: report it as `- [BASE] title: file, symbol: what goes wrong` instead, with no priority, and it is listed to \
 fix on the base without holding this change.";
 
@@ -842,7 +841,6 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         let mut review =
             self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })?;
         review.tokens = reply.tokens;
-        set_aside_outside(&mut review, worktree, base, "HEAD");
         Ok(review)
     }
 
@@ -1135,71 +1133,13 @@ pub(crate) fn base_merged_since(worktree: &Path, base: &str, commit: &str, head:
     }
 }
 
-/// The commits the base brought into the branch by merging it after the branch began: on the
-/// base, after the commit the branch forked from (the parent of its oldest first-parent commit),
-/// up to their merge base now. Empty when the base was never merged in; None when git cannot say.
-fn brought_in_by_merges(worktree: &Path, base: &str, head: &str) -> Option<std::collections::HashSet<String>> {
-    let git = |args: &[&str]| crate::playbook::git(worktree, args).ok().map(|o| o.trim().to_string());
-    let merge_base = git(&["merge-base", base, head])?;
-    let oldest = git(&["rev-list", "--first-parent", "--reverse", &format!("{base}..{head}")])?.lines().next()?.to_string();
-    let fork = git(&["rev-parse", &format!("{oldest}^")])?;
-    if fork == merge_base {
-        return Some(Default::default());
-    }
-    Some(git(&["rev-list", &format!("{fork}..{merge_base}")])?.lines().map(str::to_string).collect())
-}
-
-/// Whether every line `text` cites was last written by one of `brought` (code the base brought in
-/// by a merge, which the change did not touch since). A citation without a line, or of a file the
-/// branch does not have, is about the change.
-fn only_merged_code(text: &str, code: &CurrentCode, worktree: &Path, head: &str, brought: &std::collections::HashSet<String>) -> bool {
-    let cited = cited_spans(text);
-    !cited.is_empty()
-        && cited.iter().all(|(path, span)| {
-            let (Some(file), Some((from, to))) = (code.resolve(path), span) else { return false };
-            let range = format!("{from},{to}");
-            let Ok(blame) = crate::playbook::git(worktree, &["blame", "--porcelain", "-L", &range, head, "--", &file]) else { return false };
-            // Each line's header starts with the commit that last wrote it.
-            let commits: Vec<&str> = blame.lines().filter_map(|l| l.split(' ').next()).filter(|w| w.len() == 40 && w.bytes().all(|b| b.is_ascii_hexdigit())).collect();
-            !commits.is_empty() && commits.iter().all(|c| brought.contains(*c))
-        })
-}
-
-/// Moves new findings that are entirely about code the base brought in by merging it into the
-/// branch, which the change did not touch, to `review.outside`, and sets the verdict from what is
-/// left (NIT-646). A branch that never merged its base has nothing to set aside, and a regression
-/// the change causes in code it does not touch is kept unless that code itself came in by the
-/// merge. Carried findings stay: the reviewer has already confirmed them against current code.
-pub(crate) fn set_aside_outside(review: &mut Review, worktree: &Path, base: &str, head: &str) {
-    let Some(brought) = brought_in_by_merges(worktree, base, head).filter(|b| !b.is_empty()) else { return };
-    let code = CurrentCode::new(worktree);
-    let (outside, inside): (Vec<Finding>, Vec<Finding>) =
-        std::mem::take(&mut review.findings).into_iter().partition(|f| !f.carried && only_merged_code(&f.text, &code, worktree, head, &brought));
-    review.findings = inside;
-    review.outside.extend(outside);
-    if review.reused.is_none() {
-        review.verdict = if review.findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" }.into();
-    }
-}
-
 /// `path/to/file.rs:120` and `file.rs` mentions in a text, with their line when given.
 pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
-    cited_spans(text).into_iter().map(|(path, span)| (path, span.map(|(from, _)| from))).collect()
-}
-
-/// `citations`, with the lines each covers: `file.rs:12` is (12, 12), `file.rs:12-15` or
-/// `file.rs:12–15` is (12, 15).
-fn cited_spans(text: &str) -> Vec<(String, Option<(usize, usize)>)> {
     let mut out = Vec::new();
     for word in text.split(|c: char| c.is_whitespace() || "`,;()[]\"'".contains(c)) {
         let word = word.trim_end_matches(['.', ':']);
-        let span = |n: &str| -> Option<(usize, usize)> {
-            let (a, b) = n.split_once(['-', '\u{2013}']).unwrap_or((n, n));
-            let (a, b): (usize, usize) = (a.parse().ok()?, b.parse().ok()?);
-            (a <= b).then_some((a, b))
-        };
         let (path, line) = match word.rsplit_once(':') {
-            Some((p, n)) if !n.is_empty() && span(n).is_some() => (p, span(n)),
+            Some((p, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => (p, n.parse().ok()),
             _ => (word, None),
         };
         // A file name: a dot, then a short extension of letters; with a line number, any name
@@ -1588,8 +1528,7 @@ mod tests {
 
     /// NIT-646: main merged into a branch after its review brings main's code along. That code is
     /// context, so the next round compares the change with itself instead of reading the merge,
-    /// and a finding about main's own lines is set aside: it neither holds the land nor reaches
-    /// the person to accept.
+    /// and a defect the reviewer says is main's own neither holds the land nor reaches the person.
     #[test]
     fn after_main_is_merged_in_a_finding_on_mains_own_code_is_set_aside() {
         let dir = crate::paths::unique_temp("nitely-review-outside", "");
@@ -1628,51 +1567,22 @@ mod tests {
         assert!(prompt.contains("git diff main...HEAD") && prompt.contains(&format!("git diff main...{reviewed}")), "{prompt}");
         assert!(!prompt.contains(&format!("git diff {reviewed} HEAD")), "never the diff that holds the merge: {prompt}");
 
-        let reply = "Two problems.\n\
-- [P1] Quick start loses the flag: src/quick.rs:5, start\n\
-- [P1] Main's tail is wrong: src/goal.rs:19, tail\n\
-- [P1] The changed line breaks parsing: src/goal.rs:10, parse\n\
-- [P1] A caller the change breaks: src/quick.rs:2, unwrap\n\
-- [P2] Off by one next to the change: goal.rs:11\n\
-VERDICT: findings\nMONEY_OR_RELEASE: no";
         let texts = |fs: &[Finding]| fs.iter().map(|f| f.text.split(':').next().unwrap().to_string()).collect::<Vec<_>>();
-        // Before the merge nothing came in from main, so nothing is set aside, whatever it cites.
-        let mut before = rules().parse("codex", reply, 1, None, Some(&dir)).unwrap();
-        set_aside_outside(&mut before, &dir, "main", &reviewed);
-        assert!(before.outside.is_empty(), "{:?}", before.outside);
-
-        let mut review = rules().parse("codex", reply, 1, None, Some(&dir)).unwrap();
-        set_aside_outside(&mut review, &dir, "main", "HEAD");
-        assert_eq!(texts(&review.findings), ["The changed line breaks parsing", "A caller the change breaks", "Off by one next to the change"]);
-        assert_eq!(texts(&review.outside), ["Quick start loses the flag", "Main's tail is wrong"]);
-        assert_eq!(review.verdict, "changes", "the change's own P1 still holds it");
-
         // The reviewer can say a defect is the base's own, whenever it came in: it holds nothing.
         let r = rules().parse("codex", "- [BASE] Old overflow: src/quick.rs:2, parse\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
         assert_eq!((r.verdict.as_str(), r.findings.len(), texts(&r.outside)), ("pass", 0, vec!["Old overflow".to_string()]));
 
-        // A range wholly from main's merged code is set aside too; one that reaches the change is not.
-        let mut r = rules().parse("codex", "- [P1] Main's block: src/quick.rs:5-6, start\n- [P1] Spans the change: src/goal.rs:9\u{2013}10, parse\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
-        set_aside_outside(&mut r, &dir, "main", "HEAD");
-        assert_eq!((texts(&r.findings), texts(&r.outside)), (vec!["Spans the change".to_string()], vec!["Main's block".to_string()]));
-
-        // A carried finding the reviewer confirmed open stays, whatever its first citation says now.
+        // A carried finding the reviewer confirms open still holds the change.
         let carried = PreviousRound {
             findings: vec![Finding { priority: 1, text: "Quick start loses the flag: src/quick.rs:5, start".into(), carried: false, raised_as: None, now: None }],
             ..prev.clone()
         };
-        let mut review = rules().parse("codex", "PREVIOUS 1: open src/quick.rs:5 `quick five, from main` still drops it\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
-        set_aside_outside(&mut review, &dir, "main", "HEAD");
+        let review = rules().parse("codex", "PREVIOUS 1: open src/quick.rs:5 `quick five, from main` still drops it\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
         assert_eq!((review.findings.len(), review.outside.len(), review.verdict.as_str()), (1, 0, "changes"));
         // Unless the reviewer says it is the base's own: then it holds nothing.
-        let mut review = rules().parse("codex", "PREVIOUS 1: base\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
-        set_aside_outside(&mut review, &dir, "main", "HEAD");
+        let review = rules().parse("codex", "PREVIOUS 1: base\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
         assert_eq!((review.findings.len(), review.outside.len(), review.verdict.as_str()), (0, 1, "pass"));
 
-        // With only main's code to object to, the change passes.
-        let mut review = rules().parse("codex", "- [P1] Quick start loses the flag: src/quick.rs:5, start\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
-        set_aside_outside(&mut review, &dir, "main", "HEAD");
-        assert_eq!((review.verdict.as_str(), review.findings.len(), review.outside.len()), ("pass", 0, 1));
         std::fs::remove_dir_all(&dir).ok();
     }
 
