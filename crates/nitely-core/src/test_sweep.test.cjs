@@ -1,6 +1,6 @@
 const { test } = require('node:test');
 const assert = require('node:assert/strict');
-const { merged, parseLog, classify, bodies, hints, timingMethod } = require('./test_sweep.cjs');
+const { merged, parseLog, classify, bodies, hints, timingMethod, inventory } = require('./test_sweep.cjs');
 const revision = 'a'.repeat(40);
 test('same-revision distinct runs distinguish flakes from repeats and ambiguous names', () => {
  const passed = parseLog('test parser::roundtrip ... ok', '1', revision, 'lane 1');
@@ -89,4 +89,18 @@ test('times from CI and from a lane are never compared with each other', () => {
   const slow = classify([...ci, lane], [], revision).filter(c => c.kind === 'speedup');
   assert.deepEqual(slow.map(c => c.title), ['Slow tail: t19']);
   assert.match(slow[0].evidence, /timed by ci-log/);
+});
+test('a report on an earlier commit reads that commit\'s tests, not the checkout\'s', () => {
+  const fs = require('node:fs'), os = require('node:os'), path = require('node:path'), cp = require('node:child_process');
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'nitely-sweep-at-'));
+  const git = (...a) => cp.execFileSync('git', ['-c', 'user.name=t', '-c', 'user.email=t@example.com', ...a], { cwd: root }).toString().trim();
+  try {
+    git('init', '-q');
+    fs.writeFileSync(path.join(root, 'cart.test.js'), "test('adds', () => { setTimeout(done, 10); });");
+    git('add', '.'); git('commit', '-qm', 'one'); const first = git('rev-parse', 'HEAD');
+    fs.writeFileSync(path.join(root, 'cart.test.js'), "test('totals', () => { expect(1).toBe(1); });");
+    git('commit', '-qam', 'two');
+    assert.deepEqual(inventory(root, first).tests.map(t => [t.name, t.hints]), [['adds', { waits: 1 }]]);
+    assert.deepEqual(inventory(root).tests.map(t => t.name), ['totals']);
+  } finally { fs.rmSync(root, { recursive: true, force: true }); }
 });

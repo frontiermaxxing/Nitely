@@ -10,6 +10,10 @@ pub enum Command {
         /// JSON array of {path,revision,run,source,runner?} evidence descriptors. No suites run by default.
         #[arg(long)]
         logs: Option<PathBuf>,
+        /// Report on this commit, an ancestor of HEAD (main's, from `measure`): its tests are read
+        /// from its own tree and its evidence compared at it.
+        #[arg(long, conflicts_with = "execute")]
+        at: Option<String>,
         #[arg(long)]
         output: PathBuf,
         #[arg(long)]
@@ -113,6 +117,12 @@ impl Where {
                     .extension()
                     .is_some_and(|e| e == "yml" || e == "yaml")
             });
+        // A repo with another CI has CI, which Nitely cannot dispatch to: nothing runs here.
+        if !workflows {
+            if let Some(why) = test_sweep::other_ci(&self.root) {
+                return test_sweep::CiFact::Blocked(why);
+            }
+        }
         match &self.ci {
             // No workflow files: no CI, whether or not gh could reach GitHub.
             CiState::Ready(_) | CiState::Blocked(_) if !workflows => {
@@ -200,7 +210,7 @@ fn measure(
     }
     std::fs::create_dir_all(&out)?;
     // Logs at HEAD from runs that finished, kept only when they hold tests.
-    let (mut found, mut tested_main) = (Vec::new(), None);
+    let (mut found, mut tested_main, mut from_main) = (Vec::new(), None, Vec::new());
     if let (executor::CiState::Ready(slug), false, false) = (ci, dispatch, lane) {
         for log in executor::ci_logs(slug, &revision, limit, &out.join("artifacts"), 64 << 20)? {
             if !nitely_core::test_evidence::read(&log.text).tests.is_empty() {
@@ -210,12 +220,19 @@ fn measure(
         if found.is_empty() {
             tested_main = executor::tested_commit(slug, pb.integration_branch())
                 .filter(|sha| *sha != revision);
+            if let Some(sha) = &tested_main {
+                for log in executor::ci_logs(slug, sha, limit, &out.join("artifacts"), 64 << 20)? {
+                    if !nitely_core::test_evidence::read(&log.text).tests.is_empty() {
+                        from_main.push(log);
+                    }
+                }
+            }
         }
     }
     let plan = test_sweep::plan_measure(&test_sweep::MeasureFacts {
         revision: &revision,
         ci_logs: found.len(),
-        tested_main: tested_main.as_deref(),
+        tested_main: tested_main.as_deref().map(|sha| (sha, from_main.len())),
         ci: ci_fact,
         tests,
         runs,
@@ -236,6 +253,10 @@ fn measure(
     }
     let mut evidence = Vec::new();
     let mut empty = Vec::new();
+    let mut stopped: Option<String> = None;
+    // The evidence's commit: HEAD, or main's when the plan reads main's logs.
+    let at = plan.at.clone().unwrap_or_else(|| revision.clone());
+    let list = out.join("evidence.json");
     let mut keep = |name: String,
                     text: &str,
                     run: String,
@@ -257,13 +278,16 @@ fn measure(
         if nitely_core::test_evidence::read(text).tests.is_empty() {
             empty.push(format!("{source}: no test outcomes in its log"));
         }
-        evidence.push(serde_json::json!({ "path": path, "revision": revision, "run": run, "source": source, "method": method }));
+        evidence.push(serde_json::json!({ "path": path, "revision": at, "run": run, "source": source, "method": method }));
+        // Written after each log, so a run that fails later leaves what came before usable.
+        std::fs::write(&list, serde_json::to_vec_pretty(&evidence)?)?;
         Ok(())
     };
     let actor = Actor::Agent("cli".into());
     match plan.method {
         Method::CiLog => {
-            for (n, log) in found.iter().enumerate() {
+            let logs = if found.is_empty() { &from_main } else { &found };
+            for (n, log) in logs.iter().enumerate() {
                 // One workflow run attempt is one execution: its jobs and reports share a run, where
                 // the collector keeps a failure over a pass.
                 let run = test_sweep::run_id(&[
@@ -281,8 +305,9 @@ fn measure(
             }
         }
         Method::CiRun => {
+            // One snapshot for every run: what is compared across runs is one source.
+            let snapshot = lanes::snapshot(&cwd)?;
             for n in 0..plan.runs {
-                let snapshot = lanes::snapshot(&cwd)?;
                 let req = executor::SuiteRequest {
                     project,
                     issue: issue.as_deref(),
@@ -295,7 +320,13 @@ fn measure(
                     executor::Dispatch::Started(p) => p.cap(plan.minutes.into()).every_log(),
                     executor::Dispatch::Unavailable(why) => bail!("CI cannot take the run: {why}"),
                 };
-                let ran = executor::wait(&db, pending)?;
+                let ran = match executor::wait(&db, pending) {
+                    Ok(ran) => ran,
+                    Err(e) => {
+                        stopped = Some(format!("run {} of {} ended without results ({e:#}); the evidence holds the runs before it", n + 1, plan.runs));
+                        break;
+                    }
+                };
                 for (j, (command, log)) in ran.logs.iter().enumerate() {
                     let run =
                         test_sweep::run_id(&["ci-run", &ran.workflow_run.to_string(), command]);
@@ -313,16 +344,32 @@ fn measure(
             // Capped, and kept in the lanes: nothing here goes to CI.
             let mut capped = pb.clone();
             if let Some(rules) = capped.lanes.as_mut() {
-                // The run's cap, shared by its commands.
-                let share = test_sweep::lane_minutes(plan.minutes, plan.commands.len());
-                rules.timeout_minutes = rules.timeout_minutes.min(share.into());
                 rules.ci_commands.clear();
             }
-            for n in 0..plan.runs {
+            let limit = capped.lanes.as_ref().map_or(30, |l| l.timeout_minutes);
+            let snapshot = lanes::snapshot(&cwd)?;
+            'runs: for n in 0..plan.runs {
                 // Named by its first lane run, so runs of separate invocations never merge.
                 let mut run = None;
+                // The run's cap is one deadline for all its commands, setup included.
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(u64::from(plan.minutes) * 60);
                 for command in &plan.commands {
-                    let snapshot = lanes::snapshot(&cwd)?;
+                    let left = deadline
+                        .saturating_duration_since(std::time::Instant::now())
+                        .as_secs()
+                        / 60;
+                    if left == 0 {
+                        stopped = Some(format!(
+                            "run {} reached its {}-minute cap before `{command}`",
+                            n + 1,
+                            plan.minutes
+                        ));
+                        break 'runs;
+                    }
+                    if let Some(rules) = capped.lanes.as_mut() {
+                        rules.timeout_minutes = limit.min(left);
+                    }
                     let req = lanes::Request {
                         project,
                         issue: issue.as_deref(),
@@ -350,10 +397,14 @@ fn measure(
         }
         Method::Imported => unreachable!("measure never plans an import"),
     }
-    let list = out.join("evidence.json");
     std::fs::write(&list, serde_json::to_vec_pretty(&evidence)?)?;
+    let at_flag = plan
+        .at
+        .as_ref()
+        .map(|sha| format!(" --at {sha}"))
+        .unwrap_or_default();
     crate::print_json(
-        &serde_json::json!({ "plan": plan, "started": true, "logs": evidence.len(), "evidence": list, "warnings": empty, "next": format!("nitely test-sweep collect --logs {} --output report.json", list.display()) }),
+        &serde_json::json!({ "plan": plan, "started": true, "logs": evidence.len(), "evidence": list, "warnings": empty, "stopped": stopped, "next": format!("nitely test-sweep collect --logs {}{at_flag} --output report.json", list.display()) }),
     )
 }
 
@@ -415,6 +466,7 @@ pub fn run(command: Command) -> Result<()> {
         }
         Command::Collect {
             logs,
+            at,
             output,
             execute,
             rust_timings,
@@ -424,7 +476,11 @@ pub fn run(command: Command) -> Result<()> {
             issue,
         } => {
             let cwd = std::env::current_dir()?;
-            let revision = test_sweep::revision(&cwd)?;
+            let head = test_sweep::revision(&cwd)?;
+            let revision = match at {
+                Some(at) => test_sweep::ancestor_revision(&cwd, &at)?,
+                None => head,
+            };
             let output = if output.is_absolute() {
                 output
             } else {
@@ -511,7 +567,7 @@ pub fn run(command: Command) -> Result<()> {
             std::fs::write(
                 &options,
                 serde_json::to_vec(
-                    &serde_json::json!({"imported":{"observations":observations,"runs":imported_runs,"truncated":truncated},"output":output,"execute":execute,"runs":runs,"seconds":seconds,"revision":revision.trim(),"rust_timings":rust_timings,"known_failures":known_failures}),
+                    &serde_json::json!({"imported":{"observations":observations,"runs":imported_runs,"truncated":truncated},"output":output,"execute":execute,"runs":runs,"seconds":seconds,"revision":revision.trim(),"at":revision.trim(),"rust_timings":rust_timings,"known_failures":known_failures}),
                 )?,
             )?;
             if execute {

@@ -102,15 +102,37 @@ function record(name, line, body) {
 }
 // Test files by name, in the languages `bodies` reads.
 const TEST_FILE = /(?:\.rs|(?:test|spec)\.[cm]?[jt]sx?|_test\.go|(?:^|\/)test_\w+\.py|_test\.py|Tests?\.(?:java|kt|cs))$/;
-function inventory(root) {
-  const listed = cp.execFileSync('git', ['ls-files', '-z'], { cwd: root, maxBuffer: MAX }).toString().split('\0').filter(Boolean);
+// The test files of commit `at`, read from its tree with one `git cat-file --batch`: path -> text.
+function treeFiles(root, at) {
+  const files = cp.execFileSync('git', ['ls-tree', '-r', '-z', '--name-only', at], { cwd: root, maxBuffer: MAX }).toString().split('\0').filter(f => f && TEST_FILE.test(f));
+  const out = files.length ? cp.execFileSync('git', ['cat-file', '--batch'], { cwd: root, input: files.map(f => `${at}:${f}`).join('\n') + '\n', maxBuffer: 4 * MAX }) : Buffer.alloc(0);
+  const texts = new Map(); let i = 0;
+  for (const file of files) {
+    const nl = out.indexOf(10, i); if (nl < 0) break;
+    const head = out.subarray(i, nl).toString(); i = nl + 1;
+    const blob = head.match(/^\S+ blob (\d+)$/); if (!blob) continue;
+    const size = Number(blob[1]); texts.set(file, size > 1024 * 1024 ? null : out.subarray(i, i + size).toString('utf8')); i += size + 1;
+  }
+  return texts;
+}
+function inventory(root, at) {
+  // A report on another commit (`collect --at`) reads that commit's tests, not the checkout's.
+  const tree = at ? treeFiles(root, at) : null;
+  const listed = tree ? [...tree.keys()] : cp.execFileSync('git', ['ls-files', '-z'], { cwd: root, maxBuffer: MAX }).toString().split('\0').filter(Boolean);
   const tests = []; let bytes = 0; let truncated = false;
   for (const file of listed) {
     if (!TEST_FILE.test(file)) continue;
-    const absolute = path.join(root, file); if (!fs.existsSync(absolute) || fs.lstatSync(absolute).isSymbolicLink()) continue;
-    const size = fs.statSync(absolute).size;
-    if (size > 1024 * 1024 || bytes + size > MAX || tests.length >= 10000) { truncated = true; continue; }
-    bytes += size; const text = fs.readFileSync(absolute, 'utf8');
+    let text;
+    if (tree) {
+      text = tree.get(file);
+      if (text == null || bytes + text.length > MAX || tests.length >= 10000) { truncated = true; continue; }
+      bytes += text.length;
+    } else {
+      const absolute = path.join(root, file); if (!fs.existsSync(absolute) || fs.lstatSync(absolute).isSymbolicLink()) continue;
+      const size = fs.statSync(absolute).size;
+      if (size > 1024 * 1024 || bytes + size > MAX || tests.length >= 10000) { truncated = true; continue; }
+      bytes += size; text = fs.readFileSync(absolute, 'utf8');
+    }
     for (const test of bodies(text, path.extname(file))) tests.push({ ...test, path: file.replaceAll('\\', '/') });
   }
   return { tests:tests.slice(0,10000), truncated:truncated || tests.length>10000 };
@@ -156,7 +178,7 @@ function classify(observations, tests, revision) {
 }
 function main(args) {
   const opts = JSON.parse(read(args[0])); const root = process.cwd(); const revision = opts.revision || cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim();
-  const inv = inventory(root); const observations = []; const runs = []; const warnings = ['Static duplicates and mocks are review leads, never proof that deletion is safe.', 'A log without per-test times (libtest without --report-time) leaves timing unknown. Missing observations/timing are unknown, not passing.', 'Tests with duplicate display names are excluded from outcome classification.', 'Source extraction is conservative: macro-generated, parameterized and non-arrow JavaScript tests may be absent. Inventoried bodies are not a suite count.'];
+  const inv = inventory(root, opts.at && opts.at !== cp.execFileSync('git', ['rev-parse', 'HEAD'], { cwd: root }).toString().trim() ? opts.at : undefined); const observations = []; const runs = []; const warnings = ['Static duplicates and mocks are review leads, never proof that deletion is safe.', 'A log without per-test times (libtest without --report-time) leaves timing unknown. Missing observations/timing are unknown, not passing.', 'Tests with duplicate display names are excluded from outcome classification.', 'Source extraction is conservative: macro-generated, parameterized and non-arrow JavaScript tests may be absent. Inventoried bodies are not a suite count.'];
   // Imported logs (JUnit XML, libtest, TAP) arrive already read by `nitely test-sweep collect`.
   const imported = opts.imported || {}; let evidenceTruncated = !!imported.truncated;
   observations.push(...(imported.observations || [])); runs.push(...(imported.runs || []));
@@ -209,5 +231,5 @@ function main(args) {
   fs.writeFileSync(opts.output, JSON.stringify(report, null, 2), { flag: 'wx' });
   console.log(JSON.stringify({ report: opts.output, revision, observed: observations.length, inventoried: inv.tests.length, candidates: candidates.length, truncated: report.truncated }));
 }
-module.exports = { merged, parseLog, bodies, classify, hints, timingMethod };
+module.exports = { merged, parseLog, bodies, classify, hints, timingMethod, inventory };
 if (require.main === module) main(process.argv.slice(2));

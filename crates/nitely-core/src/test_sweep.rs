@@ -659,6 +659,9 @@ pub struct MeasurePlan {
     pub says: String,
     /// Whether to run it now.
     pub start: bool,
+    /// The commit the evidence is for when it is not HEAD: main's newest commit CI tested.
+    /// `collect --at` builds its report from that commit's tree.
+    pub at: Option<String>,
 }
 
 /// Where CI stands, as `plan_measure` needs it (the shell reads `executor::ci_state`).
@@ -678,9 +681,9 @@ pub struct MeasureFacts<'a> {
     pub revision: &'a str,
     /// Logs found from finished CI runs that tested `revision`.
     pub ci_logs: usize,
-    /// When HEAD has none, the newest integration-branch commit CI tested: its evidence is that
-    /// commit's, read by measuring in a checkout of it, never under HEAD's name.
-    pub tested_main: Option<&'a str>,
+    /// When HEAD has none, the newest integration-branch commit CI tested and the logs with tests
+    /// found for it: that commit's evidence, filed under it and never under HEAD's name.
+    pub tested_main: Option<(&'a str, usize)>,
     pub ci: CiFact<'a>,
     /// The gate's test commands.
     pub tests: &'a [String],
@@ -691,9 +694,22 @@ pub struct MeasureFacts<'a> {
     pub lane: bool,
 }
 
-/// Each command's share of a lane run's cap, in whole minutes, at least one.
-pub fn lane_minutes(minutes: u32, commands: usize) -> u32 {
-    (minutes / commands.max(1) as u32).max(1)
+/// Which CI other than GitHub Actions the repo at `root` is set up for, as why `measure` may
+/// neither dispatch to it nor run its suite here: Nitely's executor reaches GitHub Actions only.
+pub fn other_ci(root: &Path) -> Option<&'static str> {
+    const KNOWN: &[(&str, &str)] = &[
+        ("bitbucket-pipelines.yml", "the repo runs Bitbucket Pipelines (bitbucket-pipelines.yml), which Nitely cannot dispatch to; read its test logs or JUnit with `collect --logs`"),
+        (".gitlab-ci.yml", "the repo runs GitLab CI (.gitlab-ci.yml), which Nitely cannot dispatch to; read its test logs or JUnit with `collect --logs`"),
+        (".circleci", "the repo runs CircleCI (.circleci), which Nitely cannot dispatch to; read its test logs or JUnit with `collect --logs`"),
+        ("azure-pipelines.yml", "the repo runs Azure Pipelines (azure-pipelines.yml), which Nitely cannot dispatch to; read its test logs or JUnit with `collect --logs`"),
+        ("Jenkinsfile", "the repo runs Jenkins (Jenkinsfile), which Nitely cannot dispatch to; read its test logs or JUnit with `collect --logs`"),
+        (".travis.yml", "the repo runs Travis CI (.travis.yml), which Nitely cannot dispatch to; read its test logs or JUnit with `collect --logs`"),
+        (".buildkite", "the repo runs Buildkite (.buildkite), which Nitely cannot dispatch to; read its test logs or JUnit with `collect --logs`"),
+    ];
+    KNOWN
+        .iter()
+        .find(|(file, _)| root.join(file).exists())
+        .map(|(_, why)| *why)
 }
 
 pub fn plan_measure(f: &MeasureFacts) -> Result<MeasurePlan> {
@@ -705,6 +721,7 @@ pub fn plan_measure(f: &MeasureFacts) -> Result<MeasurePlan> {
         minutes: f.minutes,
         says,
         start,
+        at: None,
     };
     if f.ci_logs > 0 && !f.dispatch && !f.lane {
         return Ok(plan(
@@ -714,16 +731,21 @@ pub fn plan_measure(f: &MeasureFacts) -> Result<MeasurePlan> {
             true,
         ));
     }
+    if let (Some((sha, logs)), false, false) = (f.tested_main, f.dispatch, f.lane) {
+        if logs > 0 {
+            let main = &sha[..sha.len().min(12)];
+            return Ok(MeasurePlan {
+                at: Some(sha.to_string()),
+                ..plan(Method::CiLog, vec![], format!("No CI logs at {short}. {logs} CI logs of {main}, the newest main commit CI tested: read them as {main}'s evidence (collect it with --at {main}), nothing runs"), true)
+            });
+        }
+    }
     if f.tests.is_empty() {
         bail!(
             "the playbook's gate has no test command to measure; supply logs to `collect --logs`"
         );
     }
     let ask = |says: String, flag: &str, start: bool| {
-        let says = match f.tested_main {
-            Some(sha) if !start => format!("{says}. Or read CI's evidence for {}, the newest main commit CI tested, by measuring in a checkout of it", &sha[..sha.len().min(12)]),
-            _ => says,
-        };
         if start {
             says
         } else {
@@ -761,7 +783,7 @@ pub fn plan_measure(f: &MeasureFacts) -> Result<MeasurePlan> {
             if (f.minutes as usize) < f.tests.len() {
                 bail!("a lane run's cap is shared by its {} commands: give it at least {} minutes (--minutes)", f.tests.len(), f.tests.len());
             }
-            let says = format!("No CI ({why}). A build lane would run {} run(s) of {} at {short}, each run capped at {} minutes ({} per command)", f.runs, f.tests.join(" and "), f.minutes, lane_minutes(f.minutes, f.tests.len()));
+            let says = format!("No CI ({why}). A build lane would run {} run(s) of {} at {short}, each run capped at {} minutes, setup included", f.runs, f.tests.join(" and "), f.minutes);
             Ok(plan(Method::Lane, f.tests.to_vec(), ask(says, "--lane", f.lane), f.lane))
         }
     }
@@ -785,6 +807,20 @@ pub fn measured_revision(dir: &Path, out: &Path) -> Result<String> {
     Ok(crate::playbook::git(dir, &["rev-parse", "HEAD"])?
         .trim()
         .to_string())
+}
+
+/// The full hash of `at`, a commit that is HEAD or an ancestor of it, for a report on that commit.
+pub fn ancestor_revision(dir: &Path, at: &str) -> Result<String> {
+    if at.is_empty() || at.len() > 40 || !at.chars().all(|c| c.is_ascii_hexdigit()) {
+        bail!("--at takes a commit hash");
+    }
+    let full = crate::playbook::git(dir, &["rev-parse", "--verify", &format!("{at}^{{commit}}")])?
+        .trim()
+        .to_string();
+    if crate::playbook::git(dir, &["merge-base", "--is-ancestor", &full, "HEAD"]).is_err() {
+        bail!("{at} is not HEAD or an ancestor of it: fetch and check out a branch that holds it");
+    }
+    Ok(full)
 }
 
 /// A clean source revision keeps imported outcomes and extracted bodies comparable.
@@ -1039,7 +1075,7 @@ mod tests {
         assert!(
             p.says.contains("not on GitHub")
                 && p.says
-                    .contains("each run capped at 20 minutes (6 per command)"),
+                    .contains("each run capped at 20 minutes, setup included"),
             "{}",
             p.says
         );
@@ -1058,19 +1094,36 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("at least 3 minutes"));
-        // Main's newest tested commit is named, never read under HEAD's name.
+        // No logs at HEAD: main's newest tested commit is read as that commit's evidence, even
+        // where CI has no suite workflow to dispatch to; a dispatch still runs HEAD.
+        // Another CI's config means CI is there: a lane is refused, never run.
+        let repo = crate::paths::unique_temp("nitely-other-ci", "");
+        std::fs::create_dir_all(&repo).unwrap();
+        assert!(other_ci(&repo).is_none());
+        std::fs::write(repo.join("bitbucket-pipelines.yml"), "pipelines: {}").unwrap();
+        let why = other_ci(&repo).unwrap();
+        assert!(plan_measure(&facts(0, CiFact::Blocked(why), false, true))
+            .unwrap_err()
+            .to_string()
+            .contains("Bitbucket Pipelines"));
         let main = "b".repeat(40);
-        let hinted = MeasureFacts {
-            tested_main: Some(&main),
-            ..facts(0, ready, false, false)
+        let from_main = |n, ci, dispatch| MeasureFacts {
+            tested_main: Some((&main, n)),
+            ..facts(0, ci, dispatch, false)
         };
-        let p = plan_measure(&hinted).unwrap();
-        assert!(
-            p.says
-                .contains("bbbbbbbbbbbb, the newest main commit CI tested")
-                && p.commands.len() == 3,
-            "{}",
-            p.says
+        let p = plan_measure(&from_main(2, CiFact::Ready { workflow: false }, false)).unwrap();
+        assert_eq!(
+            (p.method, p.start, p.at.as_deref()),
+            (Method::CiLog, true, Some(main.as_str()))
+        );
+        assert!(p.says.contains("--at bbbbbbbbbbbb"), "{}", p.says);
+        assert_eq!(
+            plan_measure(&from_main(2, ready, true)).unwrap().method,
+            Method::CiRun
+        );
+        assert_eq!(
+            plan_measure(&from_main(0, ready, false)).unwrap().method,
+            Method::CiRun
         );
     }
 
