@@ -229,10 +229,10 @@ pub struct Review {
     /// (NIT-185).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reused: Option<String>,
-    /// Findings set aside because everything they cite is code the change does not touch, the
-    /// base's own (NIT-646): after the base is merged into a branch, its code is context for the
-    /// review, never the change's problem. They count for nothing in the verdict, so nobody is
-    /// asked to accept them; they are listed so a real one can be filed against the base.
+    /// Findings set aside because everything they cite is code the base brought in when it was
+    /// merged into the branch (NIT-646): its code is context for the review, never the change's
+    /// problem. They count for nothing in the verdict, so nobody is asked to accept them; they are
+    /// listed so a real one can be filed against the base.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outside: Vec<Finding>,
 }
@@ -1117,59 +1117,46 @@ pub(crate) fn base_merged_since(worktree: &Path, base: &str, commit: &str, head:
     }
 }
 
-/// How near a changed line a citation may point and still be about the change: a line number in
-/// a finding is often off by one or two.
-const NEAR_A_CHANGE: usize = 2;
-
-/// The lines the change wrote, by file: the new side of `git diff -U0 base...head`. A pure
-/// deletion counts the lines either side of it. None when git cannot say.
-fn changed_lines(worktree: &Path, base: &str, head: &str) -> Option<BTreeMap<String, Vec<(usize, usize)>>> {
-    let out = crate::playbook::git(worktree, &["-c", "core.quotepath=false", "diff", "-U0", "--no-renames", "--no-color", "--no-ext-diff", &format!("{base}...{head}")]).ok()?;
-    let mut lines: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
-    let mut file: Option<String> = None;
-    for line in out.lines() {
-        if let Some(path) = line.strip_prefix("+++ ") {
-            // `/dev/null` for a deleted file: nothing of it is on the branch to cite.
-            file = path.strip_prefix("b/").map(str::to_string);
-            if let Some(f) = &file {
-                lines.entry(f.clone()).or_default();
-            }
-        } else if let (Some(hunk), Some(f)) = (line.strip_prefix("@@ "), &file) {
-            // `@@ -a,b +c,d @@`: d lines from c on the new side (d is 1 when left out).
-            let new = hunk.split(' ').find_map(|t| t.strip_prefix('+'))?;
-            let (start, count): (usize, usize) = match new.split_once(',') {
-                Some((c, d)) => (c.parse().ok()?, d.parse().ok()?),
-                None => (new.parse().ok()?, 1),
-            };
-            let range = if count == 0 { (start, start + 1) } else { (start, start + count - 1) };
-            lines.entry(f.clone()).or_default().push(range);
-        }
+/// The commits the base brought into the branch by merging it after the branch began: on the
+/// base, after the commit the branch forked from (the parent of its oldest first-parent commit),
+/// up to their merge base now. Empty when the base was never merged in; None when git cannot say.
+fn brought_in_by_merges(worktree: &Path, base: &str, head: &str) -> Option<std::collections::HashSet<String>> {
+    let git = |args: &[&str]| crate::playbook::git(worktree, args).ok().map(|o| o.trim().to_string());
+    let merge_base = git(&["merge-base", base, head])?;
+    let oldest = git(&["rev-list", "--first-parent", "--reverse", &format!("{base}..{head}")])?.lines().next()?.to_string();
+    let fork = git(&["rev-parse", &format!("{oldest}^")])?;
+    if fork == merge_base {
+        return Some(Default::default());
     }
-    Some(lines)
+    Some(git(&["rev-list", &format!("{fork}..{merge_base}")])?.lines().map(str::to_string).collect())
 }
 
-/// Whether everything `text` cites is code the change does not touch: a file it leaves alone, or
-/// a line of a file it changes that is not near a changed line. A finding that cites nothing, or a
-/// file the branch does not have, or a changed file without a line, is about the change.
-fn outside_the_change(text: &str, code: &CurrentCode, changed: &BTreeMap<String, Vec<(usize, usize)>>) -> bool {
+/// Whether every line `text` cites was last written by one of `brought` (code the base brought in
+/// by a merge, which the change did not touch since). A citation without a line, or of a file the
+/// branch does not have, is about the change.
+fn only_merged_code(text: &str, code: &CurrentCode, worktree: &Path, head: &str, brought: &std::collections::HashSet<String>) -> bool {
     let cited = citations(text);
     !cited.is_empty()
         && cited.iter().all(|(path, line)| {
-            let Some(file) = code.resolve(path) else { return false };
-            match (changed.get(&file), line) {
-                (None, _) => true,
-                (Some(_), None) => false,
-                (Some(ranges), Some(n)) => !ranges.iter().any(|(from, to)| n + NEAR_A_CHANGE >= *from && *n <= to + NEAR_A_CHANGE),
-            }
+            let (Some(file), Some(n)) = (code.resolve(path), line) else { return false };
+            let range = format!("{n},{n}");
+            crate::playbook::git(worktree, &["blame", "--porcelain", "-L", &range, head, "--", &file])
+                .ok()
+                .and_then(|o| o.split_whitespace().next().map(str::to_string))
+                .is_some_and(|commit| brought.contains(&commit))
         })
 }
 
-/// Moves the findings that are entirely about code the change does not touch from `review`'s
-/// findings to its `outside` list, and sets its verdict from what is left (NIT-646).
+/// Moves new findings that are entirely about code the base brought in by merging it into the
+/// branch, which the change did not touch, to `review.outside`, and sets the verdict from what is
+/// left (NIT-646). A branch that never merged its base has nothing to set aside, and a regression
+/// the change causes in code it does not touch is kept unless that code itself came in by the
+/// merge. Carried findings stay: the reviewer has already confirmed them against current code.
 pub(crate) fn set_aside_outside(review: &mut Review, worktree: &Path, base: &str, head: &str) {
-    let Some(changed) = changed_lines(worktree, base, head) else { return };
+    let Some(brought) = brought_in_by_merges(worktree, base, head).filter(|b| !b.is_empty()) else { return };
     let code = CurrentCode::new(worktree);
-    let (outside, inside): (Vec<Finding>, Vec<Finding>) = std::mem::take(&mut review.findings).into_iter().partition(|f| outside_the_change(&f.text, &code, &changed));
+    let (outside, inside): (Vec<Finding>, Vec<Finding>) =
+        std::mem::take(&mut review.findings).into_iter().partition(|f| !f.carried && only_merged_code(&f.text, &code, worktree, head, &brought));
     review.findings = inside;
     review.outside.extend(outside);
     if review.reused.is_none() {
@@ -1601,14 +1588,29 @@ mod tests {
 - [P1] Quick start loses the flag: src/quick.rs:5, start\n\
 - [P1] Main's tail is wrong: src/goal.rs:19, tail\n\
 - [P1] The changed line breaks parsing: src/goal.rs:10, parse\n\
+- [P1] A caller the change breaks: src/quick.rs:2, unwrap\n\
 - [P2] Off by one next to the change: goal.rs:11\n\
 VERDICT: findings\nMONEY_OR_RELEASE: no";
+        let texts = |fs: &[Finding]| fs.iter().map(|f| f.text.split(':').next().unwrap().to_string()).collect::<Vec<_>>();
+        // Before the merge nothing came in from main, so nothing is set aside, whatever it cites.
+        let mut before = rules().parse("codex", reply, 1, None, Some(&dir)).unwrap();
+        set_aside_outside(&mut before, &dir, "main", &reviewed);
+        assert!(before.outside.is_empty(), "{:?}", before.outside);
+
         let mut review = rules().parse("codex", reply, 1, None, Some(&dir)).unwrap();
         set_aside_outside(&mut review, &dir, "main", "HEAD");
-        let texts = |fs: &[Finding]| fs.iter().map(|f| f.text.split(':').next().unwrap().to_string()).collect::<Vec<_>>();
-        assert_eq!(texts(&review.findings), ["The changed line breaks parsing", "Off by one next to the change"]);
+        assert_eq!(texts(&review.findings), ["The changed line breaks parsing", "A caller the change breaks", "Off by one next to the change"]);
         assert_eq!(texts(&review.outside), ["Quick start loses the flag", "Main's tail is wrong"]);
         assert_eq!(review.verdict, "changes", "the change's own P1 still holds it");
+
+        // A carried finding the reviewer confirmed open stays, whatever its first citation says now.
+        let carried = PreviousRound {
+            findings: vec![Finding { priority: 1, text: "Quick start loses the flag: src/quick.rs:5, start".into(), carried: false, raised_as: None, now: None }],
+            ..prev.clone()
+        };
+        let mut review = rules().parse("codex", "PREVIOUS 1: open src/quick.rs:5 `quick five, from main` still drops it\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
+        set_aside_outside(&mut review, &dir, "main", "HEAD");
+        assert_eq!((review.findings.len(), review.outside.len(), review.verdict.as_str()), (1, 0, "changes"));
 
         // With only main's code to object to, the change passes.
         let mut review = rules().parse("codex", "- [P1] Quick start loses the flag: src/quick.rs:5, start\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
