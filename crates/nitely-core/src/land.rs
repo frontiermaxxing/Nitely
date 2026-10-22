@@ -1882,8 +1882,9 @@ when_changed = ["billing"]
         assert!(refused.contains("asked for changes"), "{refused}");
 
         // The agent asks; a forged acceptance written into the database counts for nothing.
+        let before = f.db.issue(&a).unwrap().unwrap().state;
         let ask = f.db.request_acceptance(&a, "1", "You ruled out a migration: there are no outside users yet.", None, &f.actor).unwrap();
-        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Needs You");
+        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, before, "the question holds the land, not the agent");
         let patch = f.db.reviews(&a).unwrap()[0].patch_id.clone();
         f.db.conn
             .execute(
@@ -1900,7 +1901,7 @@ when_changed = ["billing"]
         let decided = f.db.accept_finding(ask.id, "no outside users yet", &SECRET).unwrap();
         // Where only the app can check acceptances (macOS), the change waits for its approval there.
         let goes_on = if crate::approval::agents_can_verify() { "In Review" } else { "Needs You" };
-        assert_eq!((decided.state.as_str(), decided.ask.answer.as_deref()), (goes_on, Some("Accepted: no outside users yet")));
+        assert_eq!((decided.state.as_str(), decided.ask.answer.as_deref()), (goes_on, Some("Accepted: no outside users yet. Stop working on this finding: land no longer waits on it.")));
         assert!(f.db.accept_finding(ask.id, "again", &SECRET).is_err(), "decided once");
         // Waiting for an approval is said as such, for the goal report (NIT-354).
         let awaits = f.db.timeline(&a).unwrap().iter().filter(|e| e.kind == crate::accept::AWAITS_APPROVAL).count();
@@ -1918,12 +1919,13 @@ when_changed = ["billing"]
 
     #[test]
     fn a_stalled_review_asks_about_each_finding_and_waits_for_all_of_them() {
-        // Rounds that do not converge (NIT-220): the person decides each open finding; the issue
-        // stays the agents' and waits in Needs You until every one is decided.
+        // Rounds that do not converge (NIT-220): the person decides each open finding, while the
+        // issue stays with its agent (NIT-568); it goes on once every one is decided.
         let mut f = fixture();
         let (a, _) = f.reviewed("Rows", "rows.txt", "x");
         asked_for(&f, &a, &[(1, "Drops a row: rows.txt, f: the last row"), (0, "Leaks a key: keys.txt, g: logs it")], 1);
-        assert_eq!(f.db.ask_to_decide_findings(&a, "1 P0/P1 finding still open after two rounds", &f.actor).unwrap(), "Needs You");
+        let before = f.db.issue(&a).unwrap().unwrap().state;
+        assert_eq!(f.db.ask_to_decide_findings(&a, "1 P0/P1 finding still open after two rounds", &f.actor).unwrap(), before);
         // Asked again (another stalled round), the requests already open stand.
         f.db.ask_to_decide_findings(&a, "again", &f.actor).unwrap();
         let requests: Vec<crate::issues::Ask> = f.db.open_asks().unwrap().into_iter().filter(|x| x.issue_key.as_deref() == Some(a.as_str())).collect();
@@ -1931,7 +1933,7 @@ when_changed = ["billing"]
         assert_eq!(f.db.issue(&a).unwrap().unwrap().owner, "agent");
         crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
         let first = f.db.accept_finding(requests[0].id, "no outside users yet", &SECRET).unwrap();
-        assert_eq!(first.state, "Needs You", "the other finding still waits for the person");
+        assert_eq!(first.state, "In Progress", "the other finding is still to fix or decide");
         let second = f.db.accept_finding(requests[1].id, "the key is a test key", &SECRET).unwrap();
         let goes_on = if crate::approval::agents_can_verify() { "In Review" } else { "Needs You" };
         assert_eq!(second.state, goes_on);
@@ -1973,10 +1975,10 @@ when_changed = ["billing"]
             assert!(f.db.ask(ask.id).unwrap().unwrap().closed.is_none());
             assert!(crate::submit::review_context(&f.db, &f.db.issue(&a).unwrap().unwrap(), &no_gate).unwrap().contains(blocker), "each round is told the words being decided");
         }
-        // Asking again is that same request, and the issue waits for the person again, as asking does.
+        // Asking again is that same request, and the issue stays with its agent.
         f.db.move_issue(&a, "In Progress", None, None, &f.actor).unwrap();
         assert_eq!(f.db.request_acceptance(&a, "1", "Still only the person.", None, &f.actor).unwrap().id, ask.id);
-        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Needs You");
+        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "In Progress");
         assert_eq!(f.db.open_asks().unwrap().iter().filter(|q| q.issue_key.as_deref() == Some(a.as_str())).count(), 1, "one decision in the Inbox");
         // Another blocker in the same code is another decision, and the first one's request is not its.
         reviewed_with(&f, &a, other, 4);
@@ -2073,9 +2075,11 @@ when_changed = ["billing"]
             .unwrap();
         assert!(f.db.accept_finding(moot.id, "fine", &SECRET).is_err(), "nothing to accept any more");
         assert!(f.db.decline_finding(moot.id, "moot now", "").is_ok());
-        // Sending one back closes the issue's other requests: the change goes back to be fixed.
-        assert!(f.db.ask(open.id).unwrap().unwrap().closed.as_deref().is_some_and(|c| c.contains("sent back")));
-        assert_eq!(f.db.close_superseded_requests(&a, &[]).unwrap(), 0);
+        // Sending one back leaves the issue's other questions standing, each its own decision, until
+        // a round no longer raises its finding.
+        assert!(f.db.ask(open.id).unwrap().unwrap().closed.is_none());
+        assert_eq!(f.db.close_superseded_requests(&a, &[]).unwrap(), 1);
+        assert_eq!(f.db.ask(open.id).unwrap().unwrap().closed.as_deref(), Some(crate::accept::FIXED));
         std::fs::remove_dir_all(&f.base).ok();
     }
 

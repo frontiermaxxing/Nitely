@@ -120,6 +120,9 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
         <SettingsRow label="Batch merges" why={options.land_batch && options.test_depth !== "off" ? "When changes land together, the combined result runs the full checks." : undefined}>
           <Toggle label="Batch merges" value={options.land_batch} disabled={off} onChange={(land_batch) => edit({ land_batch })} />
         </SettingsRow>
+        <SettingsRow label="Review rounds that stall" why="Neither pauses the agent: an open question holds the land, and a fix closes it by itself.">
+          <Choice label="Review rounds that stall" fallback="Ask me about each finding" value={options.stalled_reviews} choices={[["fix", "Split the change, tell me"], ["ask", "Ask me about each finding"]]} disabled={off} onChange={(stalled_reviews) => edit({ stalled_reviews })} />
+        </SettingsRow>
         <SettingsRow label="Shared build lanes">
           <Toggle label="Shared build lanes" unset="Repository" value={options.shared_lanes} disabled={off} onChange={(shared_lanes) => edit({ shared_lanes })} />
         </SettingsRow>
@@ -203,6 +206,7 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
   const review = { off: "Off", individual: "Each change", batched: "Each batch" };
   const items = { off: "None", advisory: "Without blocking", blocking: "Blocking" };
   const plans = { approve: "Approve each", asked: "Start plans I asked for", all: "Start every plan" };
+  const stalled = { fix: "Split the change, tell me", ask: "Ask me about each finding" };
   return <details className="review-mode-effective"><summary>Saved effective settings by repository</summary>
     {error && <p className="error small">{error}</p>}
     {rows?.length === 0 && <p className="muted small">No connected repositories.</p>}
@@ -215,6 +219,7 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
         <dt>Goal branches</dt><dd>{r.options.goal_branches ? `On, checkpoint every ${r.options.checkpoint?.items ?? "?"} items${r.options.checkpoint?.daily ? " or daily" : ""}` : "Off"}</dd>
         <dt>Goal item review</dt><dd>{r.options.goal_branches ? items[r.options.item_review ?? "off"] : "Not used"}</dd>
         <dt>Goal plans</dt><dd>{plans[r.options.goal_plans ?? "approve"]}</dd>
+        <dt>Review rounds that stall</dt><dd>{stalled[r.options.stalled_reviews ?? "ask"]}</dd>
         <dt>Full-suite checks on main</dt><dd>{r.options.full_backstop?.enabled ? "On" : "Off"}</dd>
         <dt>Audit sampling</dt><dd>{r.options.audit_percent ? `${r.options.audit_percent}% of eligible changes` : "Off"}</dd></dl>
       {r.warnings.map((w, i) => <p key={i} className="settings-hint">{w}</p>)}

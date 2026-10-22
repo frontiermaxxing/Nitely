@@ -49,8 +49,8 @@ pub struct Decided {
 impl Db {
     /// An agent asks the person to accept one P0/P1 finding of `key`'s latest review: by its number
     /// in that review's findings (from 1) or its text. `why` is the agent's reasoning, which the
-    /// person reads. It is an ask (answered like one, `get_answer`) that carries the finding, and
-    /// the issue goes to Needs You.
+    /// person reads. It is an ask (answered like one, `get_answer`) that carries the finding. The
+    /// question holds the land, never the agent (NIT-568): the issue stays where it is.
     pub fn request_acceptance(&mut self, key: &str, finding: &str, why: &str, cwd: Option<&str>, actor: &Actor) -> Result<Ask> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         if why.trim().is_empty() {
@@ -86,16 +86,13 @@ impl Db {
                 ask
             }
         };
-        if issue.origin == "nitely" && issue.state != "Needs You" {
-            self.move_issue(&issue.key, "Needs You", None, None, actor)?;
-        }
         self.ask(ask.id)?.context("ask vanished")
     }
 
     /// Review rounds on `key` stopped converging (`why`): the person decides each P0/P1 finding of
     /// its latest review not yet accepted, accept it as it is or send it back, as a request to
-    /// accept it (the Inbox's Review finding). The issue goes to Needs You and stays the agents'
-    /// work. Returns its state.
+    /// accept it (the Inbox's Review finding). The issue stays with its agent, who goes on fixing
+    /// (NIT-568). Returns its state.
     pub fn ask_to_decide_findings(&mut self, key: &str, why: &str, actor: &Actor) -> Result<String> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         let review = self.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{} has no review", issue.key))?;
@@ -108,11 +105,7 @@ impl Db {
             }
             self.request_acceptance(&issue.key, &f.text, &question, None, actor)?;
         }
-        let issue = self.issue(&issue.key)?.with_context(|| format!("no issue {key}"))?;
-        if issue.state != "Needs You" {
-            return Ok(self.move_issue(&issue.key, "Needs You", None, None, actor)?.state);
-        }
-        Ok(issue.state)
+        Ok(self.issue(&issue.key)?.with_context(|| format!("no issue {key}"))?.state)
     }
 
     /// When the person last decided a request to accept a finding of `key` (0 when never): their
@@ -164,20 +157,20 @@ impl Db {
     }
 
     /// The person sends the request back: the finding stays a defect to fix, for the reason given.
+    /// An agent working on the issue goes on as it was; the issue's other questions stand, each
+    /// its own decision (NIT-568).
     pub fn decline_finding(&mut self, ask_id: i64, why: &str, from: &str) -> Result<Decided> {
         let (_, key, finding, _) = self.acceptance_ask_as_asked(ask_id)?;
         let why = one_line(why)?;
         let ask = self.answer_ask(ask_id, &format!("Not accepted: {why}. Fix it."), &Actor::Human)?;
-        // The change goes back to be fixed, so the issue's other requests have nothing left to decide.
-        self.conn.execute(
-            "UPDATE ask SET closed = ?2 WHERE issue_key = ?1 COLLATE NOCASE AND finding IS NOT NULL AND answer IS NULL AND closed IS NULL",
-            params![key, "closed: the change was sent back over another finding"],
-        )?;
+        self.close_decided_alike(&key, ask_id, &finding.text)?;
         let issue = self.issue(&key)?.with_context(|| format!("no issue {key}"))?;
         if issue.owner == "human" {
             self.set_owner(&key, "agent", &Actor::Human)?;
         }
-        let state = self.move_issue(&key, "Todo", None, None, &Actor::Human)?.state;
+        let issue = self.issue(&key)?.with_context(|| format!("no issue {key}"))?;
+        let to = crate::submit_rules::after_answer(false, &issue.state, 0, false);
+        let state = if issue.state != to { self.move_issue(&key, to, None, None, &Actor::Human)?.state } else { issue.state };
         self.add_note(&key, &format!("Did not accept{from} [P{}] {}: {why}", finding.priority, finding.text), "note", &Actor::Human)?;
         Ok(Decided { ask, state })
     }
@@ -289,7 +282,7 @@ impl Db {
                 None if findings.iter().any(|x| x.text == words(a)) => first.push((words(a), a.id)),
                 None => {
                     first.push((words(a), a.id));
-                    closing.push((a.id, "closed: the latest review no longer has that finding".to_string()));
+                    closing.push((a.id, FIXED.to_string()));
                 }
             }
         }
@@ -336,7 +329,7 @@ impl Db {
     /// goes on as a passed review would (In Review, or Needs You when it still waits for an
     /// approval); otherwise back to the agent to fix the rest.
     fn after_acceptance(&mut self, _ask: Ask, key: &str, finding: &AskedFinding, reason: &str, from: &str) -> Result<Decided> {
-        let answered = self.answer_ask(_ask.id, &format!("Accepted: {reason}"), &Actor::Human)?;
+        let answered = self.answer_ask(_ask.id, &format!("Accepted: {reason}. Stop working on this finding: land no longer waits on it."), &Actor::Human)?;
         self.close_decided_alike(key, _ask.id, &finding.text)?;
         let review = self.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()).context("no review")?;
         // The finding the person just accepted is decided by this call, whatever key signed it: under
@@ -350,21 +343,22 @@ impl Db {
             self.set_owner(key, "agent", &Actor::Human)?;
         }
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
-        // Findings the person is still deciding keep it with them; one nobody asked about goes back.
+        // Findings the person is still deciding stay with the agent, who goes on fixing (NIT-568).
         let asked: Vec<String> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key))).filter_map(|a| a.finding.map(|f| f.text)).collect();
+        // Only the app reads the keys acceptances are checked with (macOS): an agent's land could
+        // not see this one, so the change waits for an approval, and the app lands it.
+        let needs_approval = review.approver == "human" || !crate::approval::agents_can_verify();
+        let to = crate::submit_rules::after_answer(true, &issue.state, blocking.len(), needs_approval);
         // `approval`: the change now waits for the person's approval, a request of its own.
-        let (to, then, approval) = if !blocking.is_empty() && blocking.iter().all(|f| asked.contains(&f.text)) {
-            ("Needs You", format!("{} other P0/P1 finding(s) wait for your decision", blocking.len()), false)
-        } else if !blocking.is_empty() {
-            ("In Progress", format!("{} other P0/P1 finding(s) still to fix", blocking.len()), false)
+        let (then, approval) = if !blocking.is_empty() {
+            let deciding = blocking.iter().filter(|f| asked.contains(&f.text)).count();
+            (format!("{} other P0/P1 finding(s) still to fix or decide ({deciding} wait for your decision)", blocking.len()), false)
         } else if review.approver == "human" {
-            ("Needs You", WAITS_FOR_APPROVAL.to_string(), true)
-        } else if !crate::approval::agents_can_verify() {
-            // Only the app reads the keys acceptances are checked with (macOS): an agent's land
-            // could not see this one, so the change waits for an approval, and the app lands it.
-            ("Needs You", APPROVE_IN_THE_APP.to_string(), true)
+            (WAITS_FOR_APPROVAL.to_string(), true)
+        } else if needs_approval {
+            (APPROVE_IN_THE_APP.to_string(), true)
         } else {
-            ("In Review", "the review now passes: land it".to_string(), false)
+            ("the review now passes: land it".to_string(), false)
         };
         let state = if issue.state != to { self.move_issue(key, to, None, None, &Actor::Human)?.state } else { issue.state };
         self.add_note(key, &format!("Accepted{from} [P{}] {}: {reason}. Then {then}.", finding.priority, finding.text), "note", &Actor::Human)?;
@@ -376,6 +370,9 @@ impl Db {
         Ok(Decided { ask: answered, state })
     }
 }
+
+/// Why a question about a finding closed without an answer: a later review no longer raises it.
+pub const FIXED: &str = "closed: fixed, no decision needed (the latest review no longer raises it)";
 
 /// The event kind for a change that waits for the person's approval after they accepted a finding.
 pub const AWAITS_APPROVAL: &str = "awaits_approval";

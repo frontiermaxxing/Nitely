@@ -91,9 +91,12 @@ Sometimes a review keeps asking for something the person has decided against: a 
 ruled out, a compatibility shim nobody needs. Fixing it is not the agent's call, and looping on it
 costs a round each time. So an agent asks the person to accept that one finding as it is:
 `request_acceptance` (MCP) or `nitely ask --issue APP-4 --finding 1 "why"`, with a P0 or P1 finding
-of the issue's latest review (by number or text) and its reasoning. The issue waits in Needs You,
-and the Inbox and the phone show one decision: the finding, the agent's reasoning, a one-line
-reason, **Accept** or **Send back**.
+of the issue's latest review (by number or text) and its reasoning. The Inbox and the phone show one
+decision: the finding, the agent's reasoning, a one-line reason, **Accept** or **Send back**. The
+question holds the land, never the agent (NIT-568): the issue stays with it, and `land` refuses
+while a P0/P1 finding of the latest review is neither fixed nor accepted. A later review that no
+longer raises the finding closes its question by itself ("fixed, no decision needed"), and it
+leaves the Inbox.
 
 Accepting signs, with the app's key (or a paired phone's, as for approvals):
 
@@ -116,19 +119,26 @@ and stores it (`accepted_finding` table). Then:
   so they are never carried. Only acceptances that verify are told.
 - `submit` of a patch whose only P0/P1 findings are accepted goes on as a passing review.
 - The issue goes on at once: to In Review when nothing else blocks it, to Needs You when the change
-  still waits for the person's approval, staying in Needs You while requests about its other P0/P1
-  findings wait, and back to In Progress when other findings remain that nobody asked about.
+  still waits for the person's approval, and to In Progress, with its agent, while other P0/P1
+  findings are still to fix or decide. The answer tells the agent to stop working on that finding.
 
-**Send back** answers "Not accepted: <reason>. Fix it." and the issue goes back to Todo; its other
-requests close with it.
+**Send back** answers "Not accepted: <reason>. Fix it." Nothing changes for an agent working on the
+issue (In Progress), which was already fixing; one nobody holds goes to Todo. Its other questions
+stand, each its own decision.
 
 **When review rounds stop converging** (a P0/P1 finding still open after two rounds that tried to
-fix it, or five rounds in a row asking for changes; `not_converging` in submit.rs), `submit` asks
-the person about every open P0/P1 finding of the latest review the same way, one request each, and
-moves the issue to Needs You. The issue stays the agents' work: a change that failed review is never
-the person's own task, so the Inbox offers no Approve and no Mark done for it, only Accept or Send
-back per finding. Accepting one keeps the issue with the person while others wait; once all are
-accepted it goes on as a passing review. Their decision starts the count of rounds again.
+fix it, or five rounds in a row asking for changes; `not_converging` in submit.rs), the review
+mode's `stalled_reviews` decides, and neither pauses the agent (NIT-568):
+
+- `fix` (Fast and Careful): the agent is told to split the change: land what the reviews agree on,
+  and file the open findings as a follow-up issue in the same goal. The person reads it as a notice
+  on the issue that nothing waits on.
+- `ask` (Release, and a project with no mode): `submit` also asks the person about every open P0/P1
+  finding of the latest review the same way, one request each, while the agent goes on fixing.
+  The issue stays the agents' work: a change that failed review is never the person's own task, so
+  the Inbox offers no Approve and no Mark done for it, only Accept or Send back per finding. Once
+  all are fixed or accepted it goes on as a passing review. Their decision starts the count of
+  rounds again.
 
 **Done** is refused on an issue whose change was submitted and never landed (it isn't on the
 integration branch): land it, or Cancel it with a reason. Done asked for directly (the app, MCP, the

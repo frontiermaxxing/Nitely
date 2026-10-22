@@ -767,7 +767,7 @@ fn tools() -> Value {
         },
         {
             "name": "request_acceptance",
-            "description": "Ask the human to accept one P0 or P1 finding of the issue's latest review as it is: a trade-off they decided or should decide, not a defect you can fix (for example a reviewer asking again for a migration they ruled out). It shows in their inbox and on their phone as one decision, the finding with your reasoning, Accept or Send back, and the issue waits in Needs You. Check the answer with get_answer: \"Accepted: ...\" means land honors it and the next review round is told; \"Not accepted: ...\" means fix it. Do not use it for a finding you can fix.",
+            "description": "Ask the human to accept one P0 or P1 finding of the issue's latest review as it is: a trade-off they decided or should decide, not a defect you can fix (for example a reviewer asking again for a migration they ruled out). It shows in their inbox and on their phone as one decision, the finding with your reasoning, Accept or Send back. The question holds the land, not you: the issue stays with you, so go on with the other findings or other work meanwhile. A later review that no longer raises the finding closes the question by itself. Check the answer with get_answer: \"Accepted: ...\" means stop working on that finding (land honors it and the next review round is told); \"Not accepted: ...\" means fix it. Do not use it for a finding you can fix.",
             "inputSchema": { "type": "object", "required": ["key", "finding", "why"], "properties": {
                 "key": { "type": "string", "description": "The issue." },
                 "finding": { "type": "string", "description": "The finding: its number in the latest review's findings (from 1) or its exact text." },
@@ -1763,7 +1763,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 cwd: server.place(),
                 kind: "ask".into(),
                 summary: Some(format!("Asked to accept a finding: {}", ask.finding.as_ref().map(|f| f.text.as_str()).unwrap_or(""))),
-                state: "waiting".into(),
+                // The question holds the land, not the agent (NIT-568).
+                state: "working".into(),
             })?;
             json!(ask)
         }
