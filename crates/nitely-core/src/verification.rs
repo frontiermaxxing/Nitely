@@ -97,6 +97,58 @@ fn test_infrastructure(p: &str) -> bool {
         .any(|s| p.contains(s))
 }
 
+/// One file of a diff, for `small_verdict`: its changed lines (None for a binary file) and, for a
+/// new file, whether its directory already held files before the change.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiffFile { pub path: String, pub added: Option<usize>, pub removed: Option<usize>, pub added_file: bool, pub dir_existed: bool }
+
+/// Whether a change is small enough for the quick path, and why (NIT-622).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SmallVerdict { pub small: bool, pub reason: String }
+
+/// Decides `small` or `normal` from the diff alone: within the mode's quick limits, no binary
+/// file, no protected, human or blocked path (`protected` names the hit), and no new file outside
+/// a directory that already had files (the repo's root never counts). Without limits nothing is
+/// small.
+pub fn small_verdict(files: &[DiffFile], limits: Option<crate::project_modes::QuickLimits>, protected: impl Fn(&str) -> Result<Option<String>>) -> Result<SmallVerdict> {
+    let normal = |reason: String| Ok(SmallVerdict { small: false, reason });
+    let Some(limits) = limits else { return normal("The review mode has no quick limits.".into()) };
+    if files.is_empty() { return normal("The change has no files.".into()); }
+    if files.len() > limits.files as usize { return normal(format!("{} files, over the limit of {}.", files.len(), limits.files)); }
+    let mut lines = 0;
+    for f in files {
+        let (Some(a), Some(r)) = (f.added, f.removed) else { return normal(format!("{} is a binary file.", f.path)) };
+        lines += a + r;
+        if let Some(hit) = protected(&f.path)? { return normal(format!("{} is protected: {hit}.", f.path)); }
+        if f.added_file && (!f.path.contains('/') || !f.dir_existed) { return normal(format!("{} is a new file outside an existing directory.", f.path)); }
+    }
+    if lines > limits.lines as usize { return normal(format!("{lines} changed lines, over the limit of {}.", limits.lines)); }
+    Ok(SmallVerdict { small: true, reason: format!("{lines} changed line{} in {} file{}.", if lines == 1 { "" } else { "s" }, files.len(), if files.len() == 1 { "" } else { "s" }) })
+}
+
+/// `small_verdict` for the change from `base` to `head`, against the integration branch's
+/// committed playbook (never the candidate's) and its protected, human and blocked paths.
+pub fn small_change(repo: &Path, base: &str, head: &str, limits: Option<crate::project_modes::QuickLimits>) -> Result<SmallVerdict> {
+    let pb = Playbook::parse(&blob(repo, base, PLAYBOOK_PATH).unwrap_or_default())?;
+    let base = git(repo, &["merge-base", base, head])?.trim().to_string();
+    let mut files = Vec::new();
+    for row in git(repo, &["diff", "--numstat", "--no-renames", "--no-ext-diff", &base, head, "--"])?.lines().filter(|l| !l.is_empty()) {
+        let mut cells = row.splitn(3, '\t');
+        let (a, r, path) = (cells.next().unwrap_or("-"), cells.next().unwrap_or("-"), cells.next().unwrap_or("").to_string());
+        files.push(DiffFile { path, added: a.parse().ok(), removed: r.parse().ok(), added_file: false, dir_existed: true });
+    }
+    for path in git(repo, &["diff", "--name-only", "--diff-filter=A", "--no-renames", &base, head, "--"])?.lines().filter(|l| !l.is_empty()) {
+        let dir = path.rsplit_once('/').map(|(d, _)| d);
+        // `<rev>:<dir>^{tree}` reads as a path, so ask the object's type instead (NIT-636 review).
+        let existed = dir.is_some_and(|d| git(repo, &["cat-file", "-t", &format!("{base}:{d}")]).is_ok_and(|t| t.trim() == "tree"));
+        if let Some(f) = files.iter_mut().find(|f| f.path == path) { f.added_file = true; f.dir_existed = existed; }
+    }
+    small_verdict(&files, limits, |path| {
+        if let Some(hit) = pb.approval.protected_hit(&[path.to_string()])? { return Ok(Some(hit)); }
+        Ok((built_in_protected(path) || matches(&pb.verification.protected, path)?).then(|| "a protected path".to_string()))
+    })
+}
+
 fn ordinary_comment(text: &str) -> bool {
     let t = text.to_ascii_lowercase();
     !t.starts_with("///") && !t.starts_with("//!") && !t.starts_with("/**") && !t.starts_with("/*!")
@@ -355,6 +407,19 @@ fn risk_floor(repo:&Path,plan:&Plan,pb:&Playbook)->Result<Option<String>> {
     }
     Ok(None)
 }
+/// A small change (NIT-622) the test map would send to the full gate only for files no test
+/// reaches runs those files' own checks instead (NIT-623), under the committed playbook's
+/// `[checks.files]`. Anything else stays as the map decided.
+fn small_selection(repo:&Path,plan:&mut Plan,limits:Option<crate::project_modes::QuickLimits>)->Result<()> {
+    if plan.affected.as_ref().is_none_or(|s|!s.full) {return Ok(());}
+    let verdict=small_change(repo,&plan.policy_commit,&plan.head,limits)?;
+    if !verdict.small {return Ok(());}
+    let pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+    let selection=crate::affected_tests::select_small(repo,&plan.base,&plan.head,&plan.policy_commit,&pb.checks.files,&pb.verification.basic)?;
+    if !selection.full {plan.reasons.push(format!("Small: {}",verdict.reason));}
+    plan.affected=Some(selection);
+    Ok(())
+}
 /// Before landing under a risk-based mode (Fast and Careful), only the quick checks: compile and
 /// lint (the playbook's `basic` commands) and the tests the change affects (NIT-494). Size, new or
 /// renamed files and a missing declaration no longer force the full suite here, because the land
@@ -371,7 +436,8 @@ fn fast_checks(repo:&Path,plan:&mut Plan,issue:&IssueRecord)->Result<()> {
     plan.commands.append(&mut pb.verification.basic);
     for check in &selection.checks {
         if let Some(d)=&check.discovery {plan.commands.extend([d.command.clone(),d.ignored_command.clone()]);}
-        plan.commands.push(check.command.clone());
+        // A small change's own TypeScript check is the basic type check already listed (NIT-623).
+        if !plan.commands.contains(&check.command) {plan.commands.push(check.command.clone());}
     }
     plan.effective="standard".into();plan.depth=crate::issues::review_depth("standard").into();plan.shadow=false;
     for component in &selection.components {let id=format!("component:{component}");if !plan.rule_ids.contains(&id) {plan.rule_ids.push(id);}}
@@ -426,7 +492,10 @@ fn project_plan(db:&Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord)->Resul
                     plan.enforcement="Configured Basic commands selected by human project mode; review is independently configured.".into();
                 }
             }
-            Some(crate::project_modes::TestDepth::Risk) if plan.commands.is_empty() => fast_checks(repo,&mut plan,issue)?,
+            Some(crate::project_modes::TestDepth::Risk) if plan.commands.is_empty() => {
+                small_selection(repo,&mut plan,o.quick_limits)?;
+                fast_checks(repo,&mut plan,issue)?
+            }
             _=>{}
         }
         if let Some(n)=o.audit_percent {plan.audit_percent=n;}
@@ -536,6 +605,43 @@ pub fn recent(db: &Db, key: &str) -> Result<Vec<Plan>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    /// NIT-636 review: a new file beside others in a directory that existed is small; one in a new
+    /// directory is not.
+    #[test]
+    fn a_new_file_beside_others_is_small_and_one_in_a_new_directory_is_not() {
+        use crate::test_repo::git as g;
+        let repo = crate::test_repo::copy("verification-small-dirs", |dir| crate::test_repo::init(dir, &[("scripts/build.txt", "one\n")]));
+        let base = g(&repo, &["rev-parse", "HEAD"]);
+        let limits = Some(crate::project_modes::QuickLimits::default());
+        std::fs::write(repo.join("scripts/extra.txt"), "two\n").unwrap();
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "beside"]);
+        let beside = small_change(&repo, &base, "HEAD", limits).unwrap();
+        assert!(beside.small, "{beside:?}");
+        std::fs::create_dir_all(repo.join("tools")).unwrap();
+        std::fs::write(repo.join("tools/new.txt"), "three\n").unwrap();
+        g(&repo, &["add", "-A"]);
+        g(&repo, &["commit", "-qm", "new dir"]);
+        assert!(!small_change(&repo, "HEAD~1", "HEAD", limits).unwrap().small);
+    }
+    /// NIT-622: what makes a change small, as pure cases over the diff.
+    #[test]
+    fn a_change_is_small_only_within_the_limits_and_off_protected_paths() {
+        use crate::project_modes::QuickLimits;
+        let file = |path: &str, lines: usize| DiffFile { path: path.into(), added: Some(lines), removed: Some(0), added_file: false, dir_existed: true };
+        let verdict = |files: &[DiffFile]| small_verdict(files, Some(QuickLimits::default()), |p: &str| Ok(p.starts_with("src/billing/").then(|| "money".to_string()))).unwrap();
+        assert!(verdict(&[file("scripts/build.mjs", 20), file("docs/build.md", 10)]).small, "30 lines in 2 files");
+        let over = verdict(&[file("scripts/build.mjs", 21), file("docs/build.md", 10)]);
+        assert!(!over.small && over.reason.contains("31 changed lines"), "{over:?}");
+        assert!(!verdict(&[file("a/x.rs", 1), file("a/y.rs", 1), file("a/z.rs", 1)]).small, "three files");
+        let paid = verdict(&[file("src/billing/pay.ts", 2)]);
+        assert!(!paid.small && paid.reason.contains("money"), "{paid:?}");
+        assert!(!verdict(&[DiffFile { added_file: true, ..file("notes.txt", 3) }]).small, "a new top-level file");
+        assert!(!verdict(&[DiffFile { added_file: true, dir_existed: false, ..file("tools/new/x.mjs", 3) }]).small, "a new directory");
+        assert!(verdict(&[DiffFile { added_file: true, ..file("scripts/extra.mjs", 3) }]).small, "a new file beside others");
+        assert!(!verdict(&[DiffFile { added: None, removed: None, ..file("src-tauri/icons/icon.png", 0) }]).small, "a binary file");
+        assert!(!small_verdict(&[file("scripts/build.mjs", 1)], None, |_: &str| Ok(None)).unwrap().small, "Release has no quick limits");
+    }
     fn rules() -> Rules { Rules { mode: "shadow".into(), version: 1, prose: vec!["docs/.*\\.md".into()], comments: vec!["src/.*".into()], display_copy: vec!["src/.*\\.tsx".into()], ..Default::default() } }
     #[test]
     fn comments_preserve_code_directives_strings_and_doc_tests() {
@@ -636,6 +742,7 @@ mod tests {
                 ("src/app.test.ts", "import {a} from './app'; export const ok = a === 1;"),
                 ("src/keys/key.ts", "export const k = 1;"),
                 ("notes.txt", "notes"),
+                ("tools/build.ps1", "Write-Output 1"),
             ]);
         });
         let mut db = Db::open(&repo.join("state.sqlite")).unwrap();
@@ -659,12 +766,18 @@ mod tests {
         assert!(!fast.shadow && ["echo typed", "npm run build", "npm test"].iter().all(|c| fast.commands.iter().any(|x| x == c)), "{:?}", fast.commands);
         assert!(checks_note(&crate::playbook::GateResult { mode_authority: None, passed: true, plan: Some(fast.clone()), skipped: None, commit: "abc".into(), results: vec![crate::playbook::CommandResult { step: None, command: "npm run build".into(), ok: true, seconds: 7, output: String::new(), skipped: false, timed_out: false }], warnings: vec![], flaked: vec![], lane_run: None }).unwrap().contains("`npm run build`: passed in 7 s"));
         assert!(project_plan(&db, &repo, &base, "HEAD", &sensitive).unwrap().commands.is_empty(), "a declared sensitive change keeps the full gate");
-        // The risk floors: a protected path, and a file the test map does not cover.
+        // The risk floors: a protected path, and a file the test map does not cover with no check
+        // of its own (plain text).
         for path in ["src/keys/key.ts", "notes.txt"] {
             change(path);
             let full = project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap();
             assert!(full.commands.is_empty(), "{path}: {:?}", full.commands);
         }
+        // A small change to a script no test reaches runs that script's own check, not the full
+        // suite (NIT-623).
+        change("tools/build.ps1");
+        let own = project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap();
+        assert!(own.commands.iter().any(|c| c == "nitely check-file \"tools/build.ps1\"") && !own.commands.iter().any(|c| c == "npm test"), "{:?} {:?}", own.commands, own.reasons);
         change("src/feature.ts");
         db.set_project_review_mode("APP", Mode::Release, Options::default(), 1, &Actor::Human).unwrap();
         assert_eq!(project_plan(&db, &repo, &base, "HEAD", &undeclared).unwrap().depth, "Full", "Release runs the full suite before every land");

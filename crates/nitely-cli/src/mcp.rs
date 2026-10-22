@@ -45,7 +45,7 @@ pub(crate) struct Remote {
 }
 
 /// Tools that work in a repo on this machine, so not for an agent elsewhere.
-const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "run", "submit", "submit_status", "land", "widen", "triage", "get_triage"];
+const LOCAL_ONLY: &[&str] = &["start_task", "run_gate", "run", "submit", "submit_status", "land", "widen", "triage", "get_triage", "quick_start", "quick_land"];
 
 impl Server {
     pub(crate) fn remote(name: &str, project: Option<String>) -> Server {
@@ -480,6 +480,22 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string", "description": "e.g. NIT-12" },
                 "take_over": { "type": "boolean", "description": "Take the issue from the agent that holds it, only when you know that agent stopped." }
+            } }
+        },
+        {
+            "name": "quick_start",
+            "description": "Start a small change you will make yourself, right where you are (the quick path): files an issue with this title, or takes the one named by key, and makes a light worktree for it from the integration branch in seconds. Make the change there, then call quick_land. For a change of a few lines in one or two files; anything bigger goes through start_task and submit.",
+            "inputSchema": { "type": "object", "properties": {
+                "title": { "type": "string", "description": "What the change does, as the issue's title. Needed unless key is given." },
+                "key": { "type": "string", "description": "An issue that exists already, instead of filing one." }
+            } }
+        },
+        {
+            "name": "quick_land",
+            "description": "Commit what is in the quick_start worktree and land it when the change is small (by default at most 30 changed lines in at most 2 files, off protected and human paths): its own checks, then the land queue, with no pull request and no review before landing; quick changes are reviewed after landing, together. The issue moves to Done and the worktree goes. A change that is not small is refused with why: submit it from the same worktree as usual.",
+            "inputSchema": { "type": "object", "properties": {
+                "worktree": { "type": "string", "description": "The worktree quick_start returned; defaults to the one you are in." },
+                "message": { "type": "string", "description": "The commit message; defaults to the issue's title and key." }
             } }
         },
         {
@@ -1303,6 +1319,38 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let mut started = playbook::start_task(&db, &root, &issue, &server.vendor, &actor)?;
             started.warnings.extend(took);
             json!(started)
+        }
+        "quick_start" => {
+            let issue = match str_arg(args, "key") {
+                Some(key) => db.issue(key)?.with_context(|| format!("no issue {key}"))?,
+                None => {
+                    let title = str_arg(args, "title").context("pass the change's title, or the key of its issue")?;
+                    let source = if SOURCES.contains(&server.vendor.as_str()) { server.vendor.clone() } else { "claude".into() };
+                    let project = project(&db)?;
+                    db.create_issue(&nitely_core::quick::new_issue(&project, title, &source), &actor)?
+                }
+            };
+            let root = playbook::repo_for_issue(&config, issue.project.as_deref(), &server.cwd)?;
+            let took = match &actor {
+                Actor::Agent(id) => db.claim_for_start(&issue.key, id, &[server.agent(), server.vendor.clone()], false)?,
+                Actor::Human => None,
+            };
+            let mut started = nitely_core::quick::start(&db, &root, &issue, &server.vendor, &actor)?;
+            started.warnings.extend(took);
+            let mut out = json!(started);
+            out["next"] = json!(format!("Make the change in {}, then call quick_land with that worktree.", started.worktree));
+            out
+        }
+        "quick_land" => {
+            let dir = task_dir(&config, &db, args, &server.cwd)?;
+            nitely_core::install::check_current(&config, &dir, env!("NITELY_COMMIT"))?;
+            if detached.is_some() {
+                json!(nitely_core::quick::land(&mut db, &config, &dir, str_arg(args, "message"), &actor)?)
+            } else {
+                run_apart(server, session, params, |log, _| {
+                    Ok(json!({ "still_running": true, "log": log.to_string_lossy(), "next": format!("The quick land is still running after {}s, in a process of its own that goes on without this call. get_issue shows when it landed or why it stopped.", wait_cap().as_secs()) }))
+                })?
+            }
         }
         "widen" => {
             let dir = task_dir(&config, &db, args, &server.cwd)?;

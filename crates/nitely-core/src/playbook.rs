@@ -30,6 +30,9 @@ pub struct Playbook {
     pub release: Option<crate::release_verification::Rules>,
     #[serde(default)]
     pub branch: BranchRules,
+    /// How a small change checks a file no test reaches (`[checks.files]`, NIT-623).
+    #[serde(default, skip_serializing_if = "CheckRules::is_empty")]
+    pub checks: CheckRules,
     #[serde(default)]
     pub worktree: WorktreeRules,
     #[serde(default)]
@@ -164,6 +167,19 @@ pub struct BranchRules {
     pub integration_macos: Option<String>,
     /// `{vendor}`, `{key}` (lowercase) and `{slug}` are filled in.
     pub pattern: String,
+}
+
+/// `[checks.files]`: a glob over the repo-relative path (`*` within a segment, `**` across them)
+/// to the command that checks such a file, with `{path}` filled in, e.g.
+/// `"scripts/*.ps1" = "pwsh -NoProfile -File scripts/lint.ps1 {path}"`. A small change to a file
+/// no test reaches runs it instead of the full gate (affected_tests::own_checks).
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(default)]
+pub struct CheckRules {
+    pub files: std::collections::BTreeMap<String, String>,
+}
+impl CheckRules {
+    fn is_empty(&self) -> bool { self.files.is_empty() }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1472,11 +1488,21 @@ pub struct GateResult {
 /// Creates the issue's branch and worktree from the integration branch and runs the setup
 /// commands. Calling it again for the same issue returns the existing worktree.
 pub fn start_task(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor) -> Result<Started> {
+    start_task_with(db, repo_root, issue, vendor, actor, Playbook::load(repo_root)?)
+}
+
+/// `start_task` with a light worktree whatever the playbook asks: the quick path's (quick.rs).
+pub fn start_task_light(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor) -> Result<Started> {
+    let mut playbook = Playbook::load(repo_root)?;
+    playbook.worktree.mode = WorktreeMode::Light;
+    start_task_with(db, repo_root, issue, vendor, actor, playbook)
+}
+
+fn start_task_with(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor, playbook: Playbook) -> Result<Started> {
     let _telemetry = crate::performance_attribution::Scope::new(db,crate::performance_attribution::Context {project:issue.project.clone(),issue:Some(issue.key.clone()),..Default::default()});
     if issue.is_humans() && *actor != Actor::Human {
         bail!("{} is the human's own work (owner: human), so agents do not start it; `ask` the human if an agent should take it", issue.key);
     }
-    let playbook = Playbook::load(repo_root)?;
     let branch = playbook.branch_for(vendor, issue);
     let worktree = playbook.worktree_for(repo_root, vendor, issue);
     let worktree_str = worktree.to_string_lossy().into_owned();

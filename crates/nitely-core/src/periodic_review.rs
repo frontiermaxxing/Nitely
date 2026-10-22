@@ -710,6 +710,13 @@ pub(crate) fn retry_at_after(attempt: u32, now: i64) -> i64 {
 
 /// The one source card a finding names by key, as a word of its text; None when it names none
 /// or several, since attribution must be explicit.
+/// The review rules of `project`'s integration branch in `root`, as the periodic review reads
+/// them: committed there, never from a checkout lent to a build. The quick changes' review after
+/// landing uses them too (quick_review.rs).
+pub(crate) fn integration_review_rules(root: &Path, project: &str, branch: &str) -> Result<crate::review::ReviewRules> {
+    Ok(PolicyFiles::default().review(root, project, branch)?.0)
+}
+
 pub(crate) fn named_source<'a>(text: &str, sources: &'a [String]) -> Option<&'a String> {
     let named: Vec<&String> = sources.iter().filter(|key| text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').any(|word| word == key.as_str())).collect();
     match named.as_slice() {

@@ -50,3 +50,16 @@ finding actions. Missing or failed reviews never appear as passes.
 An explicitly requested retry uses `nitely periodic-review --project APP --retry 17 --repo <identity>`
 with the repository identity from status. It resets the failed attempt count, not the cursor or
 settings, and cannot make a disabled reviewer run.
+
+## Quick changes, reviewed after landing
+
+A quick change (`quick_start`, then `quick_land`) lands with only its own checks and no review
+before landing. Nitely records it at landing. Once 5 quick changes wait, or the oldest has waited
+3 hours, the app reviews all of them together in one reviewer call. That call uses the
+integration branch's review rules and a checkout of the branch's head. A P0 or P1 finding that
+names one change reopens that change's issue, unless a person decided on it since it landed.
+Otherwise the finding is filed as a bug linked to the changes. Either way, you get a notice in
+the Inbox. Lower findings, and a clean result, go on each change's issue as a note. Nothing is
+reverted: only the full suite on main reverts. `nitely quick review --project APP` runs the
+review now, then says how many reviewed quick changes had findings. Where the project's periodic
+review is on, it covers quick changes instead, and they are not recorded separately.
