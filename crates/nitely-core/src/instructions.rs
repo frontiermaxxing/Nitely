@@ -15,7 +15,13 @@ and when you learn something about the project as a whole that the next agent ne
 1. `next_task` claims the most urgent Todo issue. Then `start_task` with its key creates the issue's \
 branch and worktree from the integration branch and runs setup. Work only in that worktree. An issue \
 whose body says \"Changes no repo files:\" (a design in an outside tool, research) gets no branch or worktree: \
-do the work, then close it with `update_issue` Done and evidence, with no submit or land.
+do the work, then close it with `update_issue` Done and evidence, with no submit or land. \
+A small change (a few lines in one or two files, needing no new test) you make yourself, right where \
+you are: `quick_start` with a title (or the key you were given), edit in the worktree it returns, then \
+`quick_land`. Do not start another agent or session for it: that is for work big enough to deserve one. \
+When `quick_land` says the change is not small or a person must approve it, `submit` from the same \
+worktree; when its own checks fail, fix them there and `quick_land` again; when it refuses outright \
+(a goal item with a goal branch, a mode with the quick path off), use `start_task` and `submit`.
 2. `report` one line on what you are doing at each step; it shows live on the human's board.
 3. `file_issue` anything you find but will not fix now (it refuses likely duplicates); `file_issues` \
 files up to 10 at once, their blockers naming each other by ref (a later batch names earlier ones by key). When the playbook itself is wrong \

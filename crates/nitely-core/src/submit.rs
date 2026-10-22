@@ -54,6 +54,9 @@ pub struct Submitted {
     pub review_batched: bool,
     /// Project YOLO bypass; neither a gate nor review pass.
     pub yolo: bool,
+    /// The quick path (quick.rs): a small change, checked by its own checks, reviewed after landing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub quick: bool,
     /// `agent` when the review is enough, `human` when it waits for approval.
     pub approver: String,
     pub reasons: Vec<String>,
@@ -143,6 +146,16 @@ pub fn refuse_outside_repo(issue: &IssueRecord, has_commits: bool) -> Result<()>
 }
 
 pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: &Actor) -> Result<Submitted> {
+    submit_as(db, config, opts, false, actor)
+}
+
+/// `submit` for the quick path (quick.rs), once the change is found small: its own checks, then
+/// no review, push or pull request; the review comes after landing.
+pub fn submit_quick(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: &Actor) -> Result<Submitted> {
+    submit_as(db, config, opts, true, actor)
+}
+
+fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: bool, actor: &Actor) -> Result<Submitted> {
     let (worktree, branch) = playbook::worktree_and_branch(opts.dir)?;
     let (_, branch_key) = crate::git::parse_branch(&branch);
     let root = playbook::repo_root(config, opts.dir).with_context(|| format!("{} is not inside a git repo", opts.dir))?;
@@ -182,6 +195,9 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // An item of a goal with a goal branch has no pull request of its own: its hop is the land into
     // the goal branch, with item checks and the item review the mode asks for (goal_branch.rs).
     if let Some(gb) = crate::goal_branch::route_of_issue(db, &root, &key, Some(&branch))? {
+        if quick {
+            bail!("{key} is an item of a goal that lands through {}: submit it", gb.branch);
+        }
         return submit_into_goal(db, config, &issue, &root, &worktree, &branch, &gb.branch, opts.local_only, actor);
     }
     crate::submodules::check_pointers(&pb, &worktree)?;
@@ -233,6 +249,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         review_disabled: false,
         review_batched: false,
         yolo: false,
+        quick: false,
         approver: "human".into(),
         reasons: vec![],
         approval_stands: false,
@@ -271,7 +288,12 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
     // A blocking item review is never skipped, YOLO or not (NIT-597 review, round 2).
-    if !item_blocking && crate::project_yolo::enabled_for_issue(db, &issue.key)? {
+    if quick {
+        if crate::quick::limits_for_issue(db, &issue.key)?.is_none() {
+            bail!("the quick path is off under the project's review mode; submit it for review");
+        }
+        out.quick = true;
+    } else if !item_blocking && crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         out.yolo = true;
     } else if !pb.review.enabled {
         out.review_disabled = true;
@@ -338,13 +360,13 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
             else if e.is::<crate::review::Disabled>() { out.review_disabled = true; } else { return Err(e); }
         }
     }
-    if out.review_disabled || out.yolo {
+    if out.review_disabled || out.yolo || out.quick {
         let mut latest = Playbook::load(&root)?;
         crate::project_modes::apply_issue(db, &issue.key, &mut latest)?;
         out.reasons.extend(latest.review.unevaluated_reasons());
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
-    let mut verdict = out.review.as_ref().map_or(if out.yolo { "yolo" } else if out.review_batched { crate::review_batch::PENDING } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
+    let mut verdict = out.review.as_ref().map_or(if out.quick { crate::quick::VERDICT } else if out.yolo { "yolo" } else if out.review_batched { crate::review_batch::PENDING } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
     // Findings the person accepted as they are, signed for this very patch, block nothing: the
     // review is recorded as it asked, and goes on as a passing one (land checks the same).
     let accepted_only = match &out.review {
@@ -425,7 +447,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     if let Some(closes) = crate::mirror::closes_line(db, &issue.key, &root) {
         body = format!("{closes}\n\n{body}");
     }
-    if !local_only {
+    // A quick change has no pull request: land pushes the integration branch.
+    if !local_only && !out.quick {
         match push(&pb, &worktree, &branch) {
             Ok(()) => out.pushed = true,
             Err(e) => out.pr_error = Some(format!("push failed: {e:#}")),
@@ -456,6 +479,8 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         (Some(r), "human") => format!("Review by {} passed; waits for a human", by(r)),
         (Some(r), _) => format!("Review by {} passed; ready to land", by(r)),
         (None, _) if out.review_batched => "Gate passed; its review waits for its land queue batch, which reviews what waits together, once, before the batch's gate".into(),
+        (None, "human") if out.quick => format!("{}; waits for a human under the remaining approval rules", crate::quick::NOTE),
+        (None, _) if out.quick => format!("{}; ready to land", crate::quick::NOTE),
         (None, "human") if out.yolo => format!("{}; waits for a human under the remaining approval rules", crate::project_yolo::NOTE),
         (None, _) if out.yolo => format!("{}; unverified and ready to land", crate::project_yolo::NOTE),
         (None, "human") if out.review_disabled => format!("{}; waits for a human under the remaining approval rules", crate::review::DISABLED_NOTE),
@@ -475,7 +500,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
     // The full description is on the pull request and in the app's review section.
     db.add_note(&issue.key, &format!("{outcome}. {pr_line}"), "submit", actor)?;
 
-    let push_failed = !local_only && !out.pushed;
+    let push_failed = !local_only && !out.quick && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
     // An open P0 covers a part that must not land without the person, whatever the mode says.
     let open_p0 = match &out.review {
@@ -497,7 +522,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         human: out.approver == "human",
         by_nitely,
         batched: out.review_batched,
-        yolo: out.yolo,
+        yolo: out.yolo || out.quick,
         review_disabled: out.review_disabled,
         gate_skipped: out.gate.skipped.is_some(),
     });
@@ -528,7 +553,7 @@ pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: 
         _ => Meanwhile::No,
     };
     out.state = now_in.clone();
-    out.next = next.into();
+    out.next = if out.quick && state == "In Review" { "A quick change: its own checks passed. Call land; it is reviewed after landing.".into() } else { next.into() };
     match crate::submit_rules::final_move(state, &now_in, meanwhile) {
         Some(to) if issue.origin == "nitely" => out.state = db.move_issue(&issue.key, to, None, None, actor)?.state,
         _ if meanwhile == Meanwhile::Accepted => out.next = format!("The person accepted the review's blocking findings while this submit ran, so it goes on as their acceptance moved it ({now_in})."),
@@ -625,6 +650,7 @@ fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, b
         review_disabled: false,
         review_batched: false,
         yolo: false,
+        quick: false,
         approver: "agent".into(),
         reasons: vec![],
         approval_stands: false,
@@ -686,6 +712,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
                 review_disabled: false,
                 review_batched: false,
                 yolo: false,
+                quick: false,
                 approver: "agent".into(),
                 reasons: vec![],
                 approval_stands: false,
@@ -733,6 +760,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
         review_disabled: false,
         review_batched: false,
         yolo: false,
+        quick: false,
         approver: "agent".into(),
         reasons: vec![],
         approval_stands: false,
@@ -1122,7 +1150,7 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
     lines.push(format!(
         "`nitely review patch={} verdict={} approver={} reviewer={}`",
         s.patch_id,
-        s.review.as_ref().map_or(if s.yolo { "yolo" } else if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
+        s.review.as_ref().map_or(if s.quick { crate::quick::VERDICT } else if s.yolo { "yolo" } else if s.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()),
         s.approver,
         s.review.as_ref().map_or("none", |r| r.reviewer.as_str())
     ));
@@ -1234,6 +1262,7 @@ impl Db {
         let (reviewer, verdict, findings, flagged, note) = match &s.review {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
             None if s.review_batched => ("", crate::review_batch::PENDING, "[]".to_string(), "[]".to_string(), crate::review_batch::PENDING_NOTE),
+            None if s.quick => ("", crate::quick::VERDICT, "[]".to_string(), "[]".to_string(), crate::quick::NOTE),
             None if s.yolo => ("", "yolo", "[]".to_string(), "[]".to_string(), crate::project_yolo::NOTE),
             None if s.review_disabled => ("", "disabled", "[]".to_string(), "[]".to_string(), crate::review::DISABLED_NOTE),
             None => ("", "none", "[]".to_string(), "[]".to_string(), ""),

@@ -1051,6 +1051,9 @@ pub fn run() {
             std::thread::spawn(|| loop {
                 let result=Config::load_read_only().and_then(|config| nitely_core::periodic_review::tick_all(&mut Db::open_default()?, &config));
                 if let Err(e)=result { eprintln!("periodic review: {e:#}"); }
+                // Quick changes, reviewed after landing in batches (NIT-625).
+                let result=Config::load_read_only().and_then(|config| nitely_core::quick_review::tick_all(&mut Db::open_default()?, &config));
+                if let Err(e)=result { eprintln!("quick review: {e:#}"); }
                 std::thread::sleep(std::time::Duration::from_secs(60));
             });
             // A playbook that lands by Nitely lands an approved change without an agent coming back

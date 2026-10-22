@@ -44,6 +44,16 @@ test("YOLO timeline skips never become passes or reuse an older real review", ()
   assert.equal(onlyRecord.outcome, "unreviewed");
   assert.equal(onlyRecord.reviewSkipped, "yolo");
 });
+test("a quick change's round is unreviewed until the review after landing, never a pass", () => {
+  const { rounds } = journeyOf([
+    ev(10, "gate_passed", "Gate passed"),
+    ev(11, "submit", "Quick path: a small change, checked by its own checks, with no pull request; ready to land"),
+  ], [rec(9, "old", "pass")]);
+  assert.equal(rounds[0].outcome, "unreviewed");
+  assert.equal(rounds[0].reviewSkipped, "quick");
+  assert.equal(rounds[0].reviewer, null);
+  assert.equal(journeyOf([], [rec(30, "new", "quick")]).rounds[0].reviewSkipped, "quick");
+});
 test("NIT-41: a submit that stopped after recording its review shows that review", () => {
   const timeline = [ev(10, "gate_passed", "Gate passed at aaa1111"), ev(20, "review_started", "Review by codex started")];
   const { rounds } = journeyOf(timeline, [rec(80, "aaa1111", "changes")]);

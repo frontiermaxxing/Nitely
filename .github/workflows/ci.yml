@@ -70,9 +70,20 @@ jobs:
       # builds, plus D-Bus for the keychain (keyring's Secret Service). No Linux bundle is built yet.
       - name: Linux prerequisites
         if: runner.os == 'Linux'
+        # A mirror that stops answering hung this step for 14 and 23 minutes (NIT-635): apt gives up on
+        # a silent mirror itself, each attempt is bounded and tried again, and the step's limit stops
+        # whatever still hangs, so a gate fails in minutes instead of waiting out the job.
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config
+          apt_opts="-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60"
+          for attempt in 1 2 3; do
+            if timeout 60 sudo apt-get $apt_opts update && timeout 120 sudo apt-get $apt_opts install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config; then
+              exit 0
+            fi
+            echo "apt attempt $attempt did not finish; trying again"
+            sleep 5
+          done
+          exit 1
 
       # rustup installs the toolchain rust-toolchain.toml pins, with clippy.
       - name: Rust toolchain
@@ -179,9 +190,20 @@ jobs:
           echo "Running at commit $NITELY_SHA, tree $NITELY_TREE"
 
       - name: Linux prerequisites
+        # A mirror that stops answering hung this step for 14 and 23 minutes (NIT-635): apt gives up on
+        # a silent mirror itself, each attempt is bounded and tried again, and the step's limit stops
+        # whatever still hangs, so a gate fails in minutes instead of waiting out the job.
+        timeout-minutes: 6
         run: |
-          sudo apt-get update
-          sudo apt-get install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config
+          apt_opts="-o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o DPkg::Lock::Timeout=60"
+          for attempt in 1 2 3; do
+            if timeout 60 sudo apt-get $apt_opts update && timeout 120 sudo apt-get $apt_opts install -y libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libdbus-1-dev pkg-config; then
+              exit 0
+            fi
+            echo "apt attempt $attempt did not finish; trying again"
+            sleep 5
+          done
+          exit 1
 
       - name: Rust toolchain
         run: |
