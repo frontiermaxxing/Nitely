@@ -2,6 +2,9 @@
 # changed file no component owns, or one this map cannot prove, keeps the full gate. Editing this
 # file is itself a Full change.
 version = 1
+# The repo's rule tests run with every reduced selection, whatever changed (NIT-648): they read the
+# whole tree, so no change reaches them through its own files. NIT-644 landed red without them.
+always = ["core/repo-rules"]
 
 # The frontend and the repo's scripts: `npm test` runs every src/ test and scripts/*.test.mjs, and
 # `npm run build` type-checks and bundles. Whole-suite mapping (inputs), since vite and tsconfig
@@ -41,6 +44,18 @@ inputs = ["crates/nitely-core/src/", "crates/nitely-core/examples/"]
 manifest = "crates/nitely-core/Cargo.toml"
 package = "nitely-core"
 target_kind = "lib"
+
+# The rule tests (named repo_rule_*): git only through run_git and scratch paths through
+# unique_temp, the keychain opened only by entry, and this map in step with the tree.
+[[components.suites]]
+id = "repo-rules"
+inputs = ["crates/nitely-core/src/paths.rs", "crates/nitely-core/src/approval.rs", "crates/nitely-core/src/affected_tests.rs"]
+[components.suites.cargo]
+manifest = "crates/nitely-core/Cargo.toml"
+package = "nitely-core"
+target_kind = "lib"
+filter = "repo_rule"
+test_ids = ["paths::tests::repo_rule_scratch_paths_and_git_runs_go_through_the_shared_helpers", "approval::tests::repo_rule_only_entry_opens_the_keychain", "affected_tests::tests::decided::repo_rule_the_repos_own_map_decides_in_memory"]
 
 [[components.suites]]
 id = "node-test"
