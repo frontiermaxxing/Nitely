@@ -1521,7 +1521,7 @@ fn run(cmd: Cmd) -> Result<()> {
                         let project = db.issue(&key)?.and_then(|i| i.project);
                         let here = std::env::current_dir()?.to_string_lossy().into_owned();
                         if let Ok(root) = nitely_core::playbook::repo_for_issue(&nitely_core::Config::load().unwrap_or_default(), project.as_deref(), &here) {
-                            nitely_core::landed_elsewhere::record(&db, &root, &key, evidence.as_deref(), &me)?;
+                            nitely_core::landed_elsewhere::record(&mut db, &root, &key, evidence.as_deref(), &me)?;
                         }
                     }
                     db.check_open_asks(&key, &state)?;
