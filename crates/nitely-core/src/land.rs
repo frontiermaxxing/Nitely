@@ -99,6 +99,11 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     if opts.push && crate::land_queue::lands_alone(db, &root, &pb, &issue.key)?.is_none() {
         return crate::land_queue::land(db, &root, &issue.key, opts, actor);
     }
+    // One that lands alone (a goal's checkpoint) takes its turn in the same line when others are
+    // landing: the queue runs it alone when it reaches the front (NIT-586).
+    if crate::land_rules::alone_waits_in_line(opts.push, opts.break_lock, held_by_live_land(&root), crate::land_queue::has_waiting(db, &root)?) {
+        return crate::land_queue::land(db, &root, &issue.key, opts, actor);
+    }
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(issue.key.clone()), ..Default::default() });
     let base = pb.integration_branch().to_string();
     let mut report = Landed { issue: issue.key.clone(), base: base.clone(), ..Default::default() };
@@ -183,7 +188,12 @@ pub(crate) fn queued_alone(db: &mut Db, root: &Path, key: &str, opts: &LandOptio
     crate::project_modes::apply_issue(db, key, &mut pb)?;
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.into()), ..Default::default() });
     let mut report = Landed { issue: key.into(), base: pb.integration_branch().into(), ..Default::default() };
-    match reviewed_first(db, root, key, actor).and_then(|()| run(db, root, &pb, key, opts, actor, &mut report, None)) {
+    let result = reviewed_first(db, root, key, actor).and_then(|()| run(db, root, &pb, key, opts, actor, &mut report, None));
+    // A checkpoint that waited its turn in the queue is bisected as `land` would (NIT-586).
+    if let (Err(_), Some(gate)) = (&result, report.gate.clone()) {
+        report.goals.extend(crate::goal_branch::after_failed_gate(db, root, key, &gate, actor));
+    }
+    match result {
         Ok(()) => {
             if report.landed {
                 match crate::lanes::hold_checkout(root, &pb) {
