@@ -1785,6 +1785,18 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
     record_gate(db, issue_key, worktree, actor, &commit, results, passed, flaked, warnings)
 }
 
+/// What a failed gate names: the first step that failed, or, when every step passed, the check
+/// that failed it after them (the selected tests' evidence); never a step that passed (NIT-612).
+fn failed_step(results: &[CommandResult], warnings: &[String]) -> String {
+    if let Some(r) = results.iter().find(|r| !r.ok && !r.skipped) {
+        return r.command.clone();
+    }
+    match warnings.iter().find(|w| w.starts_with("Selected test evidence incomplete")) {
+        Some(w) => w.clone(),
+        None => "every step passed, but the gate did not".to_string(),
+    }
+}
+
 fn validate_gate_plan(plan:Option<&crate::verification::Plan>,results:&[CommandResult],passed:&mut bool,warnings:&mut Vec<String>) {
     if *passed {if let Some(plan)=plan {if let Err(e)=crate::verification::validate_selected(plan,results) {*passed=false;warnings.push(format!("Selected test evidence incomplete: {e:#}"));}}}
 }
@@ -1797,11 +1809,7 @@ fn record_gate(db: &Db, issue_key: Option<&str>, worktree: &Path, actor: &Actor,
         let tests = if f.tests.is_empty() { String::new() } else { format!(": {}", f.tests.join(", ")) };
         db.log_event(actor, issue_key, at.as_deref(), "gate_flaked", &format!("{} failed at {commit}, then passed when run again{tests}", f.command))?;
     }
-    let summary = if passed {
-        format!("Gate passed at {commit}")
-    } else {
-        format!("Gate failed at {commit}: {}", results.last().map(|r| r.command.as_str()).unwrap_or(""))
-    };
+    let summary = if passed { format!("Gate passed at {commit}") } else { format!("Gate failed at {commit}: {}", failed_step(&results, &warnings)) };
     db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
     // Whether the fix of a failure changed product code or only tests (NIT-557); never fails a gate.
     if let Some(key) = issue_key {
@@ -1830,6 +1838,17 @@ impl Db {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A failed gate names the step that failed, or the evidence check when every step passed, not
+    /// the last step run (NIT-612).
+    #[test]
+    fn a_failed_gate_names_what_failed_it() {
+        let r = |command: &str, ok: bool| CommandResult { step: None, command: command.into(), ok, seconds: 1, output: String::new(), skipped: false, timed_out: false };
+        assert_eq!(failed_step(&[r("npm test", false), r("npm run build", true)], &[]), "npm test");
+        let evidence = "Selected test evidence incomplete: affected Node suite needs TAP evidence of executed tests".to_string();
+        assert_eq!(failed_step(&[r("npm test", true), r("cargo clippy", true)], &["a note".into(), evidence.clone()]), evidence);
+        assert_eq!(failed_step(&[r("npm test", true)], &[]), "every step passed, but the gate did not");
+    }
 
     /// An early failure in a long run keeps its name when the output is cut to its end (NIT-557).
     #[test]
