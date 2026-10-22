@@ -65,3 +65,32 @@ fn review_declarations_from_cli_are_agent_authored_and_downgrades_write_nothing(
     drop(db);
     std::fs::remove_dir_all(base).ok();
 }
+
+/// `nitely quick start` holds the issue it starts, as `nitely start` does, and refuses one another
+/// agent is still on (NIT-644).
+#[test]
+fn quick_start_claims_its_issue_and_refuses_one_another_agent_holds() {
+    let base = nitely_core::paths::unique_temp("nitely-cli-quick", "");
+    let repo = base.join("repo");
+    std::fs::create_dir_all(&repo).unwrap();
+    let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).status().unwrap().success());
+    git(&["init", "-q", "-b", "main"]);
+    std::fs::write(repo.join("notes.txt"), "one\n").unwrap();
+    git(&["add", "."]);
+    git(&["commit", "-qm", "start"]);
+    let mut db = nitely_core::Db::open(&base.join("nitely.db")).unwrap();
+    db.create_project("APP", "App").unwrap();
+    let quick = |args: &[&str]| Command::new(env!("CARGO_BIN_EXE_nitely")).args(["quick", "start"]).args(args).current_dir(&repo).env("NITELY_HOME", &base).env_remove("CLAUDE_CODE_SESSION_ID").output().unwrap();
+
+    let out = quick(&["Fix the notes", "--project", "APP"]);
+    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(db.issue("APP-1").unwrap().unwrap().claimed_by.is_some(), "the new issue is held, so next_task hands it to no one else");
+
+    let held = db.create_issue(&NewIssue { project: "APP".into(), title: "Someone else's".into(), kind: "improvement".into(), body: "b".into(), evidence: "e".into(), source: "codex".into(), allow_similar: true, ..Default::default() }, &Actor::Agent("codex:other".into())).unwrap();
+    db.claim_for_start(&held.key, "codex:other", &[], false).unwrap();
+    let out = quick(&["--key", &held.key]);
+    assert!(!out.status.success(), "an issue another agent is on is refused");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("still on it"), "{}", String::from_utf8_lossy(&out.stderr));
+    drop(db);
+    std::fs::remove_dir_all(base).ok();
+}
