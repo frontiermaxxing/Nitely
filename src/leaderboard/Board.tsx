@@ -1,7 +1,8 @@
 import { useEffect, useState } from "react";
 import { invoke } from "../backend";
 import { AgentMark, Button, EmptyState, Loading, Sparkline } from "../ui";
-import { openExternal } from "../util";
+import { ago, nowSecs, openExternal } from "../util";
+import { Avatar, type AvatarChoice } from "./Avatar";
 import type { Profile } from "./profile";
 import { compact, duration, hours, percent, type PeriodKey } from "./stats";
 
@@ -19,6 +20,8 @@ export interface BoardEntry {
   id: string;
   display_name: string;
   links: { github?: string; x?: string; website?: string };
+  /** Which link gives the picture; the page builds its address (NIT-630). */
+  avatar?: AvatarChoice;
   projects: number;
   week: string;
   landed: number;
@@ -32,6 +35,9 @@ export interface BoardEntry {
   steadiest_week: { landed: number; active_days: number } | null;
   vendors: { vendor: string; landed: number; share: number }[];
   weekly: number[];
+  /** When the service took this report (seconds), and whether it closed its week. */
+  updated_at?: number;
+  closed?: boolean;
 }
 
 export interface BoardData {
@@ -129,7 +135,7 @@ export function Board(props: { period: PeriodKey; profile: Profile | null; onEdi
   const myIndex = mine ? rows.findIndex((e) => e.id === mine) : -1;
   const m = METRICS.find((x) => x.key === metric)!;
   if (!rows.length)
-    return <EmptyState title="Nobody is on this board yet">Reports arrive once a week; the first ones show here.</EmptyState>;
+    return <EmptyState title="Nobody is on this board yet">Reports arrive once a day; the first ones show here.</EmptyState>;
 
   return (
     <div className="lb-board">
@@ -143,7 +149,7 @@ export function Board(props: { period: PeriodKey; profile: Profile | null; onEdi
           ))}
         </div>
         <span className="lb-sub lb-ranked-count">
-          {rows.length.toLocaleString("en-US")} {rows.length === 1 ? "person" : "people"} · {board.data.week} · updates Sunday
+          {rows.length.toLocaleString("en-US")} {rows.length === 1 ? "person" : "people"} · {board.data.week} · updates daily, closes Sunday evening
         </span>
       </div>
 
@@ -151,17 +157,22 @@ export function Board(props: { period: PeriodKey; profile: Profile | null; onEdi
         {rows.slice(0, 3).map((e, i) => (
           <section key={e.id} className={`lb-card lb-podium-card${e.id === mine ? " lb-me" : ""}`}>
             <div className="lb-podium-head">
-              <span className={`lb-rank-badge${i === 0 ? " lb-first" : ""}`}>{i + 1}</span>
-              <span className="lb-podium-name">{e.display_name}</span>
-              <Crew entry={e} />
+              <Avatar name={e.display_name} choice={e.avatar} links={e.links ?? {}} size={40} />
+              <div className="lb-podium-who">
+                <span className="lb-podium-name">{e.display_name}</span>
+                <Crew entry={e} />
+              </div>
+              <span className={`lb-rank-badge${i === 0 ? " lb-first" : ""}`} aria-label={`Rank ${i + 1}`}>
+                {i + 1}
+              </span>
             </div>
             <div className="lb-podium-figure">
               <span className="lb-figure">{valueOf(e, metric)}</span>
               <span className="lb-unit">{m.label.toLowerCase()}</span>
             </div>
-            <Sparkline kind="bars" values={e.weekly.slice(-WEEKS)} width={180} height={28} color="var(--fg-3)" label={`Landed per week, the last ${WEEKS} weeks: ${e.weekly.slice(-WEEKS).join(", ")}`} />
+            <Sparkline fill kind="bars" values={e.weekly.slice(-WEEKS)} width={240} height={32} color="var(--fg-3)" label={`Landed per week, the last ${WEEKS} weeks: ${e.weekly.slice(-WEEKS).join(", ")}`} />
             <div className="lb-podium-meta">
-              <span>{hours(e.agent_hours)} agent hours</span>
+              <span title="Agent hours">{hours(e.agent_hours)} h</span>
               <span>{compact(e.tokens)} tokens</span>
               <span>{percent(e.first_pass_rate)} first pass</span>
             </div>
@@ -240,6 +251,7 @@ function Row(props: { entry: BoardEntry; rank: number; me: boolean; onEdit: () =
     <tr className={props.me ? "lb-me" : undefined}>
       <td className="lb-num lb-quiet">{props.rank}</td>
       <td className="lb-row-name">
+        <Avatar name={e.display_name} choice={e.avatar} links={e.links ?? {}} size={22} />
         {props.me ? (
           <button className="link lb-me-name" onClick={props.onEdit} title="Edit your leaderboard profile">
             {e.display_name}
@@ -248,6 +260,7 @@ function Row(props: { entry: BoardEntry; rank: number; me: boolean; onEdit: () =
           e.display_name
         )}
         {props.me && <span className="lb-me-tag">you</span>}
+        {e.updated_at !== undefined && <span className="lb-sub lb-updated">{e.closed ? "final" : `updated ${ago(nowSecs(), e.updated_at)}`}</span>}
       </td>
       <td>
         <Crew entry={e} />

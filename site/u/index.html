@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {{head}}
+  <meta name="color-scheme" content="dark light">
+  <meta name="theme-color" content="#141413">
+  <link rel="icon" href="/assets/icon.svg" type="image/svg+xml">
+  <link rel="preload" href="/assets/geist.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="/styles.css?v=5">
+  <script async src="https://www.googletagmanager.com/gtag/js?id=G-E79GE90HZG"></script>
+  <script>
+    window.dataLayer = window.dataLayer || [];
+    function gtag(){dataLayer.push(arguments);}
+    gtag('js', new Date());
+    gtag('config', 'G-E79GE90HZG');
+  </script>
+</head>
+<body>
+  <header class="top">
+    <a class="brand" href="/" aria-label="Nitely home">
+      <svg class="mark" width="26" height="12" viewBox="0 0 22 10" aria-hidden="true"><path d="M3 5H19" stroke="var(--fg-3)" stroke-width="1.5" stroke-linecap="round"/><circle cx="3.5" cy="5" r="2.5" fill="var(--fg-3)"/><circle cx="11" cy="5" r="3.5" fill="var(--fg)"/><circle cx="18.5" cy="5" r="2.5" fill="var(--bg)" stroke="var(--fg-3)" stroke-width="1.5"/></svg>
+      Nitely
+    </a>
+    <nav class="top-links">
+      <a href="/#night">How it works</a>
+      <a href="/leaderboard/">Leaderboard</a>
+      <a href="https://github.com/frontiermaxxing/Nitely">GitHub</a>
+      <a class="btn btn-small" href="https://github.com/frontiermaxxing/Nitely/releases">Download</a>
+    </nav>
+  </header>
+
+  <main class="lb u">
+    <section class="u-head" id="u-head" hidden>
+      <span id="u-avatar"></span>
+      <div class="u-who">
+        <h1 id="u-name"></h1>
+        <p class="u-rank" id="u-rank"></p>
+        <div class="lb-links" id="u-links"></div>
+      </div>
+    </section>
+
+    <div class="lb-controls" id="u-controls" hidden>
+      <div class="chips" role="group" aria-label="Period" data-group="period">
+        <button type="button" data-period="week" aria-pressed="true">This week</button>
+        <button type="button" data-period="30d" aria-pressed="false">30 days</button>
+        <button type="button" data-period="all" aria-pressed="false">All time</button>
+      </div>
+    </div>
+
+    <section class="u-body" id="u-body" hidden>
+      <div class="lb-figure u-figure">
+        <span class="big" id="u-landed"></span>
+        <span class="unit" id="u-landed-label"></span>
+      </div>
+      <dl class="u-stats" id="u-stats"></dl>
+      <div class="u-series">
+        <div class="bars u-bars" id="u-bars"></div>
+        <p class="u-caption">Landed per week, the last 26 weeks</p>
+      </div>
+      <dl class="u-stats u-records" id="u-records"></dl>
+    </section>
+
+    <section class="lb-empty" id="u-empty" hidden>
+      <h2>Nobody is on this page</h2>
+      <p>Whoever had it left the Leaderboard, or never sent a report. Leaving deletes everything a person sent, this page with it.</p>
+      <a class="btn" href="/leaderboard/">See the board</a>
+    </section>
+
+    <section class="u-more">
+      <p>People who run their coding agents with Nitely can join the Leaderboard from the app. It sends counts and rates only: never code, paths, repo or project names, prompts or who you are.</p>
+      <div class="u-actions">
+        <a class="btn" href="/leaderboard/">See the whole board</a>
+        <a class="btn btn-quiet" href="https://github.com/frontiermaxxing/Nitely/releases">Get Nitely</a>
+      </div>
+    </section>
+  </main>
+
+  <!-- The Leaderboard service puts this person's place on each board here when it serves the page. -->
+  <script type="application/json" id="person">{{person}}</script>
+
+  <script>
+// One person's page (NIT-632), served by the Leaderboard service (server/leaderboard) at /u/<id>
+// with their numbers in the #person block above. Number formats follow the board page
+// (leaderboard/index.html). Every value is set as text, never as HTML, and a link is shown only
+// when it is https.
+(function () {
+  "use strict";
+
+  var LABEL = { week: "this week", "30d": "in the last 30 days", all: "all time" };
+  var VENDORS = { claude: "Claude", codex: "Codex", cursor: "Cursor", gemini: "Gemini", copilot: "Copilot", other: "Other" };
+
+  function duration(seconds) {
+    var s = Math.max(0, Math.round(seconds));
+    if (s < 60) return s + "s";
+    if (s < 600) return Math.floor(s / 60) + "m" + (s % 60 ? " " + String(s % 60).padStart(2, "0") + "s" : "");
+    if (s < 3600) return Math.round(s / 60) + "m";
+    if (s < 86400) {
+      var m = Math.round((s % 3600) / 60);
+      return Math.floor(s / 3600) + "h" + (m ? " " + String(m).padStart(2, "0") + "m" : "");
+    }
+    var h = Math.round((s % 86400) / 3600);
+    return Math.floor(s / 86400) + "d" + (h ? " " + h + "h" : "");
+  }
+  function compact(n) {
+    if (n < 10000) return Math.round(n).toLocaleString("en-US");
+    if (n < 1e6) return (n / 1000).toFixed(n < 1e5 ? 1 : 0) + "K";
+    if (n < 1e9) return (n / 1e6).toFixed(n < 1e8 ? 1 : 0) + "M";
+    return (n / 1e9).toFixed(1) + "B";
+  }
+  function hours(n) { return n < 100 ? (Math.round(n * 10) / 10).toLocaleString("en-US") : Math.round(n).toLocaleString("en-US"); }
+  function percent(r) { return r === null || r === undefined ? "–" : Math.round(r * 100) + "%"; }
+  function num(n) { return typeof n === "number" && isFinite(n) ? n : null; }
+
+  function el(tag, cls, text) {
+    var n = document.createElement(tag);
+    if (cls) n.className = cls;
+    if (text !== undefined) n.textContent = text;
+    return n;
+  }
+
+  // The picture is only a choice of link (NIT-630), as on the board page.
+  function pictureUrl(p) {
+    var l = p.links || {}, h;
+    if (p.avatar === "github" && typeof l.github === "string") {
+      h = l.github.replace(/^https:\/\/github\.com\//, "");
+      return /^[A-Za-z0-9-]{1,39}$/.test(h) ? "https://github.com/" + h + ".png?size=160" : null;
+    }
+    if (p.avatar === "x" && typeof l.x === "string") {
+      h = l.x.replace(/^https:\/\/x\.com\//, "");
+      return /^[A-Za-z0-9_]{1,15}$/.test(h) ? "https://unavatar.io/x/" + h + "?fallback=false" : null;
+    }
+    return null;
+  }
+  function initials(name) {
+    var w = String(name || "").trim().split(/\s+/).filter(Boolean);
+    if (w.length > 1) w = [w[0], w[w.length - 1]];
+    return w.map(function (x) { return Array.from(x)[0] || ""; }).join("").toUpperCase();
+  }
+  function avatar(p, size) {
+    var fallback = el("span", "avatar initials", initials(p.display_name));
+    fallback.setAttribute("aria-hidden", "true");
+    fallback.style.width = fallback.style.height = size + "px";
+    fallback.style.fontSize = Math.round(size * 0.4) + "px";
+    var url = pictureUrl(p);
+    if (!url) return fallback;
+    var img = el("img", "avatar");
+    img.alt = "";
+    img.width = img.height = size;
+    img.referrerPolicy = "no-referrer";
+    img.decoding = "async";
+    img.addEventListener("error", function () { if (img.parentNode) img.parentNode.replaceChild(fallback, img); });
+    img.src = url;
+    return img;
+  }
+
+  function links(p) {
+    var l = p.links || {};
+    var box = document.getElementById("u-links");
+    [["GitHub", l.github], ["X", l.x], ["Web", l.website]].forEach(function (pair) {
+      var v = pair[1];
+      if (typeof v !== "string" || v.indexOf("https://") !== 0) return;
+      var a = el("a");
+      a.href = v;
+      a.rel = "noopener noreferrer nofollow";
+      a.appendChild(el("span", "quiet", pair[0] + " "));
+      a.appendChild(document.createTextNode(v.replace(/^https:\/\/(www\.)?(github\.com\/|x\.com\/)?/, "")));
+      box.appendChild(a);
+    });
+  }
+
+  function stat(box, value, label) {
+    var d = el("div");
+    d.appendChild(el("dt", "", label));
+    d.appendChild(el("dd", "", value));
+    box.appendChild(d);
+  }
+
+  var person;
+  try { person = JSON.parse(document.getElementById("person").textContent); } catch (e) { person = null; }
+  if (!person || !person.periods) {
+    document.getElementById("u-empty").hidden = false;
+    return;
+  }
+  var periods = person.periods;
+  var first = ["week", "30d", "all"].filter(function (k) { return periods[k]; })[0];
+  var state = { period: first };
+
+  document.getElementById("u-avatar").appendChild(avatar(person, 72));
+  document.getElementById("u-name").textContent = person.display_name;
+  links(person);
+  document.getElementById("u-head").hidden = false;
+
+  function render() {
+    var p = periods[state.period];
+    var rank = document.getElementById("u-rank");
+    var body = document.getElementById("u-body");
+    if (!p) {
+      rank.textContent = "Not on the board " + LABEL[state.period];
+      body.hidden = true;
+      return;
+    }
+    var e = p.entry;
+    rank.textContent = "#" + p.rank + " of " + p.of.toLocaleString("en-US") + " " + LABEL[state.period] + (p.week && state.period === "week" ? " · " + p.week : "");
+    document.getElementById("u-landed").textContent = (num(e.landed) || 0).toLocaleString("en-US");
+    document.getElementById("u-landed-label").textContent = "landed " + LABEL[state.period];
+
+    var stats = document.getElementById("u-stats");
+    stats.textContent = "";
+    stat(stats, percent(num(e.first_pass_rate)), "First-pass review");
+    stat(stats, e.lead_time ? duration(e.lead_time.median) : "–", "Lead time");
+    stat(stats, hours(num(e.agent_hours) || 0), "Agent hours");
+    stat(stats, compact(num(e.tokens) || 0), "Tokens");
+    stat(stats, e.inbox_reply ? duration(e.inbox_reply.median) : "–", "Inbox reply");
+    stat(stats, (e.vendors || []).map(function (v) { return VENDORS[v.vendor] || String(v.vendor); }).join(", ") || "–", "Crew");
+    body.hidden = false;
+  }
+
+  // The series and records come from the latest report, whatever the period.
+  var w = (person.weekly || []).slice(-26);
+  var max = Math.max.apply(null, w.concat([1]));
+  var bars = document.getElementById("u-bars");
+  bars.setAttribute("role", "img");
+  bars.setAttribute("aria-label", "Landed per week, the last " + w.length + " weeks: " + w.join(", "));
+  w.forEach(function (v, i) {
+    var b = el("i", i === w.length - 1 ? "now" : "");
+    b.style.height = Math.max(2, Math.round((v / max) * 100)) + "%";
+    bars.appendChild(b);
+  });
+  var r = person.records || {};
+  var records = document.getElementById("u-records");
+  stat(records, (num(r.best_day) || 0).toLocaleString("en-US"), "Best day");
+  stat(records, (num(r.best_week) || 0).toLocaleString("en-US"), "Best week");
+  stat(records, (num(r.longest_streak_days) || 0) + " days", "Longest streak");
+  stat(records, num(r.fastest_lead) !== null ? duration(r.fastest_lead) : "–", "Fastest lead");
+
+  var group = document.querySelector('[data-group="period"]');
+  group.querySelectorAll("button").forEach(function (b) {
+    b.setAttribute("aria-pressed", String(b.getAttribute("data-period") === state.period));
+    b.addEventListener("click", function () {
+      state.period = b.getAttribute("data-period");
+      group.querySelectorAll("button").forEach(function (x) { x.setAttribute("aria-pressed", String(x === b)); });
+      render();
+    });
+  });
+  document.getElementById("u-controls").hidden = false;
+  render();
+})();
+  </script>
+
+  <footer class="foot">
+    <span class="brand small"><svg class="mark" width="26" height="12" viewBox="0 0 22 10" aria-hidden="true"><path d="M3 5H19" stroke="var(--fg-3)" stroke-width="1.5" stroke-linecap="round"/><circle cx="3.5" cy="5" r="2.5" fill="var(--fg-3)"/><circle cx="11" cy="5" r="3.5" fill="var(--fg)"/><circle cx="18.5" cy="5" r="2.5" fill="var(--bg)" stroke="var(--fg-3)" stroke-width="1.5"/></svg>Nitely</span>
+    <nav>
+      <a href="https://github.com/frontiermaxxing/Nitely">GitHub</a>
+      <a href="https://github.com/frontiermaxxing/Nitely/releases">Releases</a>
+      <a href="https://github.com/frontiermaxxing/Nitely/blob/main/LICENSE">Apache-2.0</a>
+    </nav>
+  </footer>
+</body>
+</html>

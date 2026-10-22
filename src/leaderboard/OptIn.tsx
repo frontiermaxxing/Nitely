@@ -31,11 +31,12 @@ const NEVER = [
   "Your time zone, and which days and hours you worked",
 ];
 
-export type Field = "name" | "github" | "x" | "website";
+export type Field = "name" | "github" | "x" | "website" | "avatar";
 
 /** Which field a refusal from the report builder is about. */
 export function fieldOf(error: string): Field | null {
   if (/display name/i.test(error)) return "name";
+  if (/\bpicture\b/.test(error)) return "avatar";
   if (/github/i.test(error)) return "github";
   if (/\bX link\b/.test(error)) return "x";
   if (/website/i.test(error)) return "website";
@@ -104,7 +105,7 @@ export function OptIn(props: { projects: Project[] }) {
           <section className="lb-list">
             <h2>
               <span className="lb-list-dot lb-list-shared" aria-hidden="true" />
-              Shared, once a week
+              Shared, once a day
             </h2>
             <ul>
               {SHARED.map((s) => (
@@ -189,7 +190,7 @@ export function OptIn(props: { projects: Project[] }) {
             <Checkbox
               checked={consent}
               onChange={setConsent}
-              label="Once I turn sending on, send this report to the leaderboard once a week. I can pause it or leave at any time."
+              label="Once I turn sending on, send this report to the leaderboard once a day. I can pause it or leave at any time."
             />
           </div>
           <div className="lb-join">

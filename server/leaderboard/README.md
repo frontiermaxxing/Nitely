@@ -28,8 +28,11 @@ cargo build --release -p nitely-leaderboard
 | `--listen ADDR` | `NITELY_LEADERBOARD_LISTEN` | `127.0.0.1:8787` |
 | `--db FILE` | `NITELY_LEADERBOARD_DB` | `leaderboard.db` |
 | `--base PATH` | `NITELY_LEADERBOARD_BASE` | none |
+| `--site URL` | `NITELY_LEADERBOARD_SITE` | `https://nitely.net` |
 
-Its endpoints are under `/v1/leaderboard/`, so it can share a host with other services.
+Its endpoints are under `/v1/leaderboard/`, so it can share a host with other services. It
+also serves people's pages under `/u/` (below); `--site` is the public address they live at, used
+in their links and preview cards.
 `--base` is a path prefix your proxy passes through: if it forwards
 `https://example.com/api/v1/leaderboard/...`, either strip `/api` in the proxy or run with
 `--base /api`.
@@ -100,6 +103,87 @@ If a CDN sits in front, turn off its request logging or log sampling for this pa
 and cache `GET /v1/leaderboard/board/*` for a few minutes. The service already sends
 `Cache-Control: public, max-age=300` there and `no-store` everywhere else.
 
+## People's pages
+
+Everyone on the board has a public page at `{site}/u/{id}`, where the id is their install's
+public key (the `id` on every board row). It shows their numbers for this week, the last 30 days
+and all time, their rank on each, their weekly series, records and links.
+
+- **The head is rendered here**, so link previews work without JavaScript: the title, a one-line
+  summary, `og:*` and `twitter:card` tags, and `og:image` pointing at the card. The body is
+  `site/u/index.html`, compiled into the binary; its script draws the numbers from the JSON the
+  service puts in the page.
+- **The card**, `{site}/u/{id}/card.png`, is a 1200x630 PNG drawn here from the stored report:
+  the name, initials in the picture's place, rank, headline numbers and the weekly series. It
+  uses Geist (OFL-1.1) outlines from `assets/`, static instances of `site/assets/geist.woff2`
+  made with fontTools' `instancer` at weights 400 and 600. No browser, nothing fetched. It is drawn once per report
+  and kept in memory; the page links it with `?v=` the report's time, so a new send gives
+  previews a new image.
+- **It goes when they do.** Someone who never sent, left, or aged out has a 404 for both.
+- Both are `GET` only and get `Cache-Control: public, max-age=300`.
+
+### Deploying people's pages
+
+The pages live on the site's own host (nitely.net), so the site's web server sends `/u/` to the
+service. These steps are for whoever runs the service; agents never deploy.
+
+1. Build and install the new binary, then restart the service:
+
+   ```sh
+   cargo build --release -p nitely-leaderboard
+   sudo install target/release/nitely-leaderboard /usr/local/bin/
+   sudo systemctl restart nitely-leaderboard
+   ```
+
+   The default `--site` is `https://nitely.net`. Pass `--site` (or set `NITELY_LEADERBOARD_SITE`)
+   only for another address.
+
+2. In the site's nginx `server` block (the one with nitely.net's web root), add:
+
+   ```nginx
+   location /u/ {
+       access_log off;
+       limit_except GET { deny all; }
+       proxy_pass http://127.0.0.1:8787;
+       proxy_set_header X-Forwarded-For "";
+       proxy_set_header X-Real-IP "";
+       proxy_set_header CF-Connecting-IP "";
+   }
+   ```
+
+   If the service runs on another host than the site, proxy to it over TLS instead, with its own
+   name (`api.example.com` here):
+
+   ```nginx
+   location /u/ {
+       access_log off;
+       limit_except GET { deny all; }
+       proxy_pass https://api.example.com;
+       proxy_set_header Host api.example.com;
+       proxy_ssl_server_name on;
+       proxy_set_header X-Forwarded-For "";
+       proxy_set_header X-Real-IP "";
+       proxy_set_header CF-Connecting-IP "";
+   }
+   ```
+
+   and on the service's host, let `/u/` through to it the way `/v1/leaderboard/` is.
+   Then `sudo nginx -t && sudo systemctl reload nginx`.
+
+3. Copy `site/` to the web root as usual, so `styles.css` (which the pages use) is the new one.
+
+4. Check, with an id from `https://nitely.net/v1/leaderboard/board/all.json`:
+
+   ```sh
+   curl -sI https://nitely.net/u/<id>            # 200, text/html
+   curl -sI https://nitely.net/u/<id>/card.png   # 200, image/png
+   curl -s https://nitely.net/u/<id> | grep og:image
+   ```
+
+   A link preview checker (any social site's card validator) then shows the card.
+
+If a CDN sits in front, it may cache `/u/` for the five minutes the service allows.
+
 ## The API
 
 | Request | Signed | Answer |
@@ -108,6 +192,8 @@ and cache `GET /v1/leaderboard/board/*` for a few minutes. The service already s
 | `GET /v1/leaderboard/board/{week,30d,all}.json` | no | the board for that period |
 | `POST /v1/leaderboard/reports` | yes | `{"ok": true, "week": "2026-W43"}`; a second report the same week replaces the first |
 | `DELETE /v1/leaderboard/entries` | yes, empty body | `{"deleted": n}` |
+| `GET /u/{id}` | no | the person's page (HTML), or a 404 page |
+| `GET /u/{id}/card.png` | no | their 1200x630 share card |
 
 A signed request carries three headers:
 
@@ -164,4 +250,5 @@ Entries are sorted by `landed`. The app re-ranks them by whichever column you ch
 
 `cargo test -p nitely-leaderboard` runs the service against Nitely's own client on a local
 instance. The tests cover join, send, view and leave, refusals of unsigned, replayed, tampered
-and stale requests, and that no address reaches the database.
+and stale requests, that no address reaches the database, and that a sharer's page and card
+come and go with their reports.

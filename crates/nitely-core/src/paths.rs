@@ -235,7 +235,7 @@ mod tests {
     /// the pid and a clock that can repeat, and a git run that fails when a busy machine cannot
     /// start it. Scratch paths come from unique_temp and git runs through playbook::run_git.
     #[test]
-    fn scratch_paths_and_git_runs_go_through_the_shared_helpers() {
+    fn repo_rule_scratch_paths_and_git_runs_go_through_the_shared_helpers() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
         // Where a git command is built on one line and run through run_git on the next.
         let allowed = [("build.rs", "Command::new(\"git\")"), ("git.rs", "let mut cmd = Command::new(\"git\");")];

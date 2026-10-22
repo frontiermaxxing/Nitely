@@ -16,6 +16,9 @@ ed25519-dalek = "2"
 sha2 = "0.10"
 base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+# The share card (NIT-632): glyph outlines from an embedded Geist and a plain PNG, no browser.
+ab_glyph = "0.2"
+png = "0.17"
 
 [dev-dependencies]
 # The client's own report builder and signer, so the tests prove the two sides agree.

@@ -95,7 +95,7 @@ export function leaderboardFixture(): LeaderboardStats {
  * the same checks on the name and links, the same fields copied from the numbers.
  */
 export function leaderboardReportFixture(args: Record<string, unknown>) {
-  const profile = args.profile as { display_name: string; github: string | null; x: string | null; website: string | null };
+  const profile = args.profile as { display_name: string; github: string | null; x: string | null; website: string | null; avatar?: string | null };
   const projects = (args.projects as string[]) ?? [];
   const name = profile.display_name.trim();
   if (!name) throw "choose a display name";
@@ -112,6 +112,10 @@ export function leaderboardReportFixture(args: Record<string, unknown>) {
   const x = handle(profile.x, ["https://x.com/", "x.com/"], 15, /^[A-Za-z0-9_]+$/, "the X link", "https://x.com/");
   const site = profile.website?.trim();
   if (site && !/^https:\/\/[^/@\s]+\.[^/@\s]+/.test(site)) throw site.startsWith("https://") ? "the website isn't a valid https address" : "the website must start with https://";
+  const choice = profile.avatar?.trim();
+  const avatar = !choice || choice === "none" ? undefined : choice;
+  if (avatar && avatar !== "github" && avatar !== "x") throw "the picture is from GitHub, from X, or none";
+  if ((avatar === "github" && !github) || (avatar === "x" && !x)) throw "the picture comes from the link it names: add that link, or choose no picture";
   const s = leaderboardFixture();
   const r3 = (n: number) => Math.round(n * 1000) / 1000;
   const week = new Date((s.periods[0].from + 14 * 3600) * 1000);
@@ -122,6 +126,7 @@ export function leaderboardReportFixture(args: Record<string, unknown>) {
     schema: 1,
     display_name: name,
     links: { ...(github ? { github } : {}), ...(x ? { x } : {}), ...(site ? { website: site } : {}) },
+    ...(avatar ? { avatar } : {}),
     week: `${thursday.getUTCFullYear()}-W${String(isoWeek).padStart(2, "0")}`,
     projects: projects.length || 3,
     periods: s.periods.map((p) => ({
@@ -158,13 +163,19 @@ let sharing: { joined: boolean; profile: Record<string, unknown>; projects: stri
 function sharingState() {
   const start = new URLSearchParams(location.search).get("leaderboard");
   sharing ??= start === "joined" || start === "sharing"
-    ? { joined: true, profile: { display_name: "lowtide", github: "lowtide", x: null, website: null }, projects: [], last_sent_week: start === "sharing" ? "2026-W43" : null }
+    ? { joined: true, profile: { display_name: "lowtide", github: "lowtide", x: null, website: null, avatar: "github" }, projects: [], last_sent_week: start === "sharing" ? "2026-W43" : null }
     : { joined: false, profile: { display_name: "" }, projects: [], last_sent_week: null };
   return sharing;
 }
 
 export function leaderboardStatusFixture() {
-  return { ...sharingState(), id: sharingState().joined ? "preview-key" : null, url: "https://api.nitely.net", due: false };
+  // The next send at 18:00 today or tomorrow, and the week closing Sunday at 18:00 (NIT-629).
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 18).getTime() / 1000;
+  const next = today > now.getTime() / 1000 ? today : today + 86_400;
+  const sunday = today + ((7 - now.getDay()) % 7) * 86_400;
+  const sent = sharingState().last_sent_week !== null;
+  return { ...sharingState(), id: sharingState().joined ? "preview-key" : null, url: "https://api.nitely.net", due: false, next_send_at: sent ? next : null, week_closes_at: sunday };
 }
 
 export function leaderboardJoinFixture(args: Record<string, unknown>) {
@@ -193,7 +204,8 @@ const BOARD_NAMES = ["nightshift", "kestrel", "mergequeen", "tidepool", "paperpl
 
 /**
  * The preview's public board, in board.json's shape (server/leaderboard/README.md). With
- * `?leaderboard=sharing` your own row is on it; `?board=fail` makes the fetch fail.
+ * `?leaderboard=sharing` your own row is on it; `?board=fail` makes the fetch fail;
+ * `?people=1` (or any count) keeps that many people, to check a short board.
  */
 export function leaderboardBoardFixture(args: Record<string, unknown>) {
   if (new URLSearchParams(location.search).get("board") === "fail") throw "reaching the Leaderboard at https://api.nitely.net: connection refused";
@@ -208,6 +220,8 @@ export function leaderboardBoardFixture(args: Record<string, unknown>) {
       id,
       display_name: name,
       links: i % 3 === 0 ? { github: `https://github.com/${name}` } : i % 4 === 1 ? { website: `https://${name}.example` } : {},
+      // Some show a picture (from a real GitHub account's address, which may not exist: then initials).
+      ...(i % 6 === 0 ? { avatar: "github" as const } : {}),
       projects: 1 + (i % 3),
       week: "2026-W43",
       landed,
@@ -221,11 +235,15 @@ export function leaderboardBoardFixture(args: Record<string, unknown>) {
       steadiest_week: { landed: Math.round(landed / scale), active_days: 3 + Math.floor(r() * 5) },
       vendors: mix.map((v) => ({ vendor: v, landed: Math.round(landed / mix.length), share: Math.round(1000 / mix.length) / 1000 })),
       weekly: Array.from({ length: 26 }, (_, w) => Math.round((w / 26) * (landed / scale) * (0.6 + r() * 0.6))),
+      updated_at: Math.floor(Date.now() / 1000) - Math.round(r() * 20) * 3600,
+      closed: i % 9 === 4,
     };
   };
   const entries = BOARD_NAMES.map((n, i) => entry(`key-${i}`, n, i));
+  const people = Number(new URLSearchParams(location.search).get("people"));
+  if (people > 0) entries.splice(people);
   const s = sharingState();
-  if (s.joined && s.last_sent_week) entries.push({ ...entry("preview-key", String(s.profile.display_name), 33), links: { github: "https://github.com/lowtide" } });
+  if (s.joined && s.last_sent_week) entries.push({ ...entry("preview-key", String(s.profile.display_name), 33), links: { github: "https://github.com/lowtide" }, ...(s.profile.avatar === "github" ? { avatar: "github" as const } : {}) });
   entries.sort((a, b) => b.landed - a.landed);
   return { schema: 1, period, week: "2026-W43", generated_at: Math.floor(Date.now() / 1000), entries };
 }

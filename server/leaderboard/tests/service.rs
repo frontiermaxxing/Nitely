@@ -9,7 +9,7 @@ use base64::Engine;
 use ed25519_dalek::{Signer, SigningKey};
 use nitely_crew::leaderboard_report::{self, Profile};
 use nitely_crew::leaderboard_send::{self, Sharing};
-use nitely_leaderboard::{handle, Request, Store};
+use nitely_leaderboard::{check, handle, handle_page, Request, Store};
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
@@ -79,6 +79,86 @@ fn join_send_view_and_leave_against_a_local_instance() {
     assert_eq!(names, ["Early Bird"]);
     assert_eq!(me.status(now()).unwrap().id, None);
     assert!(me.send_report(&report("Night Owl")).is_err(), "nothing goes out after leaving");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// NIT-632: a sharer's page at /u/<id> tells a link preview who they are and where they stand,
+/// with what they chose escaped (even a name that reads like the page's own markers), and its card
+/// is a 1200x630 PNG that follows their rank as others send; leaving takes both away.
+#[test]
+fn a_sharers_page_and_card_come_and_go_with_their_reports() {
+    let dir = nitely_core::paths::unique_temp("nitely-lb-page", "");
+    let store = store(&dir);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+    {
+        let store = store.clone();
+        std::thread::spawn(move || nitely_leaderboard::serve(listener, store, String::new()));
+    }
+    let get = |path: &str| {
+        let req = Request { method: "GET".into(), path: path.into(), key: None, time: None, signature: None, body: vec![] };
+        handle_page(&store, &req, "https://example.com").expect("a page path")
+    };
+    let me = Sharing::new(&dir.join("me"));
+    let name = "Night <Owl> & \"co\" {{person}}";
+    let id = me.join(&Profile { display_name: name.into(), ..Default::default() }, &[], Some(&url)).unwrap().id.unwrap();
+    assert_eq!(get(&format!("/u/{id}")).0, 404, "joined, nothing sent: no page yet");
+    me.send_report(&report(name)).unwrap();
+    let other = Sharing::new(&dir.join("other"));
+    other.join(&Profile { display_name: "Early Bird".into(), ..Default::default() }, &[], Some(&url)).unwrap();
+
+    let (status, kind, html) = get(&format!("/u/{id}"));
+    let html = String::from_utf8(html).unwrap();
+    assert_eq!((status, kind), (200, "text/html; charset=utf-8"));
+    assert!(html.contains("<title>Night &lt;Owl&gt; &amp; &quot;co&quot; {{person}} · Nitely Leaderboard</title>"), "{html}");
+    assert!(html.contains(&format!("<meta property=\"og:image\" content=\"https://example.com/u/{id}/card.png?v=")), "{html}");
+    assert!(html.contains("of 1 on the Nitely Leaderboard"), "{html}");
+    assert!(!html.contains("<Owl>"), "nothing from a report lands raw");
+    assert!(html.contains("<script type=\"application/json\" id=\"person\">{"), "the numbers are in their block, whatever the name");
+    let image = |html: &str| html.split("og:image\" content=\"").nth(1).and_then(|r| r.split('"').next()).map(str::to_string);
+
+    let (status, kind, png) = get(&format!("/u/{id}/card.png"));
+    assert_eq!((status, kind), (200, "image/png"));
+    assert!(png.starts_with(b"\x89PNG\r\n\x1a\n"));
+    let size = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+    assert_eq!((size(16), size(20)), (1200, 630), "the IHDR's width and height");
+    assert_eq!(get(&format!("/u/{id}/card.png")).2, png, "drawn once while nothing changes");
+
+    // Someone else's send moves them to #2: the card and its address follow, though they sent nothing.
+    other.send_report(&report("Early Bird")).unwrap();
+    let after = String::from_utf8(get(&format!("/u/{id}")).2).unwrap();
+    assert!(after.contains("#2 of 2 on the Nitely Leaderboard"), "{after}");
+    assert_ne!(image(&after), image(&html), "a new address for the new card");
+    assert_ne!(get(&format!("/u/{id}/card.png")).2, png, "drawn again with the new rank");
+
+    assert_eq!(get("/u/not-an-id").0, 404);
+    assert!(handle_page(&store, &Request { method: "GET".into(), path: "/v1/leaderboard/health".into(), key: None, time: None, signature: None, body: vec![] }, "").is_none());
+    me.leave().unwrap();
+    assert_eq!(get(&format!("/u/{id}")).0, 404, "leaving takes the page away");
+    assert_eq!(get(&format!("/u/{id}/card.png")).0, 404, "and its card");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// The picture is only the choice of a link the report gives, which the board passes on (NIT-630).
+#[test]
+fn the_picture_is_the_choice_of_a_given_link() {
+    let server = |r: &leaderboard_report::Report| -> nitely_leaderboard::Report { serde_json::from_value(serde_json::to_value(r).unwrap()).unwrap() };
+    let mut r = report("Night Owl");
+    assert!(!serde_json::to_string(&r).unwrap().contains("avatar"), "no choice, no field: the report is as before");
+    r.avatar = Some("github".into());
+    assert_eq!(check(&server(&r), now()), Ok(()));
+    r.avatar = Some("x".into());
+    assert!(check(&server(&r), now()).is_err(), "no X link to take it from");
+    r.avatar = Some("https://example.com/me.png".into());
+    assert!(check(&server(&r), now()).is_err(), "never an address");
+
+    let dir = nitely_core::paths::unique_temp("nitely-lb-avatar", "");
+    let store = store(&dir);
+    r.avatar = Some("github".into());
+    store.put("key-1", &server(&r), now()).unwrap();
+    store.rebuild(now()).unwrap();
+    let board: serde_json::Value = serde_json::from_str(&store.board("week").unwrap().unwrap()).unwrap();
+    assert_eq!(board["entries"][0]["avatar"], "github");
     std::fs::remove_dir_all(dir).ok();
 }
 
@@ -175,5 +255,27 @@ fn no_address_is_kept() {
     for ip in ["203.0.113.77", "198.51.100.23", "127.0.0.1"] {
         assert!(!stored.contains(ip), "{ip} was stored");
     }
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// NIT-629: sends go daily and each replaces the week's entry, until Sunday evening's closes the
+/// week: a later send that week changes nothing. Every row says when it came and whether it closed.
+#[test]
+fn a_weeks_closing_report_is_its_last_word() {
+    let dir = nitely_core::paths::unique_temp("nitely-lb-close", "");
+    let store = store(&dir);
+    let parse = |r: &leaderboard_report::Report| serde_json::from_value::<nitely_leaderboard::Report>(serde_json::to_value(r).unwrap()).unwrap();
+    let mut closing = report("Closer");
+    closing.closes_week = true;
+    store.put("k1", &parse(&closing), now()).unwrap();
+    store.put("k1", &parse(&report("Too late")), now() + 60).unwrap();
+    store.put("k2", &parse(&report("Open")), now()).unwrap();
+    store.put("k2", &parse(&report("Open again")), now() + 60).unwrap();
+    let board: serde_json::Value = serde_json::from_str(&store.board("week").unwrap().unwrap()).unwrap();
+    let row = |id: &str| board["entries"].as_array().unwrap().iter().find(|e| e["id"] == id).unwrap().clone();
+    assert_eq!((row("k1")["display_name"].as_str(), row("k1")["closed"].as_bool()), (Some("Closer"), Some(true)), "the closed week kept its report");
+    assert_eq!((row("k2")["display_name"].as_str(), row("k2")["closed"].as_bool()), (Some("Open again"), Some(false)), "an open week takes the newest");
+    assert!(row("k2")["updated_at"].as_i64().unwrap() >= row("k1")["updated_at"].as_i64().unwrap());
+    drop(store);
     std::fs::remove_dir_all(dir).ok();
 }
