@@ -86,6 +86,7 @@ pub mod updates;
 pub mod submodules;
 pub mod review_batch;
 pub mod review_compare;
+pub mod test_catches;
 /// Test fixtures, for nitely-crew's tests too (its `test-support` dev-dependency).
 #[cfg(any(test, feature = "test-support"))]
 #[cfg_attr(not(test), allow(dead_code))]

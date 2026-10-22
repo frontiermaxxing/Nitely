@@ -28,6 +28,8 @@ const KEY_COLUMNS: &[(&str, &str)] = &[
     ("playbook_proposal", "issue_key"),
     ("goal_plan", "issue_key"),
     ("goal_request", "issue_key"),
+    ("gate_failure", "issue_key"),
+    ("test_catch", "issue_key"),
     ("issue_mirror", "issue_key"),
     ("issue_private", "issue_key"),
     ("mirror_comment", "issue_key"),

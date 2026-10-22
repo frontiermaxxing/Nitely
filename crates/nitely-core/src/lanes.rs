@@ -1250,7 +1250,7 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
     let short = snap.commit[..snap.commit.len().min(7)].to_string();
     let project = issue.and_then(|k| db.issue(k).ok().flatten()).and_then(|i| i.project).unwrap_or_default();
     let base = pb.integration_branch().to_string();
-    let skipped = |why: &str, command: &str| playbook::CommandResult { command: command.to_string(), ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false };
+    let skipped = |why: &str, command: &str| playbook::CommandResult { step: None, command: command.to_string(), ok: true, seconds: 0, output: format!("skipped: {why}"), skipped: true, timed_out: false };
     // The commands as the playbook writes them: the record's command, and what an earlier pass of
     // the same tree must have run.
     let to_run: Vec<&str> = steps.iter().filter(|(_, skip)| skip.is_none()).map(|(c, _)| c.as_str()).collect();
@@ -1321,6 +1321,8 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
                 results.push(skipped(why, command));
                 continue;
             }
+            // The template stays with each result, for what does not change between lanes (NIT-557).
+            let template = command.clone();
             let command = playbook::expand(command, repo_root, lane, &base).replace("{jobs}", &share.jobs.to_string());
             let started = Instant::now();
             let mut failures: Vec<String> = Vec::new();
@@ -1334,7 +1336,7 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
                 let seconds = started.elapsed().as_secs();
                 if timed_out {
                     let output = format!("Ran past the lane's {}-minute limit and was stopped.\n{output}", limit.as_secs() / 60);
-                    results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false, timed_out: true });
+                    results.push(playbook::CommandResult { step: Some(template.clone()), command: command.clone(), ok: false, seconds, output, skipped: false, timed_out: true });
                     return Ok(Ended { code: None, timed_out: true, peak });
                 }
                 if code == Some(0) {
@@ -1348,12 +1350,12 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
                         flaked.push(playbook::Flake { command: command.clone(), tests, output: failures.swap_remove(0) });
                     }
                     timings.extend(crate::test_budget::parse(&text));
-                    results.push(playbook::CommandResult { command: command.clone(), ok: true, seconds, output, skipped: false, timed_out: false });
+                    results.push(playbook::CommandResult { step: Some(template.clone()), command: command.clone(), ok: true, seconds, output, skipped: false, timed_out: false });
                     break;
                 }
                 if failures.len() as u32 >= retries {
                     timings.extend(crate::test_budget::parse(&text));
-                    results.push(playbook::CommandResult { command: command.clone(), ok: false, seconds, output, skipped: false, timed_out: false });
+                    results.push(playbook::CommandResult { step: Some(template.clone()), command: command.clone(), ok: false, seconds, output, skipped: false, timed_out: false });
                     return Ok(Ended { code, timed_out: false, peak });
                 }
                 failures.push(output);
@@ -1374,7 +1376,7 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
         let output = if run.output.trim().is_empty() { why.clone() } else { format!("{why}\n{}", run.output) };
         // Setup that ran past the lane's limit stopped the gate before any of it ran (NIT-310).
         let timed_out = why.starts_with(SETUP_TIMED_OUT);
-        results.push(playbook::CommandResult { command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out });
+        results.push(playbook::CommandResult { step: None, command: format!("lane {}", run.lane.unwrap_or(0)), ok: false, seconds: 0, output, skipped: false, timed_out });
     }
     warnings.extend(budget_warnings(db, worktree, issue, actor, &timings));
     if let Some(why) = &fallback {
@@ -1437,7 +1439,7 @@ fn gate_beside_ci(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, iss
         } else if here.is_some() {
             results.extend(placeholder);
         } else {
-            results.push(playbook::CommandResult { command: c.clone(), ok: true, seconds: 0, output: format!("skipped: {}", skip.clone().unwrap_or_default()), skipped: true, timed_out: false });
+            results.push(playbook::CommandResult { step: None, command: c.clone(), ok: true, seconds: 0, output: format!("skipped: {}", skip.clone().unwrap_or_default()), skipped: true, timed_out: false });
         }
     }
     // A lane problem in a fallback is a result of its own.

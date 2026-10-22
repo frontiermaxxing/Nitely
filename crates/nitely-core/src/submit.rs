@@ -1712,7 +1712,7 @@ reason = "money logic"
         f.db.conn
             .execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, ts) VALUES (?1, 'p', 'c', 'claude', 'pass', 'agent', ?2)", rusqlite::params![issue.key, crate::db::now()])
             .unwrap();
-        let ok = playbook::CommandResult { command: "exit 0".into(), ok: true, seconds: 0, output: String::new(), skipped: false, timed_out: false };
+        let ok = playbook::CommandResult { step: None, command: "exit 0".into(), ok: true, seconds: 0, output: String::new(), skipped: false, timed_out: false };
         let gate = GateResult { mode_authority: None, plan: None, skipped: None, passed: true, commit: "c".into(), results: vec![ok], warnings: vec![], flaked: vec![], lane_run: None };
         // Since that round: the author's note, and a finding the person accepted on another issue.
         f.db.add_note(&issue.key, "The empty line is kept on purpose: the footer needs it.", "note", &f.actor).unwrap();
@@ -1751,7 +1751,7 @@ reason = "money logic"
 
     #[test]
     fn a_gate_step_that_ran_past_the_lane_limit_is_not_a_failure_to_fix() {
-        let step = |command: &str, timed_out: bool| playbook::CommandResult { command: command.into(), ok: false, seconds: 2700, output: String::new(), skipped: false, timed_out };
+        let step = |command: &str, timed_out: bool| playbook::CommandResult { step: None, command: command.into(), ok: false, seconds: 2700, output: String::new(), skipped: false, timed_out };
         let gate = |r: playbook::CommandResult| GateResult { mode_authority: None, plan: None, skipped: None, passed: false, commit: "abc1234".into(), results: vec![r], warnings: vec![], flaked: vec![], lane_run: Some(250) };
         let stopped = after_failed_gate(&gate(step("npm run test:gate", true)));
         assert!(stopped.contains("did not finish") && stopped.contains("`npm run test:gate` ran past the lane's time limit") && !stopped.contains("Fix it"), "{stopped}");

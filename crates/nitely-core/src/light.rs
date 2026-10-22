@@ -173,7 +173,7 @@ pub fn make_whole(worktree: &Path) -> Result<Vec<crate::playbook::CommandResult>
     let started = std::time::Instant::now();
     git(worktree, &["sparse-checkout", "disable"]).context("making the sparse worktree whole for the gate")?;
     Ok(vec![crate::playbook::CommandResult {
-        command: "git sparse-checkout disable (the gate builds every file until gates run in build lanes)".into(),
+        step: None, command: "git sparse-checkout disable (the gate builds every file until gates run in build lanes)".into(),
         ok: true,
         seconds: started.elapsed().as_secs(),
         output: format!("It held {}; it is whole now.", dirs.join(", ")),
