@@ -13,17 +13,18 @@
   <meta property="og:url" content="https://nitely.net/">
   <link rel="icon" href="assets/icon.svg" type="image/svg+xml">
   <link rel="preload" href="assets/geist.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=2">
 </head>
 <body>
   <header class="top">
     <a class="brand" href="/" aria-label="Nitely home">
-      <span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>
+      <svg class="mark" width="26" height="12" viewBox="0 0 22 10" aria-hidden="true"><path d="M3 5H19" stroke="var(--fg-3)" stroke-width="1.5" stroke-linecap="round"/><circle cx="3.5" cy="5" r="2.5" fill="var(--fg-3)"/><circle cx="11" cy="5" r="3.5" fill="var(--fg)"/><circle cx="18.5" cy="5" r="2.5" fill="var(--bg)" stroke="var(--fg-3)" stroke-width="1.5"/></svg>
       Nitely
     </a>
     <nav class="top-links">
       <a href="#night">How it works</a>
       <a href="#inbox">Inbox</a>
+      <a href="/leaderboard">Leaderboard</a>
       <a href="https://github.com/frontiermaxxing/Nitely">GitHub</a>
       <a class="btn btn-small" href="https://github.com/frontiermaxxing/Nitely/releases">Download</a>
     </nav>
@@ -151,6 +152,14 @@
       </ul>
     </section>
 
+    <section class="board-teaser">
+      <div>
+        <h2>How agent teams ship</h2>
+        <p>An opt-in board of landed changes, first-pass reviews, lead time and agent hours. It holds weekly counts and rates only: no code, paths, repos or prompts ever leave your machine.</p>
+      </div>
+      <a class="btn btn-quiet" href="/leaderboard">See the leaderboard</a>
+    </section>
+
     <section class="closing">
       <h2>Built with itself</h2>
       <p>Nitely's own repo runs on Nitely: its issues, reviews and every merge go through the backlog, playbook and landing described here. The code is open under Apache-2.0.</p>
@@ -163,10 +172,11 @@
   </main>
 
   <footer class="foot">
-    <span class="brand small"><span class="mark" aria-hidden="true"><i></i><i></i><i></i></span>Nitely</span>
+    <span class="brand small"><svg class="mark" width="26" height="12" viewBox="0 0 22 10" aria-hidden="true"><path d="M3 5H19" stroke="var(--fg-3)" stroke-width="1.5" stroke-linecap="round"/><circle cx="3.5" cy="5" r="2.5" fill="var(--fg-3)"/><circle cx="11" cy="5" r="3.5" fill="var(--fg)"/><circle cx="18.5" cy="5" r="2.5" fill="var(--bg)" stroke="var(--fg-3)" stroke-width="1.5"/></svg>Nitely</span>
     <nav>
       <a href="https://github.com/frontiermaxxing/Nitely">GitHub</a>
       <a href="https://github.com/frontiermaxxing/Nitely/releases">Releases</a>
+      <a href="/leaderboard">Leaderboard</a>
       <a href="https://github.com/frontiermaxxing/Nitely/blob/main/LICENSE">Apache-2.0</a>
     </nav>
   </footer>
