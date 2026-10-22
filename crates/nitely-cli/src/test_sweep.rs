@@ -467,8 +467,8 @@ pub fn run(command: Command) -> Result<()> {
             let mut db = Db::open_default()?;
             let cwd = crate::cwd()?;
             let project = nitely_core::resolve_project(&config, &db, project.as_deref(), &cwd)?;
-            let root = nitely_core::playbook::repo_root(&config, &cwd)
-                .with_context(|| format!("{cwd} is not inside a git repo"))?;
+            // The project's own repo, as the MCP tool resolves it, not just the one here.
+            let root = nitely_core::playbook::repo_for_issue(&config, Some(&project), &cwd)?;
             let classes = test_sweep::read_classes(&classes)?;
             let repo = test_sweep::repo_facts(&config, &root)?;
             let facts = test_sweep::OptimizeFacts {
