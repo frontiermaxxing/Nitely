@@ -151,6 +151,12 @@ pub fn blocking(findings: &[Finding], accepted: &[String]) -> Vec<String> {
         .collect()
 }
 
+/// Whether a goal item lands into its goal branch after its item review (NIT-563): an advisory
+/// review never holds it, and a blocking one does while a P0/P1 finding is not accepted.
+pub fn item_lands(mode: crate::project_modes::ItemReview, findings: &[Finding], accepted: &[String]) -> bool {
+    mode != crate::project_modes::ItemReview::Blocking || blocking(findings, accepted).is_empty()
+}
+
 /// A review that asked for changes only in findings the person accepted passes.
 pub fn accepted_only(findings: &[Finding], accepted: &[String]) -> bool {
     blocking(findings, accepted).is_empty()
@@ -273,6 +279,18 @@ mod tests {
         assert_eq!(land_state("In Progress", "In Review", Meanwhile::Accepted), Some("In Review"), "the kept state lands");
         assert_eq!(land_state("In Progress", "Needs You", Meanwhile::Unverified), None, "the app lands what only it can check");
         assert_eq!(land_state("In Review", "In Progress", Meanwhile::No), Some("In Review"));
+    }
+
+    /// NIT-563: what an item review does to a goal item's land into its goal branch.
+    #[test]
+    fn an_advisory_item_review_never_holds_an_item_and_a_blocking_one_holds_it_for_its_p1s() {
+        use crate::project_modes::ItemReview::*;
+        let found = [finding(1, "Drops a row: rows.rs"), finding(2, "Wordy: rows.rs")];
+        assert!(item_lands(Advisory, &found, &[]), "advisory: noted, and it lands");
+        assert!(!item_lands(Blocking, &found, &[]), "blocking: the P1 sends it back");
+        assert!(item_lands(Blocking, &found, &["Drops a row: rows.rs".to_string()]), "accepted as it is");
+        assert!(item_lands(Blocking, &found[1..], &[]), "a P2 never holds it");
+        assert!(item_lands(Off, &found, &[]));
     }
 
     fn finding(priority: u8, text: &str) -> Finding {

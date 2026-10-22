@@ -110,7 +110,7 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
         GoalPlans::Asked => "plans you asked for start by themselves",
         GoalPlans::All => "every plan starts by itself",
     };
-    let routes = crate::goal_branch::goal_items_route(o.goal_branches, o.item_review, !pb.submodules.is_empty());
+    let routes = crate::goal_branch::goal_items_route(o.goal_branches, !pb.submodules.is_empty());
     let goals = if let Err(why) = routes {
         Fact { value: "Straight to main".into(), why: format!("{why}. {}", capital(plans)), tone: Tone::Agent, source: goal_src }
     } else {
