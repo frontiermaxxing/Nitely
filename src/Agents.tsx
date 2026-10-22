@@ -20,6 +20,7 @@ const ACTION_WORD: Record<ConnectChange["action"], string> = {
   create: "to add",
   run: "to run",
   manual: "needs a look",
+  remove: "to remove",
 };
 
 /** One card per agent: whether its setup is current, then each file Nitely writes for it. */

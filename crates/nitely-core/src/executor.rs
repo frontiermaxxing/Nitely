@@ -1228,7 +1228,7 @@ fn xml_files(dir: &Path, depth: u32) -> Vec<PathBuf> {
         let path = entry.path();
         if path.is_dir() && depth > 0 {
             found.extend(xml_files(&path, depth - 1));
-        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml")) {
+        } else if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("xml") || e.eq_ignore_ascii_case("trx")) {
             found.push(path);
         }
     }
@@ -1399,6 +1399,26 @@ pub fn wait(db: &Db, pending: Pending) -> Result<SuiteEvidence> {
                 if let Some(log) = job.and_then(|j| gh(&["run", "view", "--repo", &pending.slug, "--job", &j.to_string(), "--log-failed"], Duration::from_secs(60)).ok()) {
                     result.output = format!("{}\n{}", result.output, playbook::tail(&log));
                 }
+            }
+            // The reports a measured run's jobs uploaded (NIT-567): `nitely-report-<request>-<job
+            // index>`, the index being the command's place in the matrix. Best effort.
+            if pending.every_log {
+                let scratch = crate::paths::unique_temp("nitely-reports", "");
+                let artifacts = gh(&["api", &format!("repos/{}/actions/runs/{}/artifacts", pending.slug, pending.workflow_run), "--jq", ".artifacts[].name"], Duration::from_secs(60)).unwrap_or_default();
+                for name in artifacts.lines().filter_map(|n| n.trim().strip_prefix(&format!("nitely-report-{}-", pending.request)).map(|i| (n.trim(), i))) {
+                    let (artifact, index) = name;
+                    let Some(command) = index.parse::<usize>().ok().and_then(|i| pending.commands.get(i)) else { continue };
+                    let dir = scratch.join(index);
+                    if gh(&["run", "download", &pending.workflow_run.to_string(), "--repo", &pending.slug, "--name", artifact, "--dir", &dir.to_string_lossy()], Duration::from_secs(300)).is_err() {
+                        continue;
+                    }
+                    for file in xml_files(&dir, 8) {
+                        if let Ok(text) = std::fs::read_to_string(&file) {
+                            evidence.logs.push((command.clone(), text));
+                        }
+                    }
+                }
+                std::fs::remove_dir_all(&scratch).ok();
             }
             let summary = evidence.results.iter().map(|r| format!("{} {} ({} s)", if r.ok { "passed" } else { "failed" }, r.command, r.seconds)).collect::<Vec<_>>().join("\n");
             let failed = evidence.results.iter().filter(|r| !r.ok).map(|r| r.output.as_str()).collect::<Vec<_>>().join("
