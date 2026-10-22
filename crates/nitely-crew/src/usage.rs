@@ -2,8 +2,9 @@
 //! per session (`~/.claude/projects/<folder>/*.jsonl`) with the usage of each model response; Codex
 //! keeps a log per session (`~/.codex/sessions/YYYY/MM/DD/*.jsonl`) with running token counts.
 //! Only counts, the model, the time, the folder and the branch are kept, never what was said: the
-//! same rule as the hooks. Nothing is stored either; files are read again as they grow, and a
-//! process keeps what it read so far in memory.
+//! same rule as the hooks. What each file gave so far is kept in the database with the offset it was
+//! read up to (`usage_file`, NIT-628), so a new process reads only what a file appended since: an
+//! unchanged transcript costs one `stat`, where reading them all took minutes on a busy machine.
 //!
 //! A session's usage belongs to the issue its branch (or worktree folder) names, as `nitely-3-…` is
 //! NIT-3, and to the project of the repo its folder is in. A session that works on issues from the
@@ -37,6 +38,38 @@ pub struct Usage {
     pub cache_write: u64,
     pub cwd: String,
     pub branch: String,
+}
+
+/// A `Usage` as stored, its vendor owned (NIT-628).
+#[derive(Deserialize)]
+struct StoredUsage {
+    vendor: String,
+    session: String,
+    ts: i64,
+    model: String,
+    input: u64,
+    output: u64,
+    cache_read: u64,
+    cache_write: u64,
+    cwd: String,
+    branch: String,
+}
+
+impl From<StoredUsage> for Usage {
+    fn from(s: StoredUsage) -> Usage {
+        Usage {
+            vendor: if s.vendor == "codex" { "codex" } else { "claude" },
+            session: s.session,
+            ts: s.ts,
+            model: s.model,
+            input: s.input,
+            output: s.output,
+            cache_read: s.cache_read,
+            cache_write: s.cache_write,
+            cwd: s.cwd,
+            branch: s.branch,
+        }
+    }
 }
 
 impl Usage {
@@ -102,9 +135,44 @@ struct FileState {
     /// A Codex session's folder, from its first line, while no watched repo holds it: it is not
     /// read further, and is checked again on the next scan (a repo may be linked since).
     unwanted_cwd: Option<String>,
+    /// Changed since it was last stored.
+    dirty: bool,
 }
 
-#[derive(Default, Clone)]
+/// A `FileState` as stored (NIT-628).
+#[derive(Deserialize)]
+struct StoredState {
+    offset: u64,
+    records: Vec<StoredUsage>,
+    claude_ids: HashMap<String, usize>,
+    codex: CodexState,
+    unwanted_cwd: Option<String>,
+}
+
+impl From<StoredState> for FileState {
+    fn from(s: StoredState) -> FileState {
+        FileState { offset: s.offset, records: s.records.into_iter().map(Usage::from).collect(), claude_ids: s.claude_ids, codex: s.codex, unwanted_cwd: s.unwanted_cwd, dirty: false }
+    }
+}
+
+/// How `FileState` is read and stored: a reader that parses differently bumps it, and every file
+/// is read again once.
+const FORMAT: i64 = 1;
+
+/// The ids kept with a stored file: only the last responses can repeat (one id per content block,
+/// written one after another), so older ids are not worth their space.
+const KEEP_IDS: usize = 64;
+
+impl FileState {
+    /// The state as stored: its records, and only the ids of the last few.
+    fn stored(&self) -> serde_json::Result<String> {
+        let from = self.records.len().saturating_sub(KEEP_IDS);
+        let ids: HashMap<&String, &usize> = self.claude_ids.iter().filter(|(_, i)| **i >= from).collect();
+        serde_json::to_string(&serde_json::json!({ "offset": self.offset, "records": self.records, "claude_ids": ids, "codex": self.codex, "unwanted_cwd": self.unwanted_cwd }))
+    }
+}
+
+#[derive(Default, Clone, Serialize, Deserialize)]
 struct CodexState {
     session: String,
     cwd: String,
@@ -216,13 +284,14 @@ fn read_file(path: &Path, codex: bool, wanted: &dyn Fn(&str) -> bool, files: &mu
     let state = files.entry(path.to_path_buf()).or_default();
     let len = std::fs::metadata(path).map(|m| m.len()).unwrap_or(0);
     if len < state.offset {
-        *state = FileState::default(); // rewritten or truncated: start over
+        *state = FileState { dirty: true, ..Default::default() }; // rewritten or truncated: start over
     }
     if let Some(cwd) = &state.unwanted_cwd {
         if !wanted(cwd) {
             return Vec::new();
         }
         state.unwanted_cwd = None;
+        state.dirty = true;
     }
     if codex && state.offset == 0 && len > 0 {
         let first = std::fs::File::open(path).ok().and_then(|f| {
@@ -236,6 +305,7 @@ fn read_file(path: &Path, codex: bool, wanted: &dyn Fn(&str) -> bool, files: &mu
             .and_then(|v| v["payload"]["cwd"].as_str().map(str::to_string));
         if let Some(c) = cwd.filter(|c| !wanted(c)) {
             state.unwanted_cwd = Some(c);
+            state.dirty = true;
             return Vec::new();
         }
     }
@@ -252,6 +322,7 @@ fn read_file(path: &Path, codex: bool, wanted: &dyn Fn(&str) -> bool, files: &mu
                         read_claude_lines(&text, state);
                     }
                     state.offset += end as u64 + 1;
+                    state.dirty = true;
                 }
             }
         }
@@ -320,6 +391,12 @@ fn places(config: &Config) -> Vec<Place> {
 /// read from `claude` and `codex` (the agents' home folders). `aliases` are projects' earlier
 /// keys, so branches named before a re-key still find their issue.
 pub fn scan_in(config: &Config, aliases: &HashMap<String, String>, since: i64, claude: Option<&Path>, codex: Option<&Path>) -> Vec<Attributed> {
+    scan_stored(config, aliases, since, claude, codex, None)
+}
+
+/// As `scan_in`, keeping what each file gave in `store` (NIT-628): a file this process has not
+/// read yet starts from its stored state, and only what changed is written back.
+fn scan_stored(config: &Config, aliases: &HashMap<String, String>, since: i64, claude: Option<&Path>, codex: Option<&Path>, store: Option<&Db>) -> Vec<Attributed> {
     let places = places(config);
     let roots: Vec<String> = places.iter().flat_map(|p| std::iter::once(claude_folder(&p.root)).chain(p.worktrees.as_deref().map(claude_folder))).collect();
     let mut paths: Vec<(PathBuf, bool)> = Vec::new();
@@ -341,6 +418,10 @@ pub fn scan_in(config: &Config, aliases: &HashMap<String, String>, since: i64, c
     }
     let mut guard = FILES.lock().unwrap_or_else(|e| e.into_inner());
     let files = guard.get_or_insert_with(HashMap::new);
+    if let Some(db) = store {
+        let unread: Vec<&PathBuf> = paths.iter().map(|(p, _)| p).filter(|p| !files.contains_key(*p)).collect();
+        load_stored(db, unread.into_iter(), files);
+    }
     let mut out = Vec::new();
     let mut projects: HashMap<String, Option<String>> = HashMap::new();
     let wanted = |cwd: &str| project_of(&places, cwd).is_some();
@@ -355,14 +436,56 @@ pub fn scan_in(config: &Config, aliases: &HashMap<String, String>, since: i64, c
             out.push(Attributed { usage: u, project: Some(project), issue });
         }
     }
+    if let Some(db) = store {
+        if let Err(e) = save_stored(db, files) {
+            eprintln!("token usage: what the transcripts gave was not stored ({e:#}); the next process reads them again");
+        }
+    }
     out
+}
+
+/// The stored state of each of `paths`, into `files`; a file stored by another reader `FORMAT`, or
+/// not stored, is read from the start.
+fn load_stored<'a>(db: &Db, paths: impl Iterator<Item = &'a PathBuf>, files: &mut HashMap<PathBuf, FileState>) {
+    let Ok(mut stmt) = db.conn.prepare("SELECT state FROM usage_file WHERE path = ?1 AND format = ?2") else { return };
+    for path in paths {
+        let state: Option<String> = stmt.query_row(rusqlite::params![path.to_string_lossy(), FORMAT], |r| r.get(0)).ok();
+        if let Some(state) = state.and_then(|s| serde_json::from_str::<StoredState>(&s).ok()) {
+            files.insert(path.clone(), state.into());
+        }
+    }
+}
+
+/// Writes each changed file's state, in one transaction.
+fn save_stored(db: &Db, files: &mut HashMap<PathBuf, FileState>) -> Result<()> {
+    let changed: Vec<(&PathBuf, &mut FileState)> = files.iter_mut().filter(|(_, s)| s.dirty).collect();
+    if changed.is_empty() {
+        return Ok(());
+    }
+    db.conn.execute_batch("BEGIN IMMEDIATE")?;
+    let wrote = (|| -> Result<()> {
+        let mut stmt = db.conn.prepare(
+            "INSERT INTO usage_file (path, format, offset, state, read_at) VALUES (?1, ?2, ?3, ?4, ?5)
+             ON CONFLICT(path) DO UPDATE SET format = excluded.format, offset = excluded.offset, state = excluded.state, read_at = excluded.read_at",
+        )?;
+        for (path, state) in &changed {
+            stmt.execute(rusqlite::params![path.to_string_lossy(), FORMAT, state.offset as i64, state.stored()?, nitely_core::db::now()])?;
+        }
+        Ok(())
+    })();
+    db.conn.execute_batch(if wrote.is_ok() { "COMMIT" } else { "ROLLBACK" })?;
+    wrote?;
+    for (_, state) in changed {
+        state.dirty = false;
+    }
+    Ok(())
 }
 
 /// As `scan_in`, from the agents' usual folders, with a main-checkout session's usage given to the
 /// issue it was on at the time (`by_session`).
 pub fn scan(config: &Config, db: &Db, since: i64) -> Vec<Attributed> {
     let aliases = db.project_aliases().unwrap_or_default();
-    let mut records = scan_in(config, &aliases, since, claude_home().as_deref(), codex_home().as_deref());
+    let mut records = scan_stored(config, &aliases, since, claude_home().as_deref(), codex_home().as_deref(), Some(db));
     if let Ok(touches) = db.session_touches(since - TOUCH_LOOKBACK_SECS) {
         by_session(&mut records, &touches);
     }
@@ -717,6 +840,50 @@ mod tests {
         assert_eq!((state.records[0].output, state.records[0].tokens()), (80, 95));
         assert_eq!(state.records[0].cache_read, 1000);
         assert!(!format!("{:?}", state.records).contains("secret"), "no text is kept");
+    }
+
+    /// NIT-628: a new process starts each file from what the database kept, reading only what was
+    /// appended: the bytes read before are not read again, even when they changed since.
+    #[test]
+    fn a_new_process_reads_only_what_a_file_appended_since_it_was_stored() {
+        let base = nitely_core::paths::unique_temp("nitely-usage-store", "");
+        let claude = base.join("claude");
+        let wt = r"C:\dev\stored-worktrees\nit-7-x";
+        let folder = claude.join("projects").join(claude_folder(wt));
+        std::fs::create_dir_all(&folder).unwrap();
+        let file = folder.join("s7.jsonl");
+        let line = |id: &str, output: u64| claude_line(id, "2026-10-16T10:00:00Z", "claude/sto-7-x", wt, 5, output) + "\n";
+        std::fs::write(&file, line("m1", 50)).unwrap();
+        let config = Config { repos: vec![nitely_core::RepoConfig { name: "stored".into(), root: r"C:\dev\stored".into(), integration_branch: "main".into(), project: Some("STO".into()) }], ..Default::default() };
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let none = HashMap::new();
+        let scan = || scan_stored(&config, &none, 0, Some(&claude), None, Some(&db));
+        assert_eq!(issue_spend(&scan(), "STO-7").tokens, 65);
+        let stored: i64 = db.conn.query_row("SELECT offset FROM usage_file WHERE path = ?1", [file.to_string_lossy()], |r| r.get(0)).unwrap();
+        assert_eq!(stored as u64, std::fs::metadata(&file).unwrap().len(), "read to the end, and stored");
+        // A new process: nothing of this file in memory. The bytes it read change (same length), and
+        // a line is appended: only the new line is read; the first keeps what was stored.
+        FILES.lock().unwrap().get_or_insert_with(HashMap::new).remove(&file);
+        std::fs::write(&file, line("m1", 59) + &line("m2", 20)).unwrap();
+        assert_eq!(issue_spend(&scan(), "STO-7").tokens, 65 + 35, "the stored 50, not the rewritten 59, and the new 20");
+        // A file read by a reader of another format is read again from the start.
+        db.conn.execute("UPDATE usage_file SET format = 0", []).unwrap();
+        FILES.lock().unwrap().get_or_insert_with(HashMap::new).remove(&file);
+        assert_eq!(issue_spend(&scan(), "STO-7").tokens, 74 + 35);
+        drop(db);
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    #[test]
+    fn a_stored_file_keeps_only_the_last_ids() {
+        let mut state = FileState::default();
+        let lines: Vec<String> = (0..100).map(|n| claude_line(&format!("m{n}"), "2026-10-16T10:00:00Z", "main", r"C:\dev\x", 1, 1)).collect();
+        read_claude_lines(&lines.join("\n"), &mut state);
+        let back: FileState = serde_json::from_str::<StoredState>(&state.stored().unwrap()).unwrap().into();
+        assert_eq!(back.records.len(), 100);
+        assert_eq!(back.claude_ids.len(), KEEP_IDS);
+        assert!(back.claude_ids.contains_key("m99") && !back.claude_ids.contains_key("m0"));
+        assert_eq!(back.records[0].vendor, "claude");
     }
 
     #[test]
