@@ -355,11 +355,13 @@ fn measure(
                 let deadline = std::time::Instant::now()
                     + std::time::Duration::from_secs(u64::from(plan.minutes) * 60);
                 for command in &plan.commands {
-                    let left = deadline
+                    // Whole minutes left, a last part-minute counted as one; under half a
+                    // minute is too little to start a command.
+                    let secs = deadline
                         .saturating_duration_since(std::time::Instant::now())
-                        .as_secs()
-                        / 60;
-                    if left == 0 {
+                        .as_secs();
+                    let left = (secs / 60).max(1);
+                    if secs < 30 {
                         stopped = Some(format!(
                             "run {} reached its {}-minute cap before `{command}`",
                             n + 1,

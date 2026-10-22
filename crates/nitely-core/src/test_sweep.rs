@@ -780,11 +780,25 @@ pub fn plan_measure(f: &MeasureFacts) -> Result<MeasurePlan> {
             if f.dispatch {
                 bail!("CI cannot take the test commands: {why}");
             }
-            if (f.minutes as usize) < f.tests.len() {
-                bail!("a lane run's cap is shared by its {} commands: give it at least {} minutes (--minutes)", f.tests.len(), f.tests.len());
+            // The same readable consoles as a dispatch: pytest -v, go test -v -count=1.
+            let (mut commands, mut skipped) = (vec![], vec![]);
+            for t in f.tests {
+                match crate::test_evidence::readable_command(t) {
+                    Ok(c) => commands.push(c),
+                    Err(why) => skipped.push(why),
+                }
             }
-            let says = format!("No CI ({why}). A build lane would run {} run(s) of {} at {short}, each run capped at {} minutes, setup included", f.runs, f.tests.join(" and "), f.minutes);
-            Ok(plan(Method::Lane, f.tests.to_vec(), ask(says, "--lane", f.lane), f.lane))
+            if commands.is_empty() {
+                bail!("{}", skipped.join("; "));
+            }
+            if (f.minutes as usize) < commands.len() {
+                bail!("a lane run's cap is shared by its {} commands: give it at least {} minutes (--minutes)", commands.len(), commands.len());
+            }
+            let mut says = format!("No CI ({why}). A build lane would run {} run(s) of {} at {short}, each run's commands capped at {} minutes in all (a lane's dependency setup, when it reruns, comes before and is not counted)", f.runs, commands.join(" and "), f.minutes);
+            if !skipped.is_empty() {
+                says.push_str(&format!(". Not run: {}", skipped.join("; ")));
+            }
+            Ok(plan(Method::Lane, commands, ask(says, "--lane", f.lane), f.lane))
         }
     }
 }
@@ -809,18 +823,23 @@ pub fn measured_revision(dir: &Path, out: &Path) -> Result<String> {
         .to_string())
 }
 
-/// The full hash of `at`, a commit that is HEAD or an ancestor of it, for a report on that commit.
+/// The full hash of commit `at`, for a report on that commit: its tests are read from its own
+/// tree, so it need not be HEAD's ancestor (main moves on after a task branch forks). A commit not
+/// here yet is fetched from origin first.
 pub fn ancestor_revision(dir: &Path, at: &str) -> Result<String> {
     if at.is_empty() || at.len() > 40 || !at.chars().all(|c| c.is_ascii_hexdigit()) {
         bail!("--at takes a commit hash");
     }
-    let full = crate::playbook::git(dir, &["rev-parse", "--verify", &format!("{at}^{{commit}}")])?
-        .trim()
-        .to_string();
-    if crate::playbook::git(dir, &["merge-base", "--is-ancestor", &full, "HEAD"]).is_err() {
-        bail!("{at} is not HEAD or an ancestor of it: fetch and check out a branch that holds it");
+    let commit = format!("{at}^{{commit}}");
+    if crate::playbook::git(dir, &["rev-parse", "--verify", "--quiet", &commit]).is_err() {
+        crate::playbook::git(dir, &["fetch", "--quiet", "origin", at])
+            .with_context(|| format!("{at} is not here and could not be fetched from origin"))?;
     }
-    Ok(full)
+    Ok(
+        crate::playbook::git(dir, &["rev-parse", "--verify", &commit])?
+            .trim()
+            .to_string(),
+    )
 }
 
 /// A clean source revision keeps imported outcomes and extracted bodies comparable.
@@ -1073,9 +1092,7 @@ mod tests {
             (Method::Lane, false, 3)
         );
         assert!(
-            p.says.contains("not on GitHub")
-                && p.says
-                    .contains("each run capped at 20 minutes, setup included"),
+            p.says.contains("not on GitHub") && p.says.contains("capped at 20 minutes in all"),
             "{}",
             p.says
         );

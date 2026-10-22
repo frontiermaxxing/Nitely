@@ -674,6 +674,12 @@ pub fn console_command(command: &str) -> std::result::Result<String, String> {
             "`{command}` names a local path or share and runs only in a lane"
         ));
     }
+    readable_command(command)
+}
+
+/// `command` with what makes its console say each test's outcome and time, wherever it runs (a
+/// lane as well as CI), or why its console cannot.
+pub fn readable_command(command: &str) -> std::result::Result<String, String> {
     let words: Vec<&str> = command.split_whitespace().collect();
     let has = |w: &str| words.contains(&w);
     if words.first() == Some(&"cargo") && words.get(1) == Some(&"test") {
@@ -701,11 +707,15 @@ pub fn console_command(command: &str) -> std::result::Result<String, String> {
         return Ok(out);
     }
     if words.first() == Some(&"go") && words.get(1) == Some(&"test") {
-        return Ok(if has("-v") {
-            command.to_string()
-        } else {
-            format!("{command} -v")
-        });
+        // -count=1: a measurement runs the tests, never replays Go's cached results.
+        let mut out = command.to_string();
+        if !has("-v") {
+            out.push_str(" -v");
+        }
+        if !words.iter().any(|w| w.starts_with("-count")) {
+            out.push_str(" -count=1");
+        }
+        return Ok(out);
     }
     if words.first().is_some_and(|w| *w == "node") && has("--test")
         || matches!(words.as_slice(), ["npm", "test", ..] | ["npm", "run", ..])
@@ -1040,7 +1050,7 @@ mod tests {
         assert!(console_command("cargo test --manifest-path {worktree}/Cargo.toml").is_err());
         assert_eq!(
             console_command("go test ./...").as_deref(),
-            Ok("go test ./... -v")
+            Ok("go test ./... -v -count=1")
         );
         assert_eq!(
             console_command("cargo test --workspace").as_deref(),
