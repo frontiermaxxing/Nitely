@@ -388,9 +388,12 @@ pub fn select_small(repo: &Path, base: &str, head: &str, policy_commit: &str, fi
             bail!("{p} is a build, lock or policy file");
         }
         // What no test reaches: files no component owns and build inputs, then whatever the map
-        // says none of its tests reach, until it decides the rest (NIT-636 review).
+        // says none of its tests reach, until it decides the rest (NIT-636 review). A file a
+        // suite's inputs name, inside a component's roots or not, goes to the map, which decides
+        // what that suite runs (NIT-645).
+        let in_suite_inputs = |p: &str| policy.iter().flat_map(|pol| &pol.components).flat_map(|c| &c.suites).any(|s| s.inputs.iter().any(|i| under(p, i)));
         let mut untested: BTreeSet<String> = changed.iter()
-            .filter(|p| policy.as_ref().is_none_or(|pol| owner(pol, p).is_none()) || build_input(p).is_some())
+            .filter(|p| !in_suite_inputs(p) && (policy.as_ref().is_none_or(|pol| owner(pol, p).is_none()) || build_input(p).is_some()))
             .cloned().collect();
         let mut small = Selection { full: true, components: vec![], checks: vec![], reasons: vec![], ..selection.clone() };
         while changed.iter().any(|p| !untested.contains(p)) {
@@ -1336,6 +1339,22 @@ mod tests {
         assert_eq!(checks(&["src/App.tsx", "tools/x.py"]).unwrap(), ["nitely check-file \"tools/x.py\""], "a mapped file keeps its tests and adds nothing");
         assert!(checks(&["docs/diagram.svg"]).unwrap_err().contains("no check of its own"));
         assert!(checks(&["tools/Cargo.toml"]).unwrap_err().contains("build, lock or policy"));
+    }
+
+    /// NIT-645: a file outside every component's roots that a suite's inputs name is that suite's,
+    /// so a small change to it never runs only its own check.
+    #[test]
+    fn a_fixture_a_suite_maps_outside_every_root_is_never_checked_alone() {
+        const MAP: &str = "version = 1\n[[components]]\nid = 'web'\nroots = ['src/']\nchecks = ['npm run build']\n[[components.suites]]\nid = 'unit'\ninputs = ['src/', 'fixtures/data.json']\n[components.suites.javascript]\ncommand = 'npm test'\ntest_files = ['src/a.test.ts']\n";
+        let repo = crate::test_repo::copy("affected-small-fixture", |dir| {
+            init(dir, &[(POLICY_PATH, MAP), ("src/a.ts", "export const a = 1;"), ("src/a.test.ts", "import {a} from './a';"), ("fixtures/data.json", "{\"a\": 1}")]);
+        });
+        let base = g(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("fixtures/data.json"), "{\"a\": 2}").unwrap();
+        g(&repo, &["commit", "-qam", "fixture"]);
+        let s = select_small(&repo, &base, "HEAD", &base, &BTreeMap::new(), &[]).unwrap();
+        assert!(!s.checks.iter().any(|c| c.command.starts_with("nitely check-file")), "its suite decides, not a parse alone: {s:?}");
+        assert!(s.full || s.checks.iter().any(|c| c.command == "npm test"), "{s:?}");
     }
 
     /// NIT-636 review: a small change to an untested file inside a mapped component runs that
