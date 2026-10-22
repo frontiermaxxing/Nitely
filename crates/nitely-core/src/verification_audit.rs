@@ -346,7 +346,7 @@ mod tests {
         (db,c)
     }
     fn review(findings:bool)->Review {
-        Review{reviewer:"claude".into(),verdict:if findings {"changes"} else {"pass"}.into(),findings:if findings {vec![crate::review::Finding{priority:1,text:"Executable documentation changed".into(),carried:false,raised_as:None,now:None}]} else {vec![]},flagged:vec![],summary:"Full landed diff inspected".into(),seconds:1,previous:vec![],note:String::new(),batch:None,tokens:None,reused:None}
+        Review{reviewer:"claude".into(),verdict:if findings {"changes"} else {"pass"}.into(),findings:if findings {vec![crate::review::Finding{priority:1,text:"Executable documentation changed".into(),carried:false,raised_as:None,now:None}]} else {vec![]},flagged:vec![],summary:"Full landed diff inspected".into(),seconds:1,previous:vec![],note:String::new(),batch:None,tokens:None,reused:None,outside:vec![]}
     }
     fn land(db:&mut Db,c:&Candidate,n:u8)->i64 {landed(db,c,&"a".repeat(40),&format!("{n:040x}"),Some(100)).unwrap()}
 

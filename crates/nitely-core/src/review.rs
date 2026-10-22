@@ -229,6 +229,13 @@ pub struct Review {
     /// (NIT-185).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reused: Option<String>,
+    /// Defects the reviewer says are the base's own, there as they are and neither caused nor
+    /// worsened by this change (`- [BASE] ...`, or `PREVIOUS <n>: base` for a carried one; NIT-646):
+    /// after the base is merged into a branch, its code is context for the review, never the
+    /// change's problem. They count for nothing in the verdict, so nobody is asked to accept them;
+    /// they are listed so a real one can be filed against the base.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside: Vec<Finding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -247,6 +254,12 @@ impl Review {
 
 /// How severities are judged, word for word in a single and a batched review, so batching does not
 /// change what a P1 is.
+/// What is the change's to answer for and what is the base's (NIT-646): the reviewer, who can tell
+/// a defect the change causes from one it only sits beside, says which.
+const BASE_RULES: &str = "A defect that is already on the base as it is, which this change neither causes nor worsens, is not \
+this change's: report it as `- [BASE] title: file, symbol: what goes wrong` instead, with no priority, and it is listed to \
+fix on the base without holding this change.";
+
 const SEVERITIES: &str = "using P0 for data loss or security, P1 for a definite bug in normal use, P2 for an edge case, P3 for a minor issue. \
 A P0 or P1 must name a concrete failure: the inputs or state that lead to a wrong result, data loss, a leak or a crash, and the \
 file and line that cause it. A risk with no such failure (\"what if\", a missing guard nothing reaches) is P2 at most, however \
@@ -258,7 +271,9 @@ that code still causes the problem the finding describes. The code a finding cit
 may have replaced it: check the problem itself, not the old line or its wording. If it no longer happens, it is \
 fixed, even if code nearby could be better (raise that as a new defect if it is one). An open answer that quotes no \
 code at the line it cites, or does not say how that code still causes the problem, is not counted as open. Do not \
-list an open one again as a defect: it stays on record by itself.\n";
+list an open one again as a defect: it stays on record by itself. If it is the base's own, already there as it is and \
+neither caused nor worsened by this change, answer `PREVIOUS <n>: base`: it is then listed to fix on the base and holds \
+nothing here.\n";
 
 /// What the person accepted, before the list (NIT-191).
 const ACCEPTED_INTRO: &str = "The person who owns this change accepted these findings as they are: a trade-off they decided, not a \
@@ -469,6 +484,23 @@ regressions. Skip style. Do not edit anything.\n",
         p
     }
 
+    /// The prompt for a branch reviewed before at `prev.commit` that has had `base` merged into it
+    /// since (NIT-646): `git diff <commit> HEAD` would show everything the merge brought from the
+    /// base as if the author wrote it, so the reviewer compares the change as reviewed with the
+    /// change now, both against the base.
+    pub fn prompt_after_merge(&self, base: &str, prev: &PreviousRound) -> String {
+        let mut p = format!(
+            "This branch was reviewed before, at commit {c}, and {base} has been merged into it since. Run `git diff \
+{base}...HEAD` for the whole change: only its lines are this change's. Code the merge brought from {base} is context, \
+not this change: raise nothing about it. To see what the author changed since that review, compare that diff with \
+`git diff {base}...{c}`, the change as it was reviewed. Read the changed code and its callers, and look for correctness \
+bugs and regressions. Skip style. Do not edit anything.\n",
+            c = prev.commit
+        );
+        p.push_str(&self.prompt_rest(Some(prev)));
+        p
+    }
+
     /// The review prompt for small changes that already landed through the quick path (NIT-625):
     /// `changes` says which, and how to see each; the rest is as `prompt` asks.
     pub(crate) fn landed_prompt(&self, changes: &str) -> String {
@@ -515,7 +547,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
         }
-        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] title: file, symbol: what goes wrong and when\n{SEVERITIES}\n\n"));
+        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] title: file, symbol: what goes wrong and when\n{SEVERITIES}\n{BASE_RULES}\n\n"));
         p.push_str(&format!("Then end your reply with exactly these {} lines:\nVERDICT: <findings or clean>\n", 1 + self.flags.len()));
         for f in &self.flags {
             p.push_str(&format!("{}: <yes or no>\n", f.name));
@@ -563,6 +595,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             }
         }
         let mut findings = parse_findings(text);
+        let mut base_findings = parse_base_findings(text);
         let code = worktree.map(CurrentCode::new);
         // A P0 or P1 that points at no file names no concrete failure: it counts as P2, and keeps
         // the priority it was raised at, which a later round can restore by citing the code (NIT-282).
@@ -582,7 +615,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
                         // Open needs the reviewer's own pointer at current code, and its reason (NIT-214);
                         // unchecked, the finding's own citation.
                         let confirmed = match (&code, status.as_str()) {
-                            (_, "fixed") => true,
+                            (_, "fixed" | "base") => true,
                             (Some(code), "open") => code.confirms_open(&said),
                             (Some(code), _) => code.confirms(&f.text),
                             (None, _) => true,
@@ -596,10 +629,14 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
                     .collect()
             })
             .unwrap_or_default();
-        if verdict == "findings" && findings.is_empty() && !previous.iter().any(|r| r.status == "open") {
+        if verdict == "findings" && findings.is_empty() && base_findings.is_empty() && !previous.iter().any(|r| r.status == "open") {
             bail!("the {reviewer} review says it has findings but lists none as `- [Pn] ...`:\n{}", tail_lines(text));
         }
-        for r in previous.iter().filter(|r| r.status != "fixed") {
+        // A carried finding the reviewer calls the base's own goes with the base's (NIT-646).
+        for r in previous.iter().filter(|r| r.status == "base") {
+            base_findings.push(Finding { priority: r.priority, text: r.text.clone(), carried: true, raised_as: None, now: None });
+        }
+        for r in previous.iter().filter(|r| r.status != "fixed" && r.status != "base") {
             let finding = if r.status == "unconfirmed" {
                 let priority = r.priority.max(2);
                 Finding { priority, text: format!("{}{UNCONFIRMED}", r.text), carried: true, raised_as: (priority != r.priority).then_some(r.priority), now: None }
@@ -621,7 +658,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None, outside: base_findings })
     }
 
     /// The instructions for several changes reviewed in one call (docs/batching.md): one section
@@ -643,6 +680,14 @@ Do not edit anything.\n",
             p.push_str(&format!("\n## CHANGE {k}: {} \"{}\"\nbranch {}, base {}, head {}\n", c.key, c.title, c.branch, c.base, c.head));
             p.push_str(&format!("Run `git diff {}...{}` for the change.\n", c.base, c.head));
             match &c.previous {
+                Some(prev) if prev.in_history && base_merged_since(&c.worktree, &c.base, &prev.commit, &c.head) => p.push_str(&format!(
+                    "It was reviewed before, at commit {c0}, and {b} has been merged into it since: code the merge brought from {b} \
+is context, not this change, so raise nothing about it. Compare the diff above with `git diff {b}...{c0}`, the change as \
+it was reviewed, to see what changed since. The rest was already reviewed: raise something new there only if it is P0 or \
+P1, and then say in the finding why that review missed it.\n",
+                    c0 = prev.commit,
+                    b = c.base
+                )),
                 Some(prev) if prev.in_history => p.push_str(&format!(
                     "It was reviewed before, at commit {c0}: `git diff {c0} {h}` is what changed since. The rest was already \
 reviewed: raise something new there only if it is P0 or P1, and then say in the finding why that review missed it.\n",
@@ -675,7 +720,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
         }
-        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] CHANGE <k>: title: file, symbol: what goes wrong and when\n{SEVERITIES}\n\n"));
+        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] CHANGE <k>: title: file, symbol: what goes wrong and when\n{SEVERITIES}\n{BASE_RULES} In a batch, `- [BASE] CHANGE <k>: ...`.\n\n"));
         p.push_str("Then end your reply with these lines for each change, change 1's first:\nVERDICT <k>: <findings or clean>\n");
         for f in &self.flags {
             p.push_str(&format!("{} <k>: <yes or no>\n", f.name));
@@ -703,13 +748,16 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         for line in text.lines() {
             let l = line.replace("**", "");
             let t = l.trim().trim_start_matches('`');
-            if let Some(rest) = t.strip_prefix("- [P").or_else(|| t.strip_prefix("* [P")) {
+            let base_line = t.strip_prefix("- [BASE]").or_else(|| t.strip_prefix("* [BASE]")).map(|rest| ("BASE", rest));
+            if let Some(rest) = base_line.map(|(_, r)| format!("BASE]{r}")).or_else(|| t.strip_prefix("- [P").or_else(|| t.strip_prefix("* [P")).map(str::to_string)) {
+                let tag = if base_line.is_some() { "BASE" } else { "P" };
                 let Some((priority, body)) = rest.split_once(']') else { continue };
+                let priority = if tag == "BASE" { String::new() } else { priority.to_string() };
                 let body = body.trim();
                 match body.get(..7).filter(|w| w.eq_ignore_ascii_case("change ")).and_then(|_| body[7..].split_once(|c: char| !c.is_ascii_digit() && c != '#')) {
                     Some((k, said)) if index(k).is_some() => {
                         let said = said.trim_start_matches([':', ' ', '-', '\u{2013}', '\u{2014}']);
-                        parts[index(k).unwrap()].push(format!("- [P{priority}] {said}"));
+                        parts[index(k).unwrap()].push(format!("- [{tag}{priority}] {said}"));
                     }
                     _ => stray.push(body.to_string()),
                 }
@@ -785,7 +833,11 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         self.run_checked(reviewer,worktree,base,previous,&mut ||self.require_enabled())
     }
     pub(crate) fn run_checked(&self,reviewer:&str,worktree:&Path,base:&str,previous:Option<&PreviousRound>,check:&mut dyn FnMut()->Result<()>)->Result<Review> {
-        let reply = self.run_prompt_checked(reviewer, worktree, &with_submodule_code(self.prompt(base, previous), worktree, base),check)?;
+        let prompt = match previous {
+            Some(prev) if prev.in_history && base_merged_since(worktree, base, &prev.commit, "HEAD") => self.prompt_after_merge(base, prev),
+            _ => self.prompt(base, previous),
+        };
+        let reply = self.run_prompt_checked(reviewer, worktree, &with_submodule_code(prompt, worktree, base),check)?;
         let mut review =
             self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })?;
         review.tokens = reply.tokens;
@@ -1071,6 +1123,16 @@ fn names_a_file(text: &str, code: Option<&CurrentCode>) -> bool {
     !word.is_empty() && code.resolve(word).is_some()
 }
 
+/// Whether `base` came into the branch between `commit` and `head`: their merge bases with it
+/// differ, as after `git merge main` into the branch (NIT-646). False when git cannot tell.
+pub(crate) fn base_merged_since(worktree: &Path, base: &str, commit: &str, head: &str) -> bool {
+    let merge_base = |c: &str| crate::playbook::git(worktree, &["merge-base", base, c]).ok().map(|o| o.trim().to_string());
+    match (merge_base(commit), merge_base(head)) {
+        (Some(then), Some(now)) => then != now,
+        _ => false,
+    }
+}
+
 /// `path/to/file.rs:120` and `file.rs` mentions in a text, with their line when given.
 pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
     let mut out = Vec::new();
@@ -1112,7 +1174,7 @@ fn parse_previous(text: &str) -> BTreeMap<usize, (String, String)> {
         let Ok(n) = n.trim().trim_start_matches('#').parse::<usize>() else { continue };
         let status = status.trim().trim_start_matches('`');
         let word: String = status.chars().take_while(|c| c.is_ascii_alphabetic()).collect::<String>().to_lowercase();
-        if matches!(word.as_str(), "fixed" | "open") {
+        if matches!(word.as_str(), "fixed" | "open" | "base") {
             out.insert(n, (word.clone(), status[word.len()..].to_string()));
         }
     }
@@ -1131,6 +1193,21 @@ pub fn parse_findings(text: &str) -> Vec<Finding> {
         let text = chars.as_str().trim().to_string();
         if !text.is_empty() && !out.iter().any(|f| f.text == text) {
             out.push(Finding { priority: priority as u8, text, carried: false, raised_as: None, now: None });
+        }
+    }
+    out
+}
+
+/// The `- [BASE] ...` lines: defects the reviewer says are the base's own, not this change's
+/// (NIT-646). They hold nothing; P2 marks them as not blocking wherever they are shown.
+pub fn parse_base_findings(text: &str) -> Vec<Finding> {
+    let mut out: Vec<Finding> = Vec::new();
+    for line in text.lines() {
+        let l = line.trim_start();
+        let Some(rest) = l.strip_prefix("- [BASE]").or_else(|| l.strip_prefix("* [BASE]")) else { continue };
+        let text = rest.trim().to_string();
+        if !text.is_empty() && !out.iter().any(|f| f.text == text) {
+            out.push(Finding { priority: 2, text, carried: false, raised_as: None, now: None });
         }
     }
     out
@@ -1447,6 +1524,66 @@ mod tests {
         assert_eq!(code.resolve(&format!("{}/Common Files", name(&short))), tracked, "relative, short folder");
         assert_eq!(code.resolve(&format!(r"{short}\Common Files")), tracked, "absolute, short folder");
         assert_eq!(code.resolve(&format!("{}/Other Files", name(&short))), None, "a file that is not tracked");
+    }
+
+    /// NIT-646: main merged into a branch after its review brings main's code along. That code is
+    /// context, so the next round compares the change with itself instead of reading the merge,
+    /// and a defect the reviewer says is main's own neither holds the land nor reaches the person.
+    #[test]
+    fn after_main_is_merged_in_a_finding_on_mains_own_code_is_set_aside() {
+        let dir = crate::paths::unique_temp("nitely-review-outside", "");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let git = |args: &[&str]| {
+            let out = crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&dir).args(args)).unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let write = |path: &str, body: String| std::fs::write(dir.join(path), body).unwrap();
+        let lines = |n: usize, what: &str| (1..=n).map(|i| format!("{what} {i}\n")).collect::<String>();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        write("src/goal.rs", lines(20, "goal"));
+        write("src/quick.rs", lines(20, "quick"));
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "goal"]);
+        // The change: line 10 of goal.rs.
+        write("src/goal.rs", lines(20, "goal").replace("goal 10\n", "goal ten, changed\n"));
+        git(&["commit", "-qam", "the change"]);
+        let reviewed = git(&["rev-parse", "HEAD"]);
+        // Main moves on in another file, and in goal.rs far from the change, and comes in by a merge.
+        git(&["checkout", "-q", "main"]);
+        write("src/quick.rs", lines(20, "quick").replace("quick 5\n", "quick five, from main\n").replace("quick 6\n", "quick six, from main\n"));
+        write("src/goal.rs", lines(20, "goal").replace("goal 19\n", "goal nineteen, from main\n"));
+        git(&["commit", "-qam", "main moves on"]);
+        git(&["checkout", "-q", "goal"]);
+        git(&["merge", "-q", "--no-edit", "main"]);
+
+        assert!(base_merged_since(&dir, "main", &reviewed, "HEAD"), "main came in since that review");
+        assert!(!base_merged_since(&dir, "main", "HEAD", "HEAD"));
+        let prev = PreviousRound { passed_on: None, commit: reviewed.clone(), findings: vec![], in_history: true, accepted: vec![] };
+        let prompt = rules().prompt_after_merge("main", &prev);
+        assert!(prompt.contains("git diff main...HEAD") && prompt.contains(&format!("git diff main...{reviewed}")), "{prompt}");
+        assert!(!prompt.contains(&format!("git diff {reviewed} HEAD")), "never the diff that holds the merge: {prompt}");
+
+        let texts = |fs: &[Finding]| fs.iter().map(|f| f.text.split(':').next().unwrap().to_string()).collect::<Vec<_>>();
+        // The reviewer can say a defect is the base's own, whenever it came in: it holds nothing.
+        let r = rules().parse("codex", "- [BASE] Old overflow: src/quick.rs:2, parse\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
+        assert_eq!((r.verdict.as_str(), r.findings.len(), texts(&r.outside)), ("pass", 0, vec!["Old overflow".to_string()]));
+
+        // A carried finding the reviewer confirms open still holds the change.
+        let carried = PreviousRound {
+            findings: vec![Finding { priority: 1, text: "Quick start loses the flag: src/quick.rs:5, start".into(), carried: false, raised_as: None, now: None }],
+            ..prev.clone()
+        };
+        let review = rules().parse("codex", "PREVIOUS 1: open src/quick.rs:5 `quick five, from main` still drops it\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
+        assert_eq!((review.findings.len(), review.outside.len(), review.verdict.as_str()), (1, 0, "changes"));
+        // Unless the reviewer says it is the base's own: then it holds nothing.
+        let review = rules().parse("codex", "PREVIOUS 1: base\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
+        assert_eq!((review.findings.len(), review.outside.len(), review.verdict.as_str()), (0, 1, "pass"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -1788,6 +1925,10 @@ VERDICT 1: findings\nMONEY_OR_RELEASE 1: no\nVERDICT 2: findings\nMONEY_OR_RELEA
         assert!(only_two.reviews[0].is_ok() && only_two.reviews[1].as_ref().unwrap_err().contains("without saying which change"), "{only_two:?}");
         let both = stray("- [P1] CHANGE 7: Leak: nowhere");
         assert!(both.reviews.iter().all(|r| r.is_err()), "{both:?}");
+        // A defect the reviewer says is the base's own goes to its change, and holds nothing (NIT-646).
+        let base = stray("- [BASE] CHANGE 2: Old leak: other.rs:4, keeps the token");
+        let two = base.reviews[1].as_ref().unwrap();
+        assert_eq!((two.verdict.as_str(), two.findings.len(), two.outside.len()), ("pass", 0, 1), "{base:?}");
         let no_verdict = rules.parse_batch("codex", "VERDICT 1: clean\nMONEY_OR_RELEASE 1: no\n", 1, &changes);
         assert!(no_verdict.reviews[0].is_ok() && no_verdict.reviews[1].as_ref().unwrap_err().contains("no VERDICT"), "{no_verdict:?}");
         // Its part unfinished (a flag unanswered) is the same.

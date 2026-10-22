@@ -100,7 +100,8 @@ pub struct Failure {
 /// as its command.
 pub fn failed_of(results: &[CommandResult]) -> Vec<Failed> {
     let mut out: Vec<Failed> = Vec::new();
-    for r in results.iter().filter(|r| !r.ok && !r.skipped) {
+    // A step that did not run to an answer (a timeout, a CI job that failed in setup) names no test.
+    for r in results.iter().filter(|r| !r.ok && !r.skipped && !r.timed_out) {
         let tests = crate::playbook::failed_tests(&r.output);
         let names = if tests.is_empty() { vec![r.step_id().to_string()] } else { tests };
         for n in names {

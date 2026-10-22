@@ -1437,8 +1437,9 @@ pub struct CommandResult {
     pub output: String,
     #[serde(default)]
     pub skipped: bool,
-    /// It ran past the lane's time limit and was stopped (NIT-310): that says nothing about the
-    /// change, so the gate is not passed, but nobody is told to fix the code.
+    /// It did not run to an answer (NIT-310): it ran past the lane's time limit and was stopped, or
+    /// its CI job failed in a setup step before the command started (NIT-641). That says nothing
+    /// about the change, so the gate is not passed, but nobody is told to fix the code.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub timed_out: bool,
     /// The gate step as the playbook writes it, before `{jobs}` or `{worktree}` are filled in: what
@@ -1447,7 +1448,25 @@ pub struct CommandResult {
     pub step: Option<String>,
 }
 
+/// Whether a gate's steps came to no answer: one did not finish (a timeout, CI failing in setup)
+/// and none failed on its own, which would be the change's however the rest went (NIT-641).
+pub fn stalled(results: &[CommandResult]) -> bool {
+    results.iter().any(|r| r.timed_out) && !results.iter().any(|r| !r.ok && !r.skipped && !r.timed_out)
+}
+
+/// How the output of a command whose CI job failed before it ran begins (NIT-641).
+pub const CI_SETUP_FAILED: &str = "CI setup failed in";
+
 impl CommandResult {
+    /// Why it did not run to an answer, as a clause: `CI setup failed in "Linux prerequisites"
+    /// before `npm test` ran`, or `` `npm test` ran past the lane's time limit and was stopped ``.
+    pub fn stopped(&self) -> String {
+        match self.output.lines().next().filter(|l| l.starts_with(CI_SETUP_FAILED)) {
+            Some(line) => line.trim_end_matches('.').to_string(),
+            None => format!("`{}` ran past the lane's time limit and was stopped", self.command),
+        }
+    }
+
     /// The step's identity: its playbook template, else (an older record) the command itself.
     pub fn step_id(&self) -> &str {
         self.step.as_deref().unwrap_or(&self.command)
@@ -1455,8 +1474,13 @@ impl CommandResult {
 }
 
 impl GateResult {
-    /// The step that stopped the gate when it ran past the lane's time limit, rather than failed.
+    /// The step that kept the gate from an answer (it ran past the lane's time limit, or its CI job
+    /// failed in setup), when no other step failed on its own: a real failure beside it is still
+    /// the change's (NIT-641).
     pub fn timed_out(&self) -> Option<&CommandResult> {
+        if !stalled(&self.results) {
+            return None;
+        }
         self.results.iter().find(|r| r.timed_out)
     }
 }
