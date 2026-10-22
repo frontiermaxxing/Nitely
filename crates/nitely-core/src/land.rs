@@ -87,6 +87,26 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     let root = playbook::repo_for_issue(config, issue.project.as_deref(), opts.dir)?;
     let mut pb = Playbook::load(&root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
+    // A land asked again after the change landed (a retry loop, a late `--after` job) ends here,
+    // recording nothing: it is no send-back (NIT-577).
+    if issue.state == "Done" {
+        let target = match db.goal_branch_of_issue(&issue.key)? {
+            Some(gb) => gb.branch,
+            None => pb.integration_branch().to_string(),
+        };
+        // Only a branch that is gone counts as nothing beyond; several that name it, or a git that
+        // cannot compare, is said, never taken for landed (NIT-580 review).
+        let ahead = match branch_of(&root, &issue.key) {
+            Ok((b, _)) => Some(git(&root, &["rev-list", "--count", &format!("{target}..{b}")])?.trim() != "0"),
+            Err(e) if branch_gone(&format!("{e:#}")) => None,
+            Err(e) => return Err(e.context(format!("{} is Done; land cannot tell whether its branch holds anything new", issue.key))),
+        };
+        let event = db.timeline(&issue.key)?.into_iter().rev().find(|e| e.kind == "landed").and_then(|e| e.summary);
+        if let Some(said) = already_landed(true, ahead, event.as_deref()) {
+            let head = event.as_deref().and_then(|s| s.rsplit_once(" at ")).map(|(_, h)| h.trim().to_string()).filter(|h| h != "?");
+            return Ok(Landed { issue: issue.key.clone(), base: target, landed: true, head, warnings: vec![said], ..Default::default() });
+        }
+    }
     // This land is the issue's land now: a `land --after` job still waiting for it ends (NIT-513).
     // A job's own land runs with its row `landing`, so it is not one of them.
     crate::land_job::end_waiting(db, &issue.key, "landed directly instead")?;
@@ -213,7 +233,26 @@ fn reviewed_first(db: &mut Db, root: &Path, key: &str, actor: &Actor) -> Result<
 fn land_into_goal(db: &mut Db, root: &Path, issue: &IssueRecord, opts: &LandOptions, actor: &Actor, gb: crate::goal_branch::GoalBranch) -> Result<Landed> {
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(issue.key.clone()), ..Default::default() });
     let mut report = Landed { issue: issue.key.clone(), base: gb.branch.clone(), goal_branch: Some(gb.branch.clone()), ..Default::default() };
-    let lock = Lock::take(&crate::goal_branch::lock_path(root, gb.goal)?, &issue.key, opts.break_lock)?;
+    // A checkpoint's main merge or another item's land holds the goal branch for minutes: the item
+    // waits its turn instead of failing its submit (NIT-578). A lock whose land is gone is taken over.
+    let path = crate::goal_branch::lock_path(root, gb.goal)?;
+    let began = std::time::Instant::now();
+    let mut said = false;
+    let lock = loop {
+        if let Some(lock) = Lock::try_take(&path, &issue.key, opts.break_lock)? {
+            break lock;
+        }
+        if !goal_lock_wait(began.elapsed()) {
+            // Long enough: the take says who holds it.
+            break Lock::take(&path, &issue.key, opts.break_lock)?;
+        }
+        if !said {
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            db.log_event(actor, Some(&issue.key), None, "status", &format!("Waiting for {} to be free: {}", gb.branch, holder.trim()))?;
+            said = true;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    };
     if let Some(before) = &lock.took_over {
         report.warnings.push(format!("took over the lock of {} that {before} left", gb.branch));
     }
@@ -787,6 +826,15 @@ pub(crate) fn in_background(exe: Option<&str>, inline: bool) -> bool {
     !inline && exe == Some("nitely")
 }
 
+/// How long an item's land waits for its goal branch's lock before it gives up and says who holds
+/// it (NIT-578): a few item lands and a checkpoint's main merge, each a few minutes.
+const GOAL_LOCK_WAIT_AT_MOST: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Whether an item's land, its goal branch's lock held by a live land for `waited`, waits on.
+pub(crate) fn goal_lock_wait(waited: std::time::Duration) -> bool {
+    waited < GOAL_LOCK_WAIT_AT_MOST
+}
+
 /// What the background after-land run does next (NIT-560): wait while another land holds the lock
 /// or changes wait in the land queue, so the lands of a burst build once at the newest commit, but
 /// never longer than `QUIET_AT_MOST`; then run.
@@ -1190,12 +1238,33 @@ fn clean_up_landed(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOp
     Ok(())
 }
 
+/// What a land of an issue that may have landed already says instead of landing, if anything. A
+/// Done issue whose branch has nothing beyond its target (or is gone, `ahead` None) has landed;
+/// one with new commits on its branch lands them. `event` is its last landed event, to say where.
+fn already_landed(done: bool, ahead: Option<bool>, event: Option<&str>) -> Option<String> {
+    if !done || ahead == Some(true) {
+        return None;
+    }
+    Some(match event {
+        Some(e) => format!("already landed: {e}; nothing to do"),
+        None => "already Done, with nothing on its branch to land; nothing to do".to_string(),
+    })
+}
+
 /// An item's land into its goal branch: no review and no human approval (both come at the
 /// checkpoint into main), but a blocked path is still refused.
 fn check_item(pb: &Playbook, worktree: &Path, base: &str, gb: &crate::goal_branch::GoalBranch) -> Result<String> {
     let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...HEAD")])?.lines().map(str::to_string).collect();
     pb.approval.check_blocked(&files)?;
     Ok(format!("an item of goal {}: it is reviewed, and approved where a person must, with the goal's checkpoint into {}", gb.goal, pb.integration_branch()))
+}
+
+/// How `branch_of` says no branch names the issue: the one error that means it is gone.
+const NO_BRANCH: &str = "no local branch names";
+
+/// Whether a `branch_of` error says the branch is gone, not that it is ambiguous or unreadable.
+fn branch_gone(err: &str) -> bool {
+    err.starts_with(NO_BRANCH)
 }
 
 /// The issue's branch, and the worktree it is checked out in: the one the issue's worktree has,
@@ -1209,7 +1278,7 @@ pub(crate) fn branch_of(root: &Path, key: &str) -> Result<(String, Option<PathBu
             let branches: Vec<String> = git(root, &["branch", "--format=%(refname:short)"])?.lines().filter(|b| named(b)).map(str::to_string).collect();
             match branches.as_slice() {
                 [one] => one.clone(),
-                [] => bail!("no local branch names {key}"),
+                [] => bail!("{NO_BRANCH} {key}"),
                 many => bail!("several branches name {key}: {}", many.join(", ")),
             }
         }
@@ -1631,6 +1700,21 @@ pub(crate) fn first_line(e: &anyhow::Error) -> String {
 mod tests {
     use super::*;
 
+    /// A land asked again once its issue is Done ends as already landed, never a send-back; new
+    /// commits on a Done issue's branch still land (NIT-577).
+    #[test]
+    fn a_landed_issue_lands_again_as_already_landed() {
+        let event = Some("Landed claude/app-7-x on main at 1a2b3c4");
+        assert_eq!(already_landed(true, Some(false), event).as_deref(), Some("already landed: Landed claude/app-7-x on main at 1a2b3c4; nothing to do"));
+        assert!(already_landed(true, None, None).is_some(), "a cleaned-up branch is landed too");
+        assert_eq!(already_landed(true, Some(true), event), None, "new commits land");
+        assert_eq!(already_landed(false, Some(false), event), None, "not Done: the land decides");
+        // Only a missing branch is gone; several naming the issue is an error to say (NIT-580 review).
+        assert!(branch_gone("no local branch names APP-7"));
+        assert!(!branch_gone("several branches name APP-7: claude/app-7-a, codex/app-7-b"));
+        assert!(!branch_gone("several worktrees have a branch that names APP-7"));
+    }
+
     /// NIT-582: a background submit job starts in the task's worktree and lands it from there, and
     /// Windows refused to delete the folder it stood in. It steps out to the main checkout first.
     #[test]
@@ -1692,6 +1776,9 @@ mod tests {
         assert!(!in_background(Some("nitely-app"), false) && !in_background(None, false), "the app has no land-after command");
         assert_eq!(after_next(false, false, Duration::ZERO), AfterNext::Run, "quiet: build now");
         assert_eq!(after_next(true, false, Duration::from_secs(30)), AfterNext::Wait, "another land holds the lock");
+        // NIT-578: an item waits for its goal branch's lock, for a bound.
+        assert!(goal_lock_wait(Duration::from_secs(5)), "a main merge holds it for seconds");
+        assert!(!goal_lock_wait(GOAL_LOCK_WAIT_AT_MOST), "then it gives up and says who holds it");
         assert_eq!(after_next(false, true, Duration::from_secs(30)), AfterNext::Wait, "changes wait in the queue");
         assert_eq!(after_next(true, true, QUIET_AT_MOST), AfterNext::Run, "never waits for ever");
     }

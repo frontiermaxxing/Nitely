@@ -2125,10 +2125,13 @@ impl Db {
                 None => None,
             };
             let state: Option<String> = tx.query_row("SELECT state FROM issue WHERE key = ?1", [k], |r| r.get(0)).optional()?;
-            // Any other question on it still open keeps it waiting, whoever asked it.
-            let still_asking: i64 =
-                tx.query_row("SELECT COUNT(*) FROM ask WHERE issue_key = ?1 AND answer IS NULL AND closed IS NULL", [k], |r| r.get(0))?;
-            if let Some(asker) = moved.filter(|_| state.as_deref() == Some(NEEDS_HUMAN) && still_asking == 0) {
+            // Any other question on it still open keeps it waiting, whoever asked it; one about a
+            // review finding holds only the land (`keeps_waiting`).
+            let open: Vec<bool> = tx
+                .prepare("SELECT finding IS NOT NULL FROM ask WHERE issue_key = ?1 AND answer IS NULL AND closed IS NULL")?
+                .query_map([k], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            if let Some(asker) = moved.filter(|_| state.as_deref() == Some(NEEDS_HUMAN) && !keeps_waiting(&open)) {
                 let seen: Option<(String, i64)> =
                     tx.query_row("SELECT state, last_seen_at FROM session WHERE id = ?1", [&asker], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
                 // An asker with no live session record (gone, or one that cannot be told: the CLI,
@@ -2261,8 +2264,23 @@ fn ask_from_row(r: &Row) -> rusqlite::Result<Ask> {
     })
 }
 
+/// Whether an issue's open questions keep it waiting for the person, given for each whether it is
+/// a request to accept a review finding: any other question does. A finding's question holds only
+/// the land, never the agent (NIT-568, NIT-574).
+pub(crate) fn keeps_waiting(open_is_finding: &[bool]) -> bool {
+    open_is_finding.iter().any(|finding| !finding)
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// NIT-574: an open finding question does not keep an answered issue waiting.
+    #[test]
+    fn only_a_question_that_is_not_about_a_finding_keeps_the_issue_waiting() {
+        assert!(!keeps_waiting(&[]), "nothing else open");
+        assert!(!keeps_waiting(&[true, true]), "finding questions hold the land, not the agent");
+        assert!(keeps_waiting(&[true, false]), "another ordinary question still waits");
+    }
     use super::*;
 
     /// next_task's order (NIT-547): an issue answered while its agent was gone goes first, whatever
