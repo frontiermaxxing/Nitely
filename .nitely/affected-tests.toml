@@ -6,7 +6,9 @@ version = 1
 # The frontend and the repo's scripts: `npm test` runs every src/ test and scripts/*.test.mjs, and
 # `npm run build` type-checks and bundles. Whole-suite mapping (inputs), since vite and tsconfig
 # resolve imports in ways the static graph does not claim. No Rust code reads these paths. Its
-# tests are found by pattern (NIT-505), so a new test file there needs no edit here.
+# tests are found by pattern (NIT-505), so a new test file there needs no edit here. Two of the
+# core's files are inputs too: src/ui/lifecycle.test.ts reads track_cases.json, which track.rs
+# also runs, and scripts/test-sweep.test.mjs imports the sweep's node test (NIT-583 review).
 [[components]]
 id = "web"
 roots = ["src/", "scripts/", "public/", "vite.config.ts", "index.html", "phone.html"]
@@ -14,7 +16,7 @@ checks = ["npm run build"]
 
 [[components.suites]]
 id = "npm-test"
-inputs = ["src/", "scripts/", "public/", "vite.config.ts", "index.html", "phone.html"]
+inputs = ["src/", "scripts/", "public/", "vite.config.ts", "index.html", "phone.html", "crates/nitely-core/src/track_cases.json", "crates/nitely-core/src/test_sweep.cjs", "crates/nitely-core/src/test_sweep.test.cjs"]
 [components.suites.javascript]
 command = "npm test"
 test_patterns = ["scripts/*.test.mjs", "src/**/*.test.ts"]
@@ -171,6 +173,15 @@ manifest = "crates/nitely-cli/Cargo.toml"
 package = "nitely-cli"
 target_kind = "test"
 target = "preview"
+
+[[components.suites]]
+id = "updates_hook"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "updates_hook"
 
 # The desktop app, a leaf crate. tauri-build reads the configs, capabilities, icons and Windows
 # installer hooks, so a change to any of them keeps the full gate. It embeds the built frontend,

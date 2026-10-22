@@ -1476,6 +1476,7 @@ test_ids = ["adds"]
             let crate_changes: Vec<Snapshot> = ["crates/nitely-cli/src/ui.rs", "src-tauri/src/notify.rs", "crates/nitely-crew/src/waits.rs"].iter().map(|p| make(&[(p, None)])).collect();
             let builds: Vec<Snapshot> = build.iter().map(|p| make(&[(p, None)])).collect();
             let core = make(&[(rust, None)]);
+            let cases_change = make(&[("crates/nitely-core/src/track_cases.json", None)]);
             // Anything the map cannot prove keeps the full gate: a migration or the core's build
             // script (what its build script reads), the map itself, a manifest, a file no
             // component owns, a test outside every mapped root, and one inside the frontend that no
@@ -1525,6 +1526,18 @@ test_ids = ["adds"]
                 assert!(s.checks.iter().any(|c| c.command == format!("cargo clippy -p {package} -- -D warnings")), "{package}: {:?}", s.checks);
             }
             assert!(s.checks.iter().any(|c| c.command.starts_with("cargo test --manifest-path crates/nitely-core/Cargo.toml -p nitely-core --lib")), "{:?}", s.checks);
+            // A core file a frontend test reads runs that test too (NIT-583 review).
+            let cases = reduced(&base, &cases_change, &m);
+            assert!(cases.components.contains(&"web".to_string()) && cases.checks.iter().any(|c| c.command == "npm test"), "{:?}", cases.checks);
+            // Every integration test of a mapped crate is in its inventory: a dependency-only
+            // selection runs only listed suites, so one left out would never run (NIT-583 review).
+            let map = m.text(&base[POLICY_PATH].oid).unwrap();
+            for root in ["crates/nitely-core/", "crates/nitely-crew/", "crates/nitely-cli/", "src-tauri/", "server/leaderboard/"] {
+                for path in base.keys().filter(|p| p.starts_with(&format!("{root}tests/")) && p.matches('/').count() == root.matches('/').count() + 1) {
+                    let name = path.rsplit('/').next().unwrap().trim_end_matches(".rs");
+                    assert!(map.contains(&format!("target = \"{name}\"")), "{path} has no suite in {POLICY_PATH}");
+                }
+            }
             for (path, after) in build.iter().zip(&builds) {
                 assert!(decided(&base, after, &m).full, "{path}");
             }
