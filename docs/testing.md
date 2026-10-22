@@ -53,6 +53,34 @@ check per period, which respects Crew's start and pause limits and is not filed 
 is open. No schedule approves a proposal.
 
 
+## The optimizer on Nitely itself (NIT-559)
+
+The first run of the method, on Nitely, 2026-10-22: a baseline before any outside repo. `measure`
+found no CI logs at the goal branch's head and read the 5 CI logs of `eae9d0e`, the newest main
+commit CI had tested. `collect` turned them into 2,927 observations, inventoried 958 test bodies,
+and found 11 collector leads.
+
+`map` flagged 88 tests: 78 only for "waits on time or load", 8 for UI text or presence, and 5 as
+slow. Read against the code, most of the waits and UI leads were the classifier's, not the tests':
+
+- The waits hint counted `Duration::from_secs`, `from_millis` and the word `timeout`. Those are
+  values passed to a function, and goal 20's pure tests pass them on purpose. The hint now counts
+  only calls that block or poll (`sleep`, `setTimeout`, `wait_for`, `recv_timeout`, ...). On the
+  same tree, 38 tests carry it instead of 78. The 38 sleep, poll or block for real: installs over a
+  running binary, lock and lane timeouts, a TLS deadline, the MCP server's call caps.
+- The UI hint counted the bare word `html`, which named files and JSON fields. It now counts `x in
+  html`, a page's text asserted as such. 2 tests carry it instead of 11.
+- The 2 left are fixtures: tests written inside string literals in the collector's own test file,
+  which the inventory reads as tests ([NIT-594](http://127.0.0.1:7423/i/NIT-594)).
+
+The 5 slow tests are the real-window scenarios in CI, which are named and kept.
+
+One real gap: CI's evidence carried no Rust test times. The push `gate` job runs `cargo test`
+without the runner that adds `--report-time`; only the dispatched `suite` job has it. So no slow
+Rust test could be flagged, and a proposal from this evidence would be blind to them
+([NIT-593](http://127.0.0.1:7423/i/NIT-593)). No goal was proposed from this run. Run it again once
+NIT-593 has landed, then classify what it flags and propose.
+
 ## First Nitely sweep: retain contracts, reduce setup
 
 The first approved cleanup, [NIT-401](http://127.0.0.1:7423/i/NIT-401), follows

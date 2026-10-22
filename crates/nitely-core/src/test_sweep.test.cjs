@@ -68,6 +68,10 @@ test('test bodies in each language carry hints of waits, UI presence and real I/
   const js = bodies("test('shows the board', () => { expect(screen.getByText('Board')).toBeInTheDocument(); });", '.tsx');
   assert.deepEqual(js.map(t => [t.name, t.hints]), [['shows the board', { ui: 2 }]]);
   assert.deepEqual(hints('assert_eq!(decide(&a, &b), Verdict::Land);'), {});
+  // NIT-559: a duration or a timeout passed as a value is no wait, and the word html alone names a
+  // file or a field; a blocking receive is a wait.
+  assert.deepEqual(hints('assert!(keep_waiting(false, Duration::from_secs(5))); run(cap, timeout); write(dir.join("index.html"), page);'), {});
+  assert.deepEqual(hints('let got = rx.recv_timeout(Duration::from_millis(50));'), { waits: 1 });
 });
 test('one CI run is one execution, and its failure on one platform outweighs a pass on another', () => {
   const at = (run, outcome, source) => ({ id: 'cart::adds', name: 'adds', outcome, run, revision, source, method: 'ci-log', ambiguous: false });

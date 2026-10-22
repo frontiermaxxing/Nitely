@@ -44,10 +44,12 @@ function merged(command, args, options) {
 // Mechanical hints for classifying a test (NIT-555): counts of what its body does, in any language.
 // Leads for the agent reading the code, never a verdict.
 const HINTS = {
-  // A wait on the clock or on machine load.
-  waits: /\b(?:sleep|setTimeout|Thread\.sleep|time\.sleep|asyncio\.sleep|from_secs|from_millis|wait_for|waitFor|waitForTimeout|Task\.Delay|timeout)\b/g,
-  // UI text or element presence.
-  ui: /\b(?:textContent|innerText|innerHTML|outerHTML|getByText|findByText|queryByText|getByRole|getByLabelText|toBeInTheDocument|toHaveTextContent|toBeVisible|querySelector(?:All)?|html)\b/g,
+  // A wait on the clock or on machine load: a call that blocks or polls. A duration or a timeout
+  // passed as a value is no wait (NIT-559: on Nitely itself those were most of the leads).
+  waits: /\b(?:sleep|setTimeout|Thread\.sleep|time\.sleep|asyncio\.sleep|wait_for|waitFor|waitForTimeout|Task\.Delay|recv_timeout|wait_timeout)\b/g,
+  // UI text or element presence. A page's text asserted as such (`"Cart" in html`); the word html
+  // alone names a file or a field.
+  ui: /\b(?:textContent|innerText|innerHTML|outerHTML|getByText|findByText|queryByText|getByRole|getByLabelText|toBeInTheDocument|toHaveTextContent|toBeVisible|querySelector(?:All)?|in\s+html)\b/g,
   // Real I/O a scenario proves, or a unit test pays for.
   process: /\b(?:Command::new|spawn(?:Sync)?|execFile(?:Sync)?|execSync|child_process|subprocess|exec\.Command|Process\.Start|ProcessBuilder)\b/g,
   git: /\bgit\b/g,
