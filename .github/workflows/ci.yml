@@ -99,6 +99,23 @@ jobs:
 
       - run: npm test
 
+      # On Linux, each test binary through the runner that turns on libtest's per-test times, as
+      # the suite job below does: `measure` reads this job's log first, and without the times no
+      # Rust test can be found slow (NIT-593). RUSTC_BOOTSTRAP reaches only the test binary.
+      - name: Per-test times
+        if: runner.os == 'Linux'
+        run: |
+          runner="$RUNNER_TEMP/test-runner.sh"
+          cat > "$runner" <<'RUNNER'
+          bin="$1"
+          shift
+          case " $* " in
+            *" --list "* | *" --bench "* | *" --format"* | *" --report-time "* | *" -q "* | *" --quiet "*) exec "$bin" "$@" ;;
+          esac
+          RUSTC_BOOTSTRAP=1 exec "$bin" "$@" -Z unstable-options --report-time
+          RUNNER
+          echo "CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_RUNNER=bash $runner" >> "$GITHUB_ENV"
+
       - run: cargo test --workspace
 
       - run: cargo clippy --workspace -- -D warnings

@@ -495,7 +495,7 @@ async fn move_issue(key: String, state: String, evidence: Option<String>, reason
     if let Ok(("Done", _)) = nitely_core::issues::parse_state(&state) {
         let project = db.issue(&key).map_err(err)?.and_then(|i| i.project);
         if let Ok(root) = nitely_core::playbook::repo_for_issue(&nitely_core::Config::load().unwrap_or_default(), project.as_deref(), ".") {
-            nitely_core::landed_elsewhere::record(&db, &root, &key, evidence.as_deref(), &ME).map_err(err)?;
+            nitely_core::landed_elsewhere::record(&mut db, &root, &key, evidence.as_deref(), &ME).map_err(err)?;
         }
     }
     let moved = db.move_issue(&key, &state, evidence.as_deref(), reason.as_deref(), &ME).map_err(err)?;
