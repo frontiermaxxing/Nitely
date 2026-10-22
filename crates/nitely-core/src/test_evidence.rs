@@ -16,6 +16,10 @@ pub enum Format {
     Junit,
     Libtest,
     Tap,
+    /// pytest's console with `-v`.
+    Pytest,
+    /// `go test -v`.
+    Gotest,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -82,6 +86,8 @@ pub fn detect(text: &str) -> Vec<Format> {
     let mut found = Vec::new();
     if lines().any(|l| {
         (l.starts_with("test ") && l.contains(" ... "))
+            // A binary that started and died before its first result line.
+            || running_line(l)
             || l.contains("\"type\": \"test\"")
             || l.contains("\"type\":\"test\"")
     }) {
@@ -92,7 +98,32 @@ pub fn detect(text: &str) -> Vec<Format> {
     }) {
         found.push(Format::Tap);
     }
+    static PYTEST: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let pytest = PYTEST.get_or_init(|| {
+        regex::Regex::new(
+            r"^\S+::\S.* (?:PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s+\[\s*\d+%\])?$",
+        )
+        .unwrap()
+    });
+    if lines().any(|l| pytest.is_match(l)) {
+        found.push(Format::Pytest);
+    }
+    if lines().any(|l| {
+        l.starts_with("--- PASS: ") || l.starts_with("--- FAIL: ") || l.starts_with("--- SKIP: ")
+    }) {
+        found.push(Format::Gotest);
+    }
     found
+}
+
+/// libtest's `running N tests` (or `running 1 test`), exactly.
+fn running_line(l: &str) -> bool {
+    l.strip_prefix("running ")
+        .and_then(|rest| {
+            rest.strip_suffix(" tests")
+                .or_else(|| rest.strip_suffix(" test"))
+        })
+        .is_some_and(|n| !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()))
 }
 
 /// The tests in `text`, in whichever format it is. A log with both libtest and TAP reads as one
@@ -114,9 +145,13 @@ pub fn read(text: &str) -> Run {
         Format::Junit => junit(text),
         Format::Libtest => libtest(text),
         Format::Tap => tap(text),
+        Format::Pytest => pytest(text),
+        Format::Gotest => gotest(text),
     });
     let Some(mut run) = parts.next() else {
-        return Run::unknown("not JUnit XML, libtest or TAP: its tests are unknown");
+        return Run::unknown(
+            "not JUnit XML, libtest, TAP, pytest -v or go test -v: its tests are unknown",
+        );
     };
     for part in parts {
         let runners = [run.runner.take(), part.runner];
@@ -320,7 +355,7 @@ pub fn libtest(text: &str) -> Run {
         let l = raw.trim_end();
         if let Some(c) = running.captures(l) {
             suite = Some(c[1].to_string());
-        } else if l.starts_with("running ") && l.ends_with(" tests") || l == "running 1 test" {
+        } else if running_line(l) {
             open += 1;
         } else if let Some(rest) = l.strip_prefix("test result: ") {
             open = open.saturating_sub(1);
@@ -497,6 +532,207 @@ pub fn tap(text: &str) -> Run {
             .push("no test lines: per-test outcomes are unknown".into());
     }
     run
+}
+
+/// pytest's console with `-v`: `path::test PASSED [ 50%]`, FAILED, ERROR (a fixture failed),
+/// SKIPPED, XFAIL (expected to fail: skipped) and XPASS, ended by its `= N passed in 1.2s =` line;
+/// a run without that line was cut. `--durations=0` adds each test's setup, call and teardown
+/// times (`0.52s call     path::test`), summed into its time.
+pub fn pytest(text: &str) -> Run {
+    static LINE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    static SUMMARY: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let line = LINE.get_or_init(|| {
+        regex::Regex::new(
+            r"^(\S+::\S.*?) (PASSED|FAILED|ERROR|SKIPPED|XFAIL|XPASS)(?:\s+\[\s*\d+%\])?\s*$",
+        )
+        .unwrap()
+    });
+    let summary = SUMMARY.get_or_init(|| regex::Regex::new(r"^=+ .*\b(?:passed|failed|error|errors|skipped|deselected|no tests ran)\b.* in (\d+(?:\.\d+)?)s(?: \(.*\))? =+$").unwrap());
+    let mut run = Run {
+        format: Some(Format::Pytest),
+        runner: Some("pytest".into()),
+        complete: false,
+        seconds: None,
+        tests: vec![],
+        warnings: vec![],
+    };
+    static DURATION: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let duration = DURATION.get_or_init(|| {
+        regex::Regex::new(r"^(\d+(?:\.\d+)?)s (?:setup|call|teardown)\s+(\S+::\S.*?)\s*$").unwrap()
+    });
+    let mut times: std::collections::HashMap<String, f64> = std::collections::HashMap::new();
+    for l in text.lines().map(str::trim_end) {
+        if let Some(c) = duration.captures(l) {
+            *times.entry(c[2].to_string()).or_default() += seconds(&c[1]).unwrap_or(0.0);
+        } else if let Some(c) = line.captures(l) {
+            let id = c[1].to_string();
+            let (file, name) = match id.split_once("::") {
+                Some((file, name)) => (Some(file.to_string()), name.to_string()),
+                None => (None, id.clone()),
+            };
+            let outcome = match &c[2] {
+                "PASSED" | "XPASS" => Outcome::Pass,
+                "FAILED" | "ERROR" => Outcome::Fail,
+                _ => Outcome::Skip,
+            };
+            // A test's phases report under one id (PASSED, then ERROR at teardown): one test,
+            // failed if any phase failed.
+            if let Some(seen) = run.tests.iter_mut().find(|t| t.id == id) {
+                if outcome == Outcome::Fail {
+                    seen.outcome = Outcome::Fail;
+                }
+                continue;
+            }
+            run.tests.push(Observation {
+                id,
+                name,
+                suite: file.clone(),
+                file,
+                outcome,
+                seconds: None,
+                flaky: false,
+            });
+        } else if let Some(c) = summary.captures(l) {
+            run.complete = true;
+            run.seconds = seconds(&c[1]);
+        }
+    }
+    for t in run.tests.iter_mut() {
+        t.seconds = times.get(&t.id).copied();
+    }
+    if !run.complete {
+        run.warnings.push(
+            "no pytest summary line: the run was cut, and the tests after it are unknown".into(),
+        );
+    }
+    if run.tests.is_empty() {
+        run.complete = false;
+        run.warnings.push(
+            "no test lines (pytest prints them with -v): per-test outcomes are unknown".into(),
+        );
+    }
+    run
+}
+
+/// `go test -v`: `--- PASS: TestX (0.01s)`, FAIL and SKIP, subtests indented under their test.
+/// A test that started (`=== RUN`) and never reported (a panic, a timeout) leaves the run cut.
+pub fn gotest(text: &str) -> Run {
+    static RESULT: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let result = RESULT.get_or_init(|| {
+        regex::Regex::new(r"^\s*--- (PASS|FAIL|SKIP): (\S+) \((\d+(?:\.\d+)?)s\)\s*$").unwrap()
+    });
+    let mut run = Run {
+        format: Some(Format::Gotest),
+        runner: Some("go".into()),
+        complete: true,
+        seconds: None,
+        tests: vec![],
+        warnings: vec![],
+    };
+    let mut started = std::collections::BTreeSet::new();
+    for l in text.lines().map(str::trim_end) {
+        if let Some(name) = l.strip_prefix("=== RUN").map(str::trim) {
+            started.insert(name.to_string());
+        } else if let Some(c) = result.captures(l) {
+            let name = c[2].to_string();
+            started.remove(&name);
+            let outcome = match &c[1] {
+                "PASS" => Outcome::Pass,
+                "FAIL" => Outcome::Fail,
+                _ => Outcome::Skip,
+            };
+            run.tests.push(Observation {
+                id: name.clone(),
+                name,
+                suite: None,
+                file: None,
+                outcome,
+                seconds: seconds(&c[3]),
+                flaky: false,
+            });
+        }
+    }
+    if !started.is_empty() {
+        run.complete = false;
+        run.warnings.push(format!(
+            "{} test(s) started and never reported (a panic or a timeout): {}",
+            started.len(),
+            started.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if run.tests.is_empty() {
+        run.complete = false;
+        run.warnings.push(
+            "no test lines (go test prints them with -v): per-test outcomes are unknown".into(),
+        );
+    }
+    run
+}
+
+/// The command to dispatch for `command` so its console says each test's outcome, or why CI's
+/// console cannot (NIT-554): cargo and node:test print libtest and TAP already, pytest and
+/// `go test` do with `-v`; other runners only write JUnit files, which CI must upload as an
+/// artifact for `measure` to read.
+pub fn console_command(command: &str) -> std::result::Result<String, String> {
+    if ["{main}", "{worktree}", "{base}", "{jobs}"]
+        .iter()
+        .any(|p| command.contains(p))
+    {
+        return Err(format!(
+            "`{command}` names a local path or share and runs only in a lane"
+        ));
+    }
+    readable_command(command)
+}
+
+/// `command` with what makes its console say each test's outcome and time, wherever it runs (a
+/// lane as well as CI), or why its console cannot.
+pub fn readable_command(command: &str) -> std::result::Result<String, String> {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let has = |w: &str| words.contains(&w);
+    if words.first() == Some(&"cargo") && words.get(1) == Some(&"test") {
+        return Ok(command.to_string());
+    }
+    if has("pytest") {
+        // -q and -v cancel out: drop the quiet flags so each test gets its line.
+        let kept: Vec<&str> = words
+            .iter()
+            .copied()
+            .filter(|w| !matches!(*w, "-q" | "-qq" | "--quiet"))
+            .collect();
+        let verbose = kept
+            .iter()
+            .any(|w| matches!(*w, "-v" | "-vv" | "--verbose"));
+        let timed = kept.iter().any(|w| w.starts_with("--durations"));
+        let mut out = kept.join(" ");
+        if !verbose {
+            out.push_str(" -v");
+        }
+        if !timed {
+            // Every test's time, not only the slowest few.
+            out.push_str(" --durations=0 --durations-min=0");
+        }
+        return Ok(out);
+    }
+    if words.first() == Some(&"go") && words.get(1) == Some(&"test") {
+        // -count=1: a measurement runs the tests, never replays Go's cached results.
+        let mut out = command.to_string();
+        if !has("-v") {
+            out.push_str(" -v");
+        }
+        if !words.iter().any(|w| w.starts_with("-count")) {
+            out.push_str(" -count=1");
+        }
+        return Ok(out);
+    }
+    if words.first().is_some_and(|w| *w == "node") && has("--test")
+        || matches!(words.as_slice(), ["npm", "test", ..] | ["npm", "run", ..])
+    {
+        // node:test prints TAP when its output is not a terminal, as in CI; a script running
+        // another runner shows up as a log with no tests, which `measure` reports.
+        return Ok(command.to_string());
+    }
+    Err(format!("CI's console would not say each test's outcome for `{command}`: have CI write JUnit XML and upload it as an artifact named for tests, and `measure` reads it from CI's finished runs"))
 }
 
 #[cfg(test)]
@@ -759,5 +995,83 @@ mod tests {
             ["cart::adds", "board opens"]
         );
         assert_eq!(r.tests[0].seconds, Some(0.25));
+        // Node finished, Rust started and died before its first result: the run is not whole.
+        let died = read("TAP version 13\nok 1 - js\n1..1\nrunning 1 test\n");
+        assert!(!died.complete, "{died:?}");
+        assert!(read("TAP version 13\nok 1 - js\n1..1\nrunning setup\n").complete);
+    }
+
+    /// pytest -v and go test -v as CI's console prints them, and what a dispatch adds so it does.
+    #[test]
+    fn pytest_and_go_consoles_read_and_a_dispatch_asks_for_them() {
+        let py = "tests/test_cart.py::test_total PASSED                          [ 50%]\ntests/test_cart.py::test_tax[2] FAILED                         [100%]\n=================== 1 failed, 1 passed in 0.12s ===================\n";
+        let r = read(py);
+        assert_eq!(r.format, Some(Format::Pytest));
+        assert!(r.complete, "{:?}", r.warnings);
+        assert_eq!(
+            summary(&r),
+            [
+                (
+                    "tests/test_cart.py::test_total".to_string(),
+                    Outcome::Pass,
+                    None
+                ),
+                (
+                    "tests/test_cart.py::test_tax[2]".into(),
+                    Outcome::Fail,
+                    None
+                )
+            ]
+        );
+        assert!(
+            !read("tests/test_cart.py::test_total PASSED [ 50%]\n").complete,
+            "no summary: cut"
+        );
+        // A teardown error after a pass is the same test, failed.
+        let teardown = "t.py::test_a PASSED [ 50%]\nt.py::test_a ERROR [ 50%]\n===== 1 passed, 1 error in 0.10s =====\n";
+        assert_eq!(
+            summary(&read(teardown)),
+            [("t.py::test_a".to_string(), Outcome::Fail, None)]
+        );
+        let go = "=== RUN   TestTotal\n=== RUN   TestTotal/empty\n    --- PASS: TestTotal/empty (0.00s)\n--- PASS: TestTotal (0.81s)\n=== RUN   TestHangs\n";
+        let r = read(go);
+        assert_eq!(r.format, Some(Format::Gotest));
+        assert_eq!(
+            summary(&r),
+            [
+                ("TestTotal/empty".to_string(), Outcome::Pass, Some(0.0)),
+                ("TestTotal".into(), Outcome::Pass, Some(0.81))
+            ]
+        );
+        assert!(
+            !r.complete && r.warnings[0].contains("TestHangs"),
+            "{:?}",
+            r.warnings
+        );
+        assert_eq!(
+            console_command("pytest -q").as_deref(),
+            Ok("pytest -v --durations=0 --durations-min=0")
+        );
+        assert_eq!(
+            console_command("python -m pytest -q tests -v --durations=5").as_deref(),
+            Ok("python -m pytest tests -v --durations=5")
+        );
+        let timed = "tests/t.py::test_a PASSED [100%]\n============ slowest durations ============\n1.50s call     tests/t.py::test_a\n0.25s setup    tests/t.py::test_a\n============ 1 passed in 1.80s ============\n";
+        assert_eq!(
+            summary(&read(timed)),
+            [("tests/t.py::test_a".to_string(), Outcome::Pass, Some(1.75))]
+        );
+        assert!(console_command("cargo test --manifest-path {worktree}/Cargo.toml").is_err());
+        assert_eq!(
+            console_command("go test ./...").as_deref(),
+            Ok("go test ./... -v -count=1")
+        );
+        assert_eq!(
+            console_command("cargo test --workspace").as_deref(),
+            Ok("cargo test --workspace")
+        );
+        assert!(console_command("npx jest --ci")
+            .unwrap_err()
+            .contains("JUnit"));
     }
 }
