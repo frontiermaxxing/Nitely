@@ -73,7 +73,7 @@ fn quick_start_claims_its_issue_and_refuses_one_another_agent_holds() {
     let base = nitely_core::paths::unique_temp("nitely-cli-quick", "");
     let repo = base.join("repo");
     std::fs::create_dir_all(&repo).unwrap();
-    let git = |args: &[&str]| assert!(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args).status().unwrap().success());
+    let git = |args: &[&str]| assert!(nitely_core::playbook::run_git(Command::new("git").arg("-C").arg(&repo).args(["-c", "user.name=t", "-c", "user.email=t@t"]).args(args)).unwrap().status.success());
     git(&["init", "-q", "-b", "main"]);
     std::fs::write(repo.join("notes.txt"), "one\n").unwrap();
     git(&["add", "."]);
