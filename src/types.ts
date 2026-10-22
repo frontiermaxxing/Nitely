@@ -298,6 +298,16 @@ export interface Board {
   agents: AgentRow[];
   /** The latest land whose `[[land.after]]` steps failed, while no later land's ran clean (NIT-469). */
   after_land_failed?: { issue: string | null; ts: number; summary: string } | null;
+  /** What the person is told and nothing waits on, until they dismiss it (snapshot.rs Notice, NIT-570). */
+  notices?: Notice[];
+}
+
+/** A notice in the Inbox: the event that says it, its issue, when, and what it says. */
+export interface Notice {
+  id: number;
+  issue_key: string | null;
+  ts: number;
+  summary: string;
 }
 
 /** One agent session, wherever it runs: several often share a folder, so a folder is not an agent. */

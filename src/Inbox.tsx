@@ -28,7 +28,7 @@ import {
   type Resolved,
 } from "./decisions";
 import { ChecksMark } from "./Pr";
-import type { Board, IssueDetail, Project, TaskRow, Waiting } from "./types";
+import type { Board, IssueDetail, Notice, Project, TaskRow, Waiting } from "./types";
 import { useWaits } from "./WaitingStrip";
 import { behindSummary, waitLine, waitOf } from "./waits";
 import { ago, openExternal } from "./util";
@@ -207,6 +207,7 @@ export function Inbox(props: {
           <NotifyLink onOpen={props.onNotifySettings} />
         </div>
         <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>
+        <Notices notices={board.notices ?? []} now={now} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
         <AtWork board={board} now={now} onOpenIssue={props.onOpenIssue} />
       </div>
     );
@@ -251,6 +252,7 @@ export function Inbox(props: {
           {(counts.length > 1 || filter) && (
             <ProjectFilter counts={counts} total={allWaiting.length} project={filter} projects={props.projects} onProject={props.onProject} />
           )}
+          <Notices notices={board.notices ?? []} now={now} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
         </div>
         {groups.map((g) => (
           <div key={g.kind} className="inbox-group">
@@ -1183,6 +1185,50 @@ function DecideFinding(props: { askId: number; busy: boolean; onDecide: (accept:
         Send back
       </button>
     </form>
+  );
+}
+
+/**
+ * What the person is told and nothing waits on (NIT-570): an issue whose review rounds stalled and
+ * whose agent splits the change, say. Never a decision, so never counted or notified; it stays
+ * until dismissed.
+ */
+function Notices(props: { notices: Notice[]; now: number; onOpenIssue: (key: string) => void; onChanged: () => void }) {
+  const [gone, setGone] = useState<Set<number>>(new Set());
+  const [error, setError] = useState<string | null>(null);
+  const shown = props.notices.filter((n) => !gone.has(n.id));
+  if (shown.length === 0) return null;
+  const dismiss = async (id: number) => {
+    setGone((g) => new Set(g).add(id));
+    try {
+      await invoke("dismiss_notice", { id });
+      props.onChanged();
+    } catch (e) {
+      setGone((g) => new Set([...g].filter((x) => x !== id)));
+      setError(String(e));
+    }
+  };
+  return (
+    <section className="inbox-notices" aria-label="Notices">
+      <h2 className="inbox-notices-head">For your information</h2>
+      <ul>
+        {shown.map((n) => (
+          <li key={n.id} className="inbox-notice">
+            {n.issue_key && (
+              <button className="link mono" onClick={() => props.onOpenIssue(n.issue_key!)} title="Open the issue">
+                {n.issue_key}
+              </button>
+            )}
+            <span className="inbox-notice-text">{n.issue_key && n.summary.startsWith(`${n.issue_key}: `) ? n.summary.slice(n.issue_key.length + 2) : n.summary}</span>
+            <span className="muted small">{ago(props.now, n.ts)}</span>
+            <button className="btn small" onClick={() => dismiss(n.id)}>
+              Dismiss
+            </button>
+          </li>
+        ))}
+      </ul>
+      {error && <p className="error small">{error}</p>}
+    </section>
   );
 }
 
