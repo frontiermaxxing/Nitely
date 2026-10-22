@@ -1,0 +1,20 @@
+# nitely.net
+
+The public site: one static page with its stylesheet and assets, and no build step. It uses the
+app's own design tokens (`src/styles/tokens.css`) and the Geist fonts served from here, so the
+page makes no third-party requests. It has no analytics.
+
+- `index.html` and `styles.css`: the page. Dark first, light follows the system, and the hero track
+  stops moving under reduced motion.
+- `assets/`: the fonts (OFL-1.1, from `@fontsource-variable/geist`), the app icon, and screenshots
+  of the app on its sample data (`src/dev/fixtures.ts`), never a real project's.
+
+To preview it, serve this folder (`python -m http.server 8099` in `site/`) and open
+http://127.0.0.1:8099.
+
+To refresh the screenshots, run `npm run dev` and capture `/?theme=dark#overview` and `#inbox` at
+1440x900 and 2x, in each theme. Crop the sidebar's preview-only block off the bottom, and save them
+as WebP.
+
+To publish it, copy the folder's contents to the web root behind nitely.net. It needs only a static
+file server with TLS, and long cache headers on `assets/`.
