@@ -1429,6 +1429,10 @@ impl Db {
             }
         }
         tx.commit()?;
+        // Its goal's last issue closing finishes the goal (NIT-611).
+        if let (true, Some(goal)) = (issue.is_open() && matches!(state_type, "completed" | "canceled"), issue.goal) {
+            self.complete_goal_if_finished(goal, actor)?;
+        }
         self.issue(&issue.key)?.context("issue vanished")
     }
 
