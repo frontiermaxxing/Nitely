@@ -78,7 +78,21 @@ pub struct Board {
     /// The latest land whose `[[land.after]]` steps failed, while no later land's ran clean: an
     /// install that failed leaves the installed nitely behind main and every submit refused (NIT-469).
     pub after_land_failed: Option<AfterLandFailed>,
+    /// What the person is told and nothing waits on (NIT-570): newest first, until they dismiss it.
+    pub notices: Vec<Notice>,
 }
+
+/// A notice for the person: the event that says it, its issue, when, and what it says.
+#[derive(Debug, Clone, Serialize)]
+pub struct Notice {
+    pub id: i64,
+    pub issue_key: Option<String>,
+    pub ts: i64,
+    pub summary: String,
+}
+
+/// How long a notice stays in the Inbox undismissed: it is news, not a decision.
+const NOTICE_DAYS: i64 = 7;
 
 /// A land whose after steps failed: the issue, when, and what its event said.
 #[derive(Debug, Clone, Serialize)]
@@ -90,6 +104,30 @@ pub struct AfterLandFailed {
 
 impl Db {
     /// `Board::after_land_failed`: the newest after-steps event, when it is a failure.
+    /// The notices the person has not dismissed, from the last `NOTICE_DAYS`, the newest of each
+    /// issue: an issue's review rounds that stalled under `stalled_reviews = "fix"` (NIT-570).
+    pub fn notices(&self) -> Result<Vec<Notice>> {
+        let start = format!("%{}%", crate::submit_rules::STALLED_NOTICE_START.replace('%', ""));
+        let end = format!("%{}", crate::submit_rules::STALLED_NOTICE_END);
+        let mut stmt = self.conn.prepare(
+            "SELECT e.id, e.issue_key, e.ts, e.summary FROM event e
+             WHERE e.type = 'note' AND e.summary LIKE ?1 AND e.summary LIKE ?2 AND e.ts >= ?3
+               AND NOT EXISTS (SELECT 1 FROM notice_dismissed d WHERE d.event_id = e.id)
+               AND e.id = (SELECT MAX(x.id) FROM event x WHERE x.issue_key = e.issue_key AND x.type = 'note' AND x.summary LIKE ?1 AND x.summary LIKE ?2)
+             ORDER BY e.id DESC",
+        )?;
+        let rows = stmt.query_map(rusqlite::params![start, end, crate::db::now() - NOTICE_DAYS * 86400], |r| {
+            Ok(Notice { id: r.get(0)?, issue_key: r.get(1)?, ts: r.get(2)?, summary: r.get::<_, Option<String>>(3)?.unwrap_or_default() })
+        })?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// The person dismisses notice `id`: it leaves the Inbox.
+    pub fn dismiss_notice(&self, id: i64) -> Result<()> {
+        self.conn.execute("INSERT OR IGNORE INTO notice_dismissed (event_id, dismissed_at) VALUES (?1, ?2)", rusqlite::params![id, crate::db::now()])?;
+        Ok(())
+    }
+
     pub fn after_land_failed(&self) -> Result<Option<AfterLandFailed>> {
         let latest: Option<(String, Option<String>, i64, Option<String>)> = self
             .conn
@@ -509,7 +547,7 @@ fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
 
     let remote_sessions = sessions.iter().filter(|s| s.cwd.starts_with("remote:")).cloned().collect();
     let agents = agents(db, config, &sessions, &views, &issues, &aliases, &paths)?;
-    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents, after_land_failed: db.after_land_failed()? })
+    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents, after_land_failed: db.after_land_failed()?, notices: db.notices()? })
 }
 
 /// One row per local session: where it runs, and the issue its own events name.
@@ -704,6 +742,28 @@ mod tests {
             assert_eq!(crate::paths::normalize(child.worktree.as_ref().unwrap()), crate::paths::normalize(&wt.to_string_lossy()));
             assert!(board.agents.iter().find(|a| a.session.id == "codex:sibling").unwrap().worktree.is_none());
         }
+        drop(db);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// NIT-570: a stalled-rounds notice reaches the Inbox, the newest of its issue, until dismissed.
+    #[test]
+    fn a_stalled_rounds_notice_shows_until_the_person_dismisses_it() {
+        let dir = crate::paths::unique_temp("nitely-notices", "");
+        let mut db = Db::open(&dir.join("t.db")).unwrap();
+        db.create_project("APP", "App").unwrap();
+        let actor = crate::issues::Actor::Agent("claude:test".into());
+        let new = crate::issues::NewIssue { project: "APP".into(), title: "Rows".into(), kind: "bug".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), ..Default::default() };
+        let key = db.create_issue(&new, &actor).unwrap().key;
+        db.add_note(&key, "An ordinary note", "note", &actor).unwrap();
+        assert!(db.notices().unwrap().is_empty(), "a note is no notice");
+        db.add_note(&key, &crate::submit_rules::stalled_notice(&key, "5 review rounds in a row asked for changes"), "note", &actor).unwrap();
+        db.add_note(&key, &crate::submit_rules::stalled_notice(&key, "6 review rounds in a row asked for changes"), "note", &actor).unwrap();
+        let shown = db.notices().unwrap();
+        assert_eq!(shown.len(), 1, "the newest of the issue: {shown:?}");
+        assert!(shown[0].summary.contains("6 review rounds") && shown[0].issue_key.as_deref() == Some(key.as_str()));
+        db.dismiss_notice(shown[0].id).unwrap();
+        assert!(db.notices().unwrap().is_empty(), "dismissed: an older one of the same issue does not come back");
         drop(db);
         std::fs::remove_dir_all(&dir).ok();
     }

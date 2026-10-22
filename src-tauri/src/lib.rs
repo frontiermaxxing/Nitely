@@ -550,6 +550,12 @@ async fn set_owner(key: String, owner: String) -> Result<IssueRecord, String> {
     db.set_owner(&key, &owner, &ME).map_err(err)
 }
 
+/// The person dismisses a notice in the Inbox (NIT-570): nothing waited on it.
+#[tauri::command]
+async fn dismiss_notice(id: i64) -> Result<(), String> {
+    db()?.dismiss_notice(id).map_err(err)
+}
+
 #[tauri::command]
 async fn answer_ask(id: i64, answer: String) -> Result<Ask, String> {
     db()?.answer_ask(id, &answer, &ME).map_err(err)
@@ -1137,6 +1143,7 @@ pub fn run() {
             set_issue_private,
             set_owner,
             answer_ask,
+            dismiss_notice,
             accept_finding,
             decline_finding,
             connect_plan,
