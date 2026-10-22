@@ -196,7 +196,11 @@ impl Report {
     /// revision, or whose body waits on time or asserts UI text or presence; and those the
     /// project's gate `record` shows failing only ever for their own sake (NIT-565). Times are
     /// compared within one measuring method, as the collector compares them.
-    pub fn flagged(&self, slow_seconds: f64, record: &[crate::test_catches::TestCatches]) -> Vec<Flagged> {
+    pub fn flagged(
+        &self,
+        slow_seconds: f64,
+        record: &[crate::test_catches::TestCatches],
+    ) -> Vec<Flagged> {
         use std::collections::BTreeMap;
         let method_of = |o: &serde_json::Value| o["method"].as_str().unwrap_or("lane").to_string();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -388,7 +392,10 @@ impl Report {
             }
         }
         // The gates' record, per test and step: failures that were only ever the test's own.
-        for r in record.iter().filter(|r| crate::test_catches::false_alarm_candidate(r)) {
+        for r in record
+            .iter()
+            .filter(|r| crate::test_catches::false_alarm_candidate(r))
+        {
             let t = source(&r.test);
             flag(
                 t.map(key).unwrap_or_else(|| r.test.clone()),
@@ -540,6 +547,45 @@ fn refactor_title<'a>(module: &str, decisions: impl Iterator<Item = &'a str>) ->
         title = title.chars().take(117).collect::<String>() + "...";
     }
     title
+}
+
+/// Whether a gate running `command` prints the per-test times `test_budget::parse` reads.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BudgetReads {
+    Timed,
+    /// It would with this flag.
+    Add(String),
+    /// An npm script: if it runs node:test.
+    IfNode,
+    Not,
+}
+
+pub fn budget_reads(command: &str) -> BudgetReads {
+    let words: Vec<&str> = command.split_whitespace().collect();
+    let has = |w: &str| words.contains(&w);
+    if words.first() == Some(&"cargo") && words.get(1) == Some(&"test")
+        || has("node") && has("--test")
+    {
+        return BudgetReads::Timed;
+    }
+    if has("pytest") {
+        return if words.iter().any(|w| w.starts_with("--durations")) {
+            BudgetReads::Timed
+        } else {
+            BudgetReads::Add("--durations=0 --durations-min=0".into())
+        };
+    }
+    if words.first() == Some(&"go") && words.get(1) == Some(&"test") {
+        return if has("-v") {
+            BudgetReads::Timed
+        } else {
+            BudgetReads::Add("-v".into())
+        };
+    }
+    if matches!(words.as_slice(), ["npm", "test" | "t" | "run", ..]) {
+        return BudgetReads::IfNode;
+    }
+    BudgetReads::Not
 }
 
 /// What the goal is planned from besides the map: the budget's per-test limit, the gate's test
@@ -720,14 +766,9 @@ pub fn optimize_plan(
             }
         }
         body.push_str(&format!("\nEstimated saving: up to {measured:.1} s of measured time across {timed} of {} tests (untimed ones unknown).\n", decisions.len()));
-        // The old tests go with their module's card, so dropping the card keeps them.
-        body.push_str("\nLast step, once the pure tests pass: ask the person once (`ask`) to delete these old tests, each covered by its decision's pure test, and delete only what they approve:\n\n");
+        body.push_str("\nKeep the old tests: the deletion card removes them, in one approval, once this lands; list in your handoff the pure test that covers each.\n");
         for (decision, f) in decisions {
-            body.push_str(&format!(
-                "- `{}` ({}): covered by the pure test of \"{decision}\"\n",
-                f.test,
-                time(f)
-            ));
+            deletions.push((*f, format!("the pure test of \"{decision}\" from refactor-{} ({module}), if that card landed", n + 1)));
         }
         let fs: Vec<&Flagged> = decisions
             .iter()
@@ -786,9 +827,30 @@ pub fn optimize_plan(
             ));
         }
     }
-    items.push(item("budget".into(), "Set the test time budget and name the scenarios".into(), format!("Write `.nitely/test-budget.toml` so every gate reports test times and flags a test past the limit unless it is a named scenario:\n\n```toml\n{budget}```\n\nNames are as the runner prints them; check each against a gate's \"Test time\" line."), vec![".nitely/test-budget.toml".into()], 1, vec![]));
+    // The budget works only where a gate's output carries per-test times: say which commands do,
+    // what to add where a flag would, and leave the card out when none can.
+    let reads: Vec<(&String, BudgetReads)> =
+        facts.tests.iter().map(|t| (t, budget_reads(t))).collect();
+    if reads.iter().any(|(_, r)| !matches!(r, BudgetReads::Not)) {
+        let mut how = String::new();
+        let mut touches = vec![".nitely/test-budget.toml".to_string()];
+        for (t, r) in &reads {
+            how.push_str(&match r {
+                BudgetReads::Timed => format!("- `{t}`: gates read its per-test times.\n"),
+                BudgetReads::Add(flag) => format!("- `{t}`: add `{flag}` to it in the playbook's gate, or gates see no per-test times.\n"),
+                BudgetReads::IfNode => format!("- `{t}`: gates read its times if its script runs node:test; a jest or vitest script prints none.\n"),
+                BudgetReads::Not => format!("- `{t}`: prints no per-test times a gate reads (its runner writes them only to JUnit or TRX), so the budget cannot flag its tests.\n"),
+            });
+            if matches!(r, BudgetReads::Add(_))
+                && !touches.iter().any(|p| p == ".nitely/playbook.toml")
+            {
+                touches.push(".nitely/playbook.toml".into());
+            }
+        }
+        items.push(item("budget".into(), "Set the test time budget and name the scenarios".into(), format!("Write `.nitely/test-budget.toml` so a gate reports test times and flags a test past the limit unless it is a named scenario:\n\n```toml\n{budget}```\n\nNames are as the runner prints them; check each against a gate's \"Test time\" line. What the gate's test commands give the budget:\n\n{how}\nA playbook change goes through `propose_playbook_change`."), touches, 1, vec![]));
+    }
     if !deletions.is_empty() {
-        let mut body = "After the cards above land, ask the person once (`ask`) with this list, and delete only what they approve. Every test names what covers it:\n\n".to_string();
+        let mut body = "After the cards above land, ask the person once (`ask`) with this list, and delete only what they approve. Every test names what covers it. A decision's old test goes only if its refactor card landed: a card the person dropped keeps its tests, so leave them off the list:\n\n".to_string();
         for (f, by) in &deletions {
             body.push_str(&format!("- `{}` ({}): covered by {by}\n", f.test, time(f)));
         }
@@ -1072,7 +1134,7 @@ pub fn dispatched_command(
     }
     match crate::test_evidence::report_command(t, package) {
         Ok(c) => Ok(c),
-        Err(why) if why.contains("jest-junit") => Err(why),
+        Err(why) if why.contains("jest-junit") || why.contains("more than one command") => Err(why),
         Err(_) => crate::test_evidence::console_command(t),
     }
 }
@@ -1341,14 +1403,32 @@ mod tests {
             truncated: false,
             warnings: vec![],
         };
-        let rec = |test: &str, catches: i64, false_alarms: i64| TestCatches { test: test.into(), step: "cargo test".into(), catches, false_alarms };
+        let rec = |test: &str, catches: i64, false_alarms: i64| TestCatches {
+            test: test.into(),
+            step: "cargo test".into(),
+            catches,
+            false_alarms,
+        };
         // Its neighbour once caught something; that does not vouch for it.
-        let record = [rec("store::tests::roundtrip", 0, 3), rec("store::tests::loads", 1, 0)];
+        let record = [
+            rec("store::tests::roundtrip", 0, 3),
+            rec("store::tests::loads", 1, 0),
+        ];
         let flagged = report.flagged(2.0, &record);
         assert_eq!(flagged.len(), 1, "{flagged:?}");
-        assert_eq!((flagged[0].test.as_str(), flagged[0].printed.as_deref()), ("src/store.rs::roundtrip", Some("store::tests::roundtrip")));
-        assert!(flagged[0].why[0].starts_with("false alarms"), "{:?}", flagged[0].why);
-        assert!(report.flagged(2.0, &[]).is_empty(), "without the record, nothing flags it");
+        assert_eq!(
+            (flagged[0].test.as_str(), flagged[0].printed.as_deref()),
+            ("src/store.rs::roundtrip", Some("store::tests::roundtrip"))
+        );
+        assert!(
+            flagged[0].why[0].starts_with("false alarms"),
+            "{:?}",
+            flagged[0].why
+        );
+        assert!(
+            report.flagged(2.0, &[]).is_empty(),
+            "without the record, nothing flags it"
+        );
     }
 
     /// The tests to classify come from the evidence (slow by one method, flaky, a hint, a
@@ -1788,9 +1868,23 @@ mod tests {
                 .contains("covered by nothing it should keep"),
             "a presence test is covered by nothing it should keep"
         );
-        // A decision's old test goes with its module's card, not the shared deletion card.
-        assert!(card.body.contains("`src/land.rs::batches` (9.0 s): covered by the pure test of \"which changes land together\""), "{}", card.body);
-        assert!(!planned.plan.issues[2].body.contains("src/land.rs::batches"));
+        // A decision's old test is on the one deletion list, gone only if its module's card landed.
+        let deletion = &planned.plan.issues[2].body;
+        assert!(deletion.contains("`src/land.rs::batches` (9.0 s): covered by the pure test of \"which changes land together\" from refactor-1 (land_rules), if that card landed"), "{deletion}");
+        assert!(!card.body.contains("ask the person once"));
+        // The budget says which test commands gates time.
+        assert!(
+            planned.plan.issues[1]
+                .body
+                .contains("`cargo test`: gates read its per-test times"),
+            "{}",
+            planned.plan.issues[1].body
+        );
+        assert_eq!(
+            budget_reads("pytest -q"),
+            BudgetReads::Add("--durations=0 --durations-min=0".into())
+        );
+        assert_eq!(budget_reads("dotnet test"), BudgetReads::Not);
         // A failing scenario gets a repair card even when nothing else is planned for it.
         let mut broken = report.clone();
         broken.observations = vec![obs("core::land::pushes", 4000.0)];
