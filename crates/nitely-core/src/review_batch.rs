@@ -189,6 +189,12 @@ fn review_group(db: &Db, rules: &ReviewRules, root: &Path, reviewer: &str, group
     };
     let parsed = rules.parse_batch(reviewer, &reply.text, reply.seconds, &changes);
     let mut reviews = parsed.reviews;
+    // A finding about the base's own code is no change's (NIT-646).
+    for (review, change) in reviews.iter_mut().zip(&changes) {
+        if let Ok(review) = review {
+            crate::review::set_aside_outside(review, &change.worktree, &change.base, &change.head);
+        }
+    }
     // What a change reviewed alone after all must still carry from the batch.
     let mut carried: Vec<Vec<Finding>> = vec![vec![]; group.len()];
     for (j, k, what) in &parsed.interactions {
@@ -445,6 +451,7 @@ mod tests {
             batch: None,
             tokens: None,
             reused: None,
+            outside: vec![],
         };
         let mut r = review("fixed");
         hold_interactions(&db, &wt, &mut r).unwrap();

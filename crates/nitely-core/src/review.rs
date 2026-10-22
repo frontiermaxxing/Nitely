@@ -229,6 +229,12 @@ pub struct Review {
     /// (NIT-185).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reused: Option<String>,
+    /// Findings set aside because everything they cite is code the change does not touch, the
+    /// base's own (NIT-646): after the base is merged into a branch, its code is context for the
+    /// review, never the change's problem. They count for nothing in the verdict, so nobody is
+    /// asked to accept them; they are listed so a real one can be filed against the base.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outside: Vec<Finding>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -469,6 +475,23 @@ regressions. Skip style. Do not edit anything.\n",
         p
     }
 
+    /// The prompt for a branch reviewed before at `prev.commit` that has had `base` merged into it
+    /// since (NIT-646): `git diff <commit> HEAD` would show everything the merge brought from the
+    /// base as if the author wrote it, so the reviewer compares the change as reviewed with the
+    /// change now, both against the base.
+    pub fn prompt_after_merge(&self, base: &str, prev: &PreviousRound) -> String {
+        let mut p = format!(
+            "This branch was reviewed before, at commit {c}, and {base} has been merged into it since. Run `git diff \
+{base}...HEAD` for the whole change: only its lines are this change's. Code the merge brought from {base} is context, \
+not this change: raise nothing about it. To see what the author changed since that review, compare that diff with \
+`git diff {base}...{c}`, the change as it was reviewed. Read the changed code and its callers, and look for correctness \
+bugs and regressions. Skip style. Do not edit anything.\n",
+            c = prev.commit
+        );
+        p.push_str(&self.prompt_rest(Some(prev)));
+        p
+    }
+
     /// The review prompt for small changes that already landed through the quick path (NIT-625):
     /// `changes` says which, and how to see each; the rest is as `prompt` asks.
     pub(crate) fn landed_prompt(&self, changes: &str) -> String {
@@ -621,7 +644,7 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None, outside: vec![] })
     }
 
     /// The instructions for several changes reviewed in one call (docs/batching.md): one section
@@ -643,6 +666,14 @@ Do not edit anything.\n",
             p.push_str(&format!("\n## CHANGE {k}: {} \"{}\"\nbranch {}, base {}, head {}\n", c.key, c.title, c.branch, c.base, c.head));
             p.push_str(&format!("Run `git diff {}...{}` for the change.\n", c.base, c.head));
             match &c.previous {
+                Some(prev) if prev.in_history && base_merged_since(&c.worktree, &c.base, &prev.commit, &c.head) => p.push_str(&format!(
+                    "It was reviewed before, at commit {c0}, and {b} has been merged into it since: code the merge brought from {b} \
+is context, not this change, so raise nothing about it. Compare the diff above with `git diff {b}...{c0}`, the change as \
+it was reviewed, to see what changed since. The rest was already reviewed: raise something new there only if it is P0 or \
+P1, and then say in the finding why that review missed it.\n",
+                    c0 = prev.commit,
+                    b = c.base
+                )),
                 Some(prev) if prev.in_history => p.push_str(&format!(
                     "It was reviewed before, at commit {c0}: `git diff {c0} {h}` is what changed since. The rest was already \
 reviewed: raise something new there only if it is P0 or P1, and then say in the finding why that review missed it.\n",
@@ -785,10 +816,15 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         self.run_checked(reviewer,worktree,base,previous,&mut ||self.require_enabled())
     }
     pub(crate) fn run_checked(&self,reviewer:&str,worktree:&Path,base:&str,previous:Option<&PreviousRound>,check:&mut dyn FnMut()->Result<()>)->Result<Review> {
-        let reply = self.run_prompt_checked(reviewer, worktree, &with_submodule_code(self.prompt(base, previous), worktree, base),check)?;
+        let prompt = match previous {
+            Some(prev) if prev.in_history && base_merged_since(worktree, base, &prev.commit, "HEAD") => self.prompt_after_merge(base, prev),
+            _ => self.prompt(base, previous),
+        };
+        let reply = self.run_prompt_checked(reviewer, worktree, &with_submodule_code(prompt, worktree, base),check)?;
         let mut review =
             self.parse(reviewer, &reply.text, reply.seconds, previous, Some(worktree)).map_err(|e| if reply.only_a_login_message { reply.signed_out(self) } else { e })?;
         review.tokens = reply.tokens;
+        set_aside_outside(&mut review, worktree, base, "HEAD");
         Ok(review)
     }
 
@@ -1069,6 +1105,76 @@ fn names_a_file(text: &str, code: Option<&CurrentCode>) -> bool {
     let place = text.split_once(": ").map(|(_, rest)| rest).unwrap_or(text);
     let word = place.split([',', ':', ' ']).next().unwrap_or("").trim_matches('`');
     !word.is_empty() && code.resolve(word).is_some()
+}
+
+/// Whether `base` came into the branch between `commit` and `head`: their merge bases with it
+/// differ, as after `git merge main` into the branch (NIT-646). False when git cannot tell.
+pub(crate) fn base_merged_since(worktree: &Path, base: &str, commit: &str, head: &str) -> bool {
+    let merge_base = |c: &str| crate::playbook::git(worktree, &["merge-base", base, c]).ok().map(|o| o.trim().to_string());
+    match (merge_base(commit), merge_base(head)) {
+        (Some(then), Some(now)) => then != now,
+        _ => false,
+    }
+}
+
+/// How near a changed line a citation may point and still be about the change: a line number in
+/// a finding is often off by one or two.
+const NEAR_A_CHANGE: usize = 2;
+
+/// The lines the change wrote, by file: the new side of `git diff -U0 base...head`. A pure
+/// deletion counts the lines either side of it. None when git cannot say.
+fn changed_lines(worktree: &Path, base: &str, head: &str) -> Option<BTreeMap<String, Vec<(usize, usize)>>> {
+    let out = crate::playbook::git(worktree, &["-c", "core.quotepath=false", "diff", "-U0", "--no-renames", "--no-color", "--no-ext-diff", &format!("{base}...{head}")]).ok()?;
+    let mut lines: BTreeMap<String, Vec<(usize, usize)>> = BTreeMap::new();
+    let mut file: Option<String> = None;
+    for line in out.lines() {
+        if let Some(path) = line.strip_prefix("+++ ") {
+            // `/dev/null` for a deleted file: nothing of it is on the branch to cite.
+            file = path.strip_prefix("b/").map(str::to_string);
+            if let Some(f) = &file {
+                lines.entry(f.clone()).or_default();
+            }
+        } else if let (Some(hunk), Some(f)) = (line.strip_prefix("@@ "), &file) {
+            // `@@ -a,b +c,d @@`: d lines from c on the new side (d is 1 when left out).
+            let new = hunk.split(' ').find_map(|t| t.strip_prefix('+'))?;
+            let (start, count): (usize, usize) = match new.split_once(',') {
+                Some((c, d)) => (c.parse().ok()?, d.parse().ok()?),
+                None => (new.parse().ok()?, 1),
+            };
+            let range = if count == 0 { (start, start + 1) } else { (start, start + count - 1) };
+            lines.entry(f.clone()).or_default().push(range);
+        }
+    }
+    Some(lines)
+}
+
+/// Whether everything `text` cites is code the change does not touch: a file it leaves alone, or
+/// a line of a file it changes that is not near a changed line. A finding that cites nothing, or a
+/// file the branch does not have, or a changed file without a line, is about the change.
+fn outside_the_change(text: &str, code: &CurrentCode, changed: &BTreeMap<String, Vec<(usize, usize)>>) -> bool {
+    let cited = citations(text);
+    !cited.is_empty()
+        && cited.iter().all(|(path, line)| {
+            let Some(file) = code.resolve(path) else { return false };
+            match (changed.get(&file), line) {
+                (None, _) => true,
+                (Some(_), None) => false,
+                (Some(ranges), Some(n)) => !ranges.iter().any(|(from, to)| n + NEAR_A_CHANGE >= *from && *n <= to + NEAR_A_CHANGE),
+            }
+        })
+}
+
+/// Moves the findings that are entirely about code the change does not touch from `review`'s
+/// findings to its `outside` list, and sets its verdict from what is left (NIT-646).
+pub(crate) fn set_aside_outside(review: &mut Review, worktree: &Path, base: &str, head: &str) {
+    let Some(changed) = changed_lines(worktree, base, head) else { return };
+    let code = CurrentCode::new(worktree);
+    let (outside, inside): (Vec<Finding>, Vec<Finding>) = std::mem::take(&mut review.findings).into_iter().partition(|f| outside_the_change(&f.text, &code, &changed));
+    review.findings = inside;
+    review.outside.extend(outside);
+    if review.reused.is_none() {
+        review.verdict = if review.findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" }.into();
+    }
 }
 
 /// `path/to/file.rs:120` and `file.rs` mentions in a text, with their line when given.
@@ -1447,6 +1553,68 @@ mod tests {
         assert_eq!(code.resolve(&format!("{}/Common Files", name(&short))), tracked, "relative, short folder");
         assert_eq!(code.resolve(&format!(r"{short}\Common Files")), tracked, "absolute, short folder");
         assert_eq!(code.resolve(&format!("{}/Other Files", name(&short))), None, "a file that is not tracked");
+    }
+
+    /// NIT-646: main merged into a branch after its review brings main's code along. That code is
+    /// context, so the next round compares the change with itself instead of reading the merge,
+    /// and a finding about main's own lines is set aside: it neither holds the land nor reaches
+    /// the person to accept.
+    #[test]
+    fn after_main_is_merged_in_a_finding_on_mains_own_code_is_set_aside() {
+        let dir = crate::paths::unique_temp("nitely-review-outside", "");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let git = |args: &[&str]| {
+            let out = crate::playbook::run_git(std::process::Command::new("git").arg("-C").arg(&dir).args(args)).unwrap();
+            assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let write = |path: &str, body: String| std::fs::write(dir.join(path), body).unwrap();
+        let lines = |n: usize, what: &str| (1..=n).map(|i| format!("{what} {i}\n")).collect::<String>();
+        git(&["init", "-q", "-b", "main"]);
+        git(&["config", "user.email", "t@example.com"]);
+        git(&["config", "user.name", "t"]);
+        write("src/goal.rs", lines(20, "goal"));
+        write("src/quick.rs", lines(20, "quick"));
+        git(&["add", "."]);
+        git(&["commit", "-qm", "base"]);
+        git(&["checkout", "-qb", "goal"]);
+        // The change: line 10 of goal.rs.
+        write("src/goal.rs", lines(20, "goal").replace("goal 10\n", "goal ten, changed\n"));
+        git(&["commit", "-qam", "the change"]);
+        let reviewed = git(&["rev-parse", "HEAD"]);
+        // Main moves on in another file, and in goal.rs far from the change, and comes in by a merge.
+        git(&["checkout", "-q", "main"]);
+        write("src/quick.rs", lines(20, "quick").replace("quick 5\n", "quick five, from main\n"));
+        write("src/goal.rs", lines(20, "goal").replace("goal 19\n", "goal nineteen, from main\n"));
+        git(&["commit", "-qam", "main moves on"]);
+        git(&["checkout", "-q", "goal"]);
+        git(&["merge", "-q", "--no-edit", "main"]);
+
+        assert!(base_merged_since(&dir, "main", &reviewed, "HEAD"), "main came in since that review");
+        assert!(!base_merged_since(&dir, "main", "HEAD", "HEAD"));
+        let prev = PreviousRound { passed_on: None, commit: reviewed.clone(), findings: vec![], in_history: true, accepted: vec![] };
+        let prompt = rules().prompt_after_merge("main", &prev);
+        assert!(prompt.contains("git diff main...HEAD") && prompt.contains(&format!("git diff main...{reviewed}")), "{prompt}");
+        assert!(!prompt.contains(&format!("git diff {reviewed} HEAD")), "never the diff that holds the merge: {prompt}");
+
+        let reply = "Two problems.\n\
+- [P1] Quick start loses the flag: src/quick.rs:5, start\n\
+- [P1] Main's tail is wrong: src/goal.rs:19, tail\n\
+- [P1] The changed line breaks parsing: src/goal.rs:10, parse\n\
+- [P2] Off by one next to the change: goal.rs:11\n\
+VERDICT: findings\nMONEY_OR_RELEASE: no";
+        let mut review = rules().parse("codex", reply, 1, None, Some(&dir)).unwrap();
+        set_aside_outside(&mut review, &dir, "main", "HEAD");
+        let texts = |fs: &[Finding]| fs.iter().map(|f| f.text.split(':').next().unwrap().to_string()).collect::<Vec<_>>();
+        assert_eq!(texts(&review.findings), ["The changed line breaks parsing", "Off by one next to the change"]);
+        assert_eq!(texts(&review.outside), ["Quick start loses the flag", "Main's tail is wrong"]);
+        assert_eq!(review.verdict, "changes", "the change's own P1 still holds it");
+
+        // With only main's code to object to, the change passes.
+        let mut review = rules().parse("codex", "- [P1] Quick start loses the flag: src/quick.rs:5, start\nVERDICT: findings\nMONEY_OR_RELEASE: no", 1, None, Some(&dir)).unwrap();
+        set_aside_outside(&mut review, &dir, "main", "HEAD");
+        assert_eq!((review.verdict.as_str(), review.findings.len(), review.outside.len()), ("pass", 0, 1));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

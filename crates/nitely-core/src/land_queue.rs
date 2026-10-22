@@ -1463,7 +1463,7 @@ reason = "billing"
         // A reviewer that logs each call and, for a batch of three, finds a P1 in the second.
         let calls = f.base.join("calls.txt");
         let script = format!(
-            "prompt=$(cat)\necho call >> '{}'\ncase \"$prompt\" in *\"CHANGE 3:\"*)\n  echo '- [P1] CHANGE 2: Wrong total: shared.txt, the second line'\n  printf 'VERDICT 1: clean\\nVERDICT 2: findings\\nVERDICT 3: clean\\n'\n  exit 0;;\nesac\necho 'VERDICT: clean'\n",
+            "prompt=$(cat)\necho call >> '{}'\ncase \"$prompt\" in *\"CHANGE 3:\"*)\n  echo '- [P1] CHANGE 2: Wrong total: b.txt, the second line'\n  printf 'VERDICT 1: clean\\nVERDICT 2: findings\\nVERDICT 3: clean\\n'\n  exit 0;;\nesac\necho 'VERDICT: clean'\n",
             calls.to_string_lossy().replace('\\', "/")
         );
         std::fs::write(f.repo.join("review.sh"), script).unwrap();
@@ -1495,7 +1495,7 @@ reason = "billing"
         let (ra, rb, rc) = (f.db.reviews(&a).unwrap().remove(0), f.db.reviews(&b).unwrap().remove(0), f.db.reviews(&c).unwrap().remove(0));
         assert!(ra.batch_id.is_some() && ra.batch_id == rb.batch_id && rb.batch_id == rc.batch_id, "{ra:?} {rb:?}");
         assert_eq!((ra.verdict.as_str(), rb.verdict.as_str(), rc.verdict.as_str()), ("pass", "changes", "pass"));
-        assert_eq!(rb.findings[0].text, "Wrong total: shared.txt, the second line");
+        assert_eq!(rb.findings[0].text, "Wrong total: b.txt, the second line");
         assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "In Progress", "back to its agent");
         assert!(f.error(&b).contains("asked for changes"), "{}", f.error(&b));
         let run = f.runs().into_iter().find(|r| r.landed.contains(&a)).unwrap();
