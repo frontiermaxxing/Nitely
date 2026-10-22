@@ -17,24 +17,40 @@ Known failures are work to resolve, not a permanent success condition. A failure
 A hygiene sweep should report the suite revision, commands, run count, outcomes, individual timing coverage, and uncertainty. Classify repeated failures, inconsistent outcomes, slow contributors, duplicated cases, and possible implementation coupling. Similarity and mocking are review leads, not proof that a test is worthless. Present one editable decision with precise candidates and evidence; after approval, apply changes on a branch through normal submission and landing. Compare counts and warm-lane timing before and after; never invent savings from an unmeasured deletion.
 
 
-Use `/nitely-test-sweep` in connected Claude projects, `test_sweep_guide` through MCP, or
-`nitely test-sweep guide`. `collect --logs logs.json --output report.json` is report-only:
-logs carry their real revision and distinct run ID. `--execute` explicitly requests a bounded
-lane run (two repetitions, ten minutes by default; at most three and one hour). Node TAP supplies
-per-test timings; `--rust-timings` measures stable Rust test binaries individually and includes
-process startup cost. Neither is an estimate of a test's contribution to a parallel suite.
-`--known-failures names.json` highlights observed failures on an explicit list; it never calls them passing.
+## Optimizing any repo's tests
 
-Reports retain outcomes, source body hashes, revision, evidence sources, timing coverage and
-truncation. Source extraction is conservative, not a complete test count or an AST proof of
-redundancy. `test-sweep propose` groups the reviewed candidates into editable action lists in
-the Inbox. Inspection alone does not authorize removal. Approving files normal branch tasks;
-changed source evidence must be reassessed before deleting anything. Existing logs avoid a
-new suite run, and an empty report needs only a handoff with its limits.
+`/nitely-test-optimize` (the skill `connect` installs; `test_optimize_guide` through MCP;
+`nitely test-sweep guide`) runs one method on any connected repo, in any language:
 
-A running Crew can opt into `[schedule] test_sweep = "nightly"` or `"weekly"` (UTC periods;
-default `"off"`). It creates one report task per period, respects Crew's start/pause limits,
-and avoids another while a sweep or its proposal is open. No schedule approves a proposal.
+1. **Measure without the person's machine.** Existing CI logs and JUnit XML first, the format
+   most runners write (pytest, jest, vitest, Go through gotestsum, cargo-nextest, .NET, Maven,
+   Gradle); Rust's libtest and Node's TAP are read too. Then, when there are none, one CI run
+   dispatched under a cost cap in minutes, shown before it starts. Only a repo without CI gets a
+   capped build-lane run. Two runs at one revision tell a flaky test from a failing one. Each
+   time keeps its method, and times are compared within one method only. A cut or unreadable
+   file is a partial run: what it did not report is unknown, never passing.
+2. **Flag what to look at.** Tests slower than the budget's per-test limit, flaky or failing ones,
+   bodies that wait on the clock or assert UI text or presence, bodies the same as another's, and
+   tests whose gate failures in that project were their own more than once and never caught
+   anything (the fix changed only tests).
+3. **Classify each flagged test** by reading it: the decision it checks and the module that makes
+   it, a scenario that proves real I/O, a presence test, a wall-clock wait, a duplicate, a
+   restatement of the implementation, or one worth keeping as it is, with why.
+4. **Propose one goal** the person approves: a refactor card per module (the decisions to lift
+   into pure functions, the scenarios kept, the time measured), a card for clock waits, a time
+   budget naming the scenarios, one deletion card after the refactors that names what covers
+   each test, and, where the repo has CI, a playbook change that sends every test command there.
+   Nothing is deleted or refactored before that approval, and the deletions take one more.
+
+The rules every proposal follows: time is an input; no presence tests; one or two end-to-end
+scenarios per feature, with the decisions inside them as pure functions; full suites in CI, never
+on the person's machine; one approval for the whole deletion list. Measure before and after, and
+never claim a saving that was not measured.
+
+A running Crew can opt into the light mode, `[schedule] test_health = "nightly"` or `"weekly"`
+(UTC periods; default `"off"`; `test_sweep`, its old name, still works): one report-only health
+check per period, which respects Crew's start and pause limits and is not filed again while one
+is open. No schedule approves a proposal.
 
 
 ## First Nitely sweep: retain contracts, reduce setup

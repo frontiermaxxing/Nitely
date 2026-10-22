@@ -5,16 +5,19 @@ use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-pub const GUIDE: &str = include_str!("test_sweep_guide.md");
+/// The method of /nitely-test-optimize, from evidence to one goal; a scheduled health check
+/// follows it as far as the report.
+pub const GUIDE: &str = include_str!("test_optimize_method.md");
 /// The analysis step of /nitely-test-optimize: classifying each flagged test (NIT-555).
 pub const OPTIMIZE_GUIDE: &str = include_str!("test_optimize_guide.md");
 pub const COLLECTOR: &str = include_str!("test_sweep.cjs");
 pub const LABEL: &str = "test-sweep";
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Schedule {
-    /// off (default), nightly (UTC day), or weekly (UTC seven-day bucket). Requires running Crew.
-    #[serde(default)]
-    pub test_sweep: Option<String>,
+    /// The light, report-only health check: off (default), nightly (UTC day), or weekly (UTC
+    /// seven-day bucket). Requires running Crew. `test_sweep`, its old name, still reads.
+    #[serde(default, alias = "test_sweep")]
+    pub test_health: Option<String>,
 }
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Candidate {
@@ -95,13 +98,13 @@ pub fn schedule(
     actor: &Actor,
     now: i64,
 ) -> Result<()> {
-    let period = match rules.test_sweep.as_deref().unwrap_or("off") {
+    let period = match rules.test_health.as_deref().unwrap_or("off") {
         "off" => return Ok(()),
         "nightly" => now / 86400,
         "weekly" => now / (86400 * 7),
-        other => bail!("schedule.test_sweep must be off, nightly or weekly, not {other}"),
+        other => bail!("schedule.test_health must be off, nightly or weekly, not {other}"),
     };
-    let bucket = format!("{}-{period}", rules.test_sweep.as_deref().unwrap());
+    let bucket = format!("{}-{period}", rules.test_health.as_deref().unwrap());
     let reserved = db.conn.execute("INSERT INTO test_sweep_schedule(project,bucket,reserved_at) VALUES(?1,?2,?3) ON CONFLICT(project) DO UPDATE SET bucket=excluded.bucket,reserved_at=excluded.reserved_at,issue=NULL WHERE test_sweep_schedule.bucket != excluded.bucket OR (test_sweep_schedule.issue IS NULL AND test_sweep_schedule.reserved_at < ?3-3600)", rusqlite::params![project,bucket,now])?;
     if reserved == 0 {
         return Ok(());
@@ -1297,9 +1300,9 @@ mod tests {
         let mut db = Db::open(&crate::paths::unique_temp("nitely-sweep", "").join("t.db")).unwrap();
         db.create_project("APP", "Example").unwrap();
         let actor = Actor::Agent("codex:sweep".into());
-        let rules = Schedule {
-            test_sweep: Some("nightly".into()),
-        };
+        // An old playbook's `test_sweep` still schedules the health check (NIT-558).
+        let rules: Schedule = toml::from_str("test_sweep = \"nightly\"").unwrap();
+        assert_eq!(rules.test_health.as_deref(), Some("nightly"));
         schedule(&mut db, "APP", &rules, &actor, 100000).unwrap();
         schedule(&mut db, "APP", &rules, &actor, 100001).unwrap();
         schedule(&mut db, "APP", &rules, &actor, 200000).unwrap();
@@ -1318,8 +1321,8 @@ mod tests {
         schedule(&mut db, "APP", &rules, &actor, 300000).unwrap();
         assert_eq!(db.list_issues(Some("APP"), true).unwrap().len(), 2);
     }
-    /// The tests to classify come from the evidence (slow by one method, flaky, a hint, a
-    /// candidate), and the map needs a class for each of them and for nothing else.
+    /// A test the project's gates record failing only for its own sake is flagged, by itself
+    /// (NIT-565).
     #[test]
     fn the_gate_record_flags_a_test_whose_failures_were_only_its_own() {
         use crate::test_catches::TestCatches;
@@ -1348,6 +1351,8 @@ mod tests {
         assert!(report.flagged(2.0, &[]).is_empty(), "without the record, nothing flags it");
     }
 
+    /// The tests to classify come from the evidence (slow by one method, flaky, a hint, a
+    /// candidate), and the map needs a class for each of them and for nothing else.
     #[test]
     fn flagged_tests_need_a_class_each_and_the_map_groups_decisions_by_module() {
         let rev = "c".repeat(40);

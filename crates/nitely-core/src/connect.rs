@@ -93,6 +93,13 @@ impl Change {
         Change { target: path.to_string_lossy().into_owned(), action: action.into(), why: why.into(), before, after }
     }
 
+    /// A file Nitely wrote once and no longer writes, to remove: only when it is still there and
+    /// begins as Nitely wrote it (`mark`), so a file the person made under that name stays.
+    fn retire(path: &Path, why: &str, mark: &str) -> Option<Change> {
+        let before = std::fs::read_to_string(path).ok().filter(|b| b.replace("\r\n", "\n").starts_with(mark))?;
+        Some(Change { target: path.to_string_lossy().into_owned(), action: "remove".into(), why: why.into(), before: Some(before), after: String::new() })
+    }
+
     /// A JSON file, unchanged when it already holds the same value however it is formatted, so a
     /// file the user or another tool reformatted is not reported as out of date.
     fn json(path: &Path, why: &str, value: &Value) -> Change {
@@ -368,6 +375,7 @@ pub fn apply_agents(agents: &[AgentPlan]) -> (Vec<String>, Vec<String>) {
             let result = match change.action.as_str() {
                 "run" => run(&change.after),
                 "manual" => Err(anyhow::anyhow!("not changed by Nitely; {}", change.after)),
+                "remove" => remove(Path::new(&change.target)),
                 _ => write(Path::new(&change.target), &change.after),
             };
             match result {
@@ -538,10 +546,12 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
         format!("---\nname: nitely\ndescription: How to take, report, submit and land work in a repo Nitely tracks. Use it whenever the nitely MCP tools are available or the session says the repo is connected to Nitely.\n---\n\n{WORKFLOW}\n"),
     ));
     changes.push(Change::file(
-        &dir.join("skills").join("nitely-test-sweep").join("SKILL.md"),
-        "a report-only test hygiene sweep skill",
-        format!("---\nname: nitely-test-sweep\ndescription: Inspect Rust and Node test evidence and propose one editable human decision.\n---\n\n{}", crate::test_sweep::GUIDE),
+        &dir.join("skills").join("nitely-test-optimize").join("SKILL.md"),
+        "a skill that makes a repo's tests cost what they are worth (/nitely-test-optimize)",
+        test_optimize_skill(),
     ));
+    // The skill it replaces (NIT-558), when Nitely wrote it.
+    changes.extend(Change::retire(&dir.join("skills").join("nitely-test-sweep").join("SKILL.md"), "the nitely-test-sweep skill, replaced by nitely-test-optimize", "---\nname: nitely-test-sweep\n"));
     let setup = dir.join("skills").join("nitely-setup").join("SKILL.md");
     changes.push(Change::file(
         &setup,
@@ -724,6 +734,25 @@ fn pretty(v: &Value) -> String {
     serde_json::to_string_pretty(v).unwrap_or_default() + "\n"
 }
 
+/// The /nitely-test-optimize skill: its method from evidence to one goal, then how to classify
+/// the flagged tests.
+pub(crate) fn test_optimize_skill() -> String {
+    let description = "Measure a repo's tests from CI logs or JUnit XML in any language, flag the slow, flaky, timing-dependent and UI-presence ones, and propose one goal the person approves: refactor cards by module, a deletion list naming what covers each test, a time budget and CI routing. Use it when asked to optimize, speed up, clean up or audit a test suite.";
+    format!("---\nname: nitely-test-optimize\ndescription: {}\n---\n\n{}\n{}", Value::String(description.into()), crate::test_sweep::GUIDE, crate::test_sweep::OPTIMIZE_GUIDE)
+}
+
+/// Removes a file Nitely wrote, and its folder once nothing else is in it.
+fn remove(path: &Path) -> Result<()> {
+    match std::fs::remove_file(path) {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("removing {}", path.display())),
+        _ => {}
+    }
+    if let Some(dir) = path.parent() {
+        std::fs::remove_dir(dir).ok();
+    }
+    Ok(())
+}
+
 fn write(path: &Path, text: &str) -> Result<()> {
     if let Some(dir) = path.parent() {
         std::fs::create_dir_all(dir)?;
@@ -880,7 +909,7 @@ mod tests {
 
         let first = agent_plans("nitely", true);
         let setup = home.join(".claude").join("skills").join("nitely-setup").join("SKILL.md");
-        let sweep = home.join(".claude").join("skills").join("nitely-test-sweep").join("SKILL.md");
+        let sweep = home.join(".claude").join("skills").join("nitely-test-optimize").join("SKILL.md");
         let mut expected = [home.join(".claude").join("settings.json"), home.join(".claude").join("skills").join("nitely").join("SKILL.md"), setup.clone(), sweep.clone()]
             .map(|p| p.to_string_lossy().into_owned()).to_vec();
         let mut pending = pending_in(&first);
@@ -889,9 +918,22 @@ mod tests {
         assert_eq!(pending, expected, "hooks and all three skills must be installed");
         assert!(apply_agents(&first).1.is_empty());
         assert!(std::fs::read_to_string(&sweep).unwrap().contains(crate::test_sweep::GUIDE));
+        assert!(std::fs::read_to_string(&sweep).unwrap().starts_with("---\nname: nitely-test-optimize\ndescription: \"Measure"));
         let written = std::fs::read_to_string(&setup).unwrap();
         assert!(written.starts_with("---\nname: nitely-setup\ndescription: \"Set up a project in Nitely: "), "{written}");
         assert_eq!(pending_changes(&agent_plans("nitely", true)), 0);
+        // The skill it replaced goes, when Nitely wrote it; one the person wrote under that name stays.
+        let old = home.join(".claude").join("skills").join("nitely-test-sweep").join("SKILL.md");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "---\r\nname: nitely-test-sweep\r\ndescription: Inspect Rust and Node test evidence\r\n---\r\n").unwrap();
+        let plans = agent_plans("nitely", true);
+        assert_eq!(pending_in(&plans), [old.to_string_lossy().into_owned()]);
+        assert!(apply_agents(&plans).1.is_empty());
+        assert!(!old.parent().unwrap().exists(), "the file and its folder are gone");
+        std::fs::create_dir_all(old.parent().unwrap()).unwrap();
+        std::fs::write(&old, "my own notes").unwrap();
+        assert_eq!(pending_changes(&agent_plans("nitely", true)), 0, "not Nitely's file: left alone");
+        std::fs::remove_dir_all(old.parent().unwrap()).unwrap();
 
         // Reformatting a JSON file is not a change; an old copy of the workflow is.
         let settings = home.join(".claude").join("settings.json");

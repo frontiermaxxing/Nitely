@@ -562,8 +562,8 @@ fn tools() -> Value {
             } }
         },
         {
-            "name": "test_sweep_guide",
-            "description": "Report-only Rust/Node test hygiene sweep, bounded evidence collection and editable human proposal. No automatic test deletion.",
+            "name": "test_optimize_guide",
+            "description": "How to make a repo's tests cost what they are worth (/nitely-test-optimize), in any language: measure from CI logs or JUnit XML under a cost cap, classify the slow, flaky, clock-waiting and UI-presence tests, and propose one goal with `test_optimize_propose`. Nothing is deleted or refactored before the person approves.",
             "inputSchema": { "type": "object", "properties": {} }
         },
         {
@@ -1479,7 +1479,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let issues: Vec<_> = db.list_issues(Some(&project), include_closed)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))).collect();
             json!(issues)
         }
-        "test_sweep_guide" => json!({ "guide": nitely_core::test_sweep::GUIDE, "classify": nitely_core::test_sweep::OPTIMIZE_GUIDE }),
+        // `test_sweep_guide`, its old name, for agents with older instructions (NIT-558).
+        "test_optimize_guide" | "test_sweep_guide" => json!({ "guide": nitely_core::test_sweep::GUIDE, "classify": nitely_core::test_sweep::OPTIMIZE_GUIDE }),
         "test_optimize_propose" => {
             use nitely_core::test_sweep;
             let project = project(&db)?;
