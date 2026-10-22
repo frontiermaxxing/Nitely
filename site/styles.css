@@ -270,18 +270,24 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 24px; }
 
 .lb-podium { margin-top: 20px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 16px; }
 .lb-card { padding: 20px; border-radius: 12px; background: var(--surface); box-shadow: 0 0 0 1px var(--line); display: flex; flex-direction: column; gap: 14px; }
-.lb-card-head { display: flex; align-items: center; gap: 10px; }
-.lb-card-head .name { font-weight: 600; flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-card-head { display: flex; align-items: center; gap: 12px; min-width: 0; }
+.lb-card-head .who { flex: 1; min-width: 0; display: flex; flex-direction: column; align-items: flex-start; gap: 5px; }
+.lb-card-head .name { max-width: 100%; font-size: 17px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lb-card-head .rank { align-self: flex-start; }
 .rank { display: inline-grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; font: 600 12px/1 var(--mono); color: var(--fg-2); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .rank.first { color: var(--bg); background: var(--live); box-shadow: none; }
+.avatar { flex: none; display: inline-flex; align-items: center; justify-content: center; border-radius: 50%; object-fit: cover; vertical-align: middle; background: var(--bg); color: var(--fg-2); box-shadow: inset 0 0 0 1px var(--line-strong); font-weight: 550; line-height: 1; letter-spacing: 0.02em; user-select: none; }
+.lb-table td.name .avatar { margin-right: 8px; }
 .lb-figure { display: flex; align-items: baseline; gap: 8px; }
-.lb-figure .big { font-size: 34px; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
+.lb-figure .big { font-size: 40px; line-height: 1; font-weight: 600; letter-spacing: -0.03em; font-variant-numeric: tabular-nums; }
 .lb-figure .unit { color: var(--fg-3); font-size: 13px; }
-.bars { display: flex; align-items: flex-end; gap: 3px; height: 28px; }
+.bars { display: flex; align-items: flex-end; gap: 3px; height: 32px; }
 .bars i { flex: 1; background: var(--fg-3); border-radius: 1px; opacity: 0.7; }
-.lb-meta { display: flex; flex-wrap: wrap; gap: 4px 14px; color: var(--fg-3); font-size: 13px; }
-.lb-links { display: flex; flex-wrap: wrap; gap: 4px 14px; font-size: 13px; }
-.lb-links a { text-decoration: none; color: var(--fg-2); }
+/* The secondary stats: one quiet line, dot-separated, cut short rather than wrapped. */
+.lb-meta { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--fg-3); font-size: 13px; font-variant-numeric: tabular-nums; }
+.lb-meta span + span::before { content: "\00B7"; margin: 0 7px; }
+.lb-links { display: flex; flex-wrap: wrap; gap: 2px 12px; margin-top: -4px; font-size: 12px; }
+.lb-links a { text-decoration: none; color: var(--fg-3); }
 .lb-links a:hover { color: var(--fg); }
 .quiet { color: var(--fg-3); }
 .crew { display: inline-flex; gap: 3px; }
@@ -291,7 +297,8 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 24px; }
 .lb-table-wrap { margin-top: 28px; overflow-x: auto; border-radius: 12px; box-shadow: 0 0 0 1px var(--line); }
 .lb-table { width: 100%; border-collapse: collapse; font-size: 14px; }
 .lb-table th { text-align: left; font-weight: 500; color: var(--fg-3); font-size: 13px; padding: 12px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
-.lb-table td { padding: 11px 14px; border-bottom: 1px solid var(--line); white-space: nowrap; }
+.lb-table td { height: 48px; padding: 0 14px; border-bottom: 1px solid var(--line); white-space: nowrap; vertical-align: middle; }
+.lb-table td .crew { display: flex; }
 .lb-table tr:last-child td { border-bottom: 0; }
 .lb-table .num { text-align: right; font-variant-numeric: tabular-nums; }
 .lb-table th.sorted, .lb-table td.sorted { color: var(--fg); }
@@ -307,4 +314,33 @@ main { max-width: var(--wrap); margin: 0 auto; padding: 0 24px; }
 
 @media (max-width: 860px) {
   .lb-podium, .lb-how { grid-template-columns: minmax(0, 1fr); }
+}
+
+/* A person's page, /u/<id> (NIT-632). Its parts start hidden and the script shows the ones it fills. */
+.u [hidden] { display: none; }
+.u-head { padding: 72px 0 0; display: flex; align-items: center; gap: 22px; min-width: 0; }
+.u-head .avatar { width: 72px; height: 72px; font-size: 28px; }
+.u-who { min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.u-who h1 { font-size: clamp(32px, 5vw, 48px); letter-spacing: -0.035em; overflow-wrap: anywhere; }
+.u-rank { color: var(--fg-2); font-size: 17px; font-variant-numeric: tabular-nums; }
+.u .lb-controls { margin-top: 36px; }
+.u-body { margin-top: 28px; padding: 28px; border-radius: 12px; background: var(--surface); box-shadow: 0 0 0 1px var(--line); display: flex; flex-direction: column; gap: 28px; }
+.u-figure .big { font-size: clamp(56px, 9vw, 88px); line-height: 1; }
+.u-figure .unit { font-size: 16px; }
+.u-stats { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 18px 24px; }
+.u-stats dt { color: var(--fg-3); font-size: 13px; }
+.u-stats dd { margin: 4px 0 0; font-size: 20px; font-weight: 600; font-variant-numeric: tabular-nums; overflow-wrap: anywhere; }
+.u-records { padding-top: 22px; border-top: 1px solid var(--line); }
+.u-records dd { font-size: 17px; font-weight: 500; }
+.u-bars { height: 72px; }
+.u-bars i.now { background: var(--live); opacity: 1; }
+.u-caption { margin-top: 8px; color: var(--fg-3); font-size: 13px; }
+.u-more { margin-top: 64px; padding-top: 32px; border-top: 1px solid var(--line); max-width: 640px; }
+.u-more p { color: var(--fg-2); font-size: 15px; }
+.u-actions { margin-top: 20px; display: flex; flex-wrap: wrap; gap: 10px; }
+
+@media (max-width: 560px) {
+  .u-head { padding-top: 48px; gap: 16px; align-items: flex-start; }
+  .u-head .avatar { width: 56px; height: 56px; font-size: 22px; }
+  .u-body { padding: 20px; }
 }

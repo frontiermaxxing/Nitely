@@ -27,6 +27,9 @@ pub const DEFAULT_URL: &str = "https://api.nitely.net";
 const STATE_FILE: &str = "leaderboard.json";
 const KEY_FILE: &str = "leaderboard-key";
 const WEEK: i64 = 7 * 86_400;
+const DAY: i64 = 86_400;
+/// The local hour on Sunday from which a send closes the week (NIT-629).
+const SEND_HOUR: i64 = 18;
 
 /// What joining saved.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -52,8 +55,12 @@ pub struct Status {
     /// The public key, the install's id on the board; None before joining.
     pub id: Option<String>,
     pub url: String,
-    /// Whether the weekly send would go now.
+    /// Whether the day's send would go now.
     pub due: bool,
+    /// When the next automatic send goes (now, when due); None before the first send by hand.
+    pub next_send_at: Option<i64>,
+    /// When this week's entry closes: its Sunday-evening send, after which it no longer changes.
+    pub week_closes_at: i64,
 }
 
 /// This install's sharing, kept in `dir` (the data folder).
@@ -95,7 +102,8 @@ impl Sharing {
         let state = self.state()?;
         let id = self.secret()?.map(|s| public_id(&s));
         let url = self.url(&state);
-        Ok(Status { due: due(&state, now, crate::leaderboard::local_offset()), state, id, url })
+        let plan = plan(&state, now, crate::leaderboard::local_offset());
+        Ok(Status { due: plan.due, next_send_at: plan.next_send_at, week_closes_at: plan.week_closes_at, state, id, url })
     }
 
     fn secret(&self) -> Result<Option<[u8; 32]>> {
@@ -134,22 +142,23 @@ impl Sharing {
     }
 
     /// Sends this week's report now (the first send is always by hand), replacing any sent
-    /// earlier this week.
+    /// earlier this week. One sent on Sunday evening closes the week.
     pub fn send(&self, config: &nitely_core::Config, db: &nitely_core::db::Db) -> Result<Report> {
         let state = self.state()?;
         if !state.joined {
             bail!("join the Leaderboard first: nothing is sent before you do");
         }
-        let report = crate::leaderboard_report::report_now(config, db, &state.projects, &state.profile)?;
+        let mut report = crate::leaderboard_report::report_now(config, db, &state.projects, &state.profile)?;
+        report.closes_week = closes_week(nitely_core::db::now(), crate::leaderboard::local_offset());
         self.send_report(&report)?;
         Ok(report)
     }
 
-    /// The weekly send: sends only when joined, sent by hand once before, and `due`. Returns the
+    /// The day's send: sends only when joined, sent by hand once before, and `due`. Returns the
     /// week sent, if it sent.
     pub fn send_if_due(&self, config: &nitely_core::Config, db: &nitely_core::db::Db) -> Result<Option<String>> {
         let state = self.state()?;
-        if !due(&state, nitely_core::db::now(), crate::leaderboard::local_offset()) {
+        if !plan(&state, nitely_core::db::now(), crate::leaderboard::local_offset()).due {
             return Ok(None);
         }
         Ok(Some(self.send(config, db)?.week))
@@ -247,16 +256,60 @@ impl Sharing {
     }
 }
 
-/// Whether the weekly send is due: joined, sent by hand at least once, nothing sent this ISO
-/// week yet, and either it is Sunday evening (18:00 on, local) or the last send is a week old.
-pub fn due(state: &State, now: i64, utc_offset: i64) -> bool {
-    use chrono::{Datelike, Timelike};
-    let Some(last) = state.last_sent_at else { return false };
+/// When the sends go (NIT-629).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Plan {
+    /// Joined, sent by hand at least once, and a day since the last send, or Sunday 18:00 local
+    /// passed since it.
+    pub due: bool,
+    /// When the next automatic send goes: now when due, else a day after the last, or Sunday
+    /// 18:00 when that is sooner.
+    pub next_send_at: Option<i64>,
+    /// This week's Sunday at the send hour, when its entry closes; the next week's once the
+    /// closing send went.
+    pub week_closes_at: i64,
+}
+
+/// Today's send hour, local, as a time (`utc_offset` seconds east of UTC).
+fn send_hour_of(now: i64, utc_offset: i64) -> i64 {
+    let local = now + utc_offset;
+    local - local.rem_euclid(DAY) + SEND_HOUR * 3600 - utc_offset
+}
+
+/// Whether a send at `now` is Sunday evening's, which closes its week.
+pub fn closes_week(now: i64, utc_offset: i64) -> bool {
+    use chrono::Datelike;
     let local = chrono::DateTime::from_timestamp(now + utc_offset, 0).unwrap_or_default();
-    let week = local.date_naive().iso_week();
-    let this_week = format!("{}-W{:02}", week.year(), week.week());
-    let sunday_evening = local.weekday() == chrono::Weekday::Sun && local.hour() >= 18;
-    state.joined && state.last_sent_week.as_deref() != Some(this_week.as_str()) && (sunday_evening || now - last >= WEEK)
+    local.weekday() == chrono::Weekday::Sun && now >= send_hour_of(now, utc_offset)
+}
+
+/// When the sends go: once a day, at any hour, and at Sunday 18:00 local when that comes sooner, a
+/// send then closing the week. Nothing goes before the first send by hand.
+pub fn plan(state: &State, now: i64, utc_offset: i64) -> Plan {
+    use chrono::Datelike;
+    let today = send_hour_of(now, utc_offset);
+    let local = chrono::DateTime::from_timestamp(now + utc_offset, 0).unwrap_or_default();
+    let sunday = today + i64::from(6 - local.weekday().num_days_from_monday()) * DAY;
+    let week_closes_at = if state.last_sent_at.is_some_and(|l| l >= sunday) { sunday + WEEK } else { sunday };
+    let Some(last) = state.last_sent_at.filter(|_| state.joined) else {
+        return Plan { due: false, next_send_at: None, week_closes_at };
+    };
+    let next = next_send(last, utc_offset);
+    let due = now >= next;
+    Plan { due, next_send_at: Some(if due { now } else { next }), week_closes_at }
+}
+
+/// When the send after one at `last` goes (NIT-634 review): a day later, at any hour the app is
+/// running then, so someone who runs it only in the morning still shares daily; and at the next
+/// Sunday 18:00 when that comes sooner, so the week closes with a send made then.
+fn next_send(last: i64, utc_offset: i64) -> i64 {
+    use chrono::Datelike;
+    let local = chrono::DateTime::from_timestamp(last + utc_offset, 0).unwrap_or_default();
+    let mut sunday = send_hour_of(last, utc_offset) + i64::from(6 - local.weekday().num_days_from_monday()) * DAY;
+    if sunday <= last {
+        sunday += WEEK;
+    }
+    (last + DAY).min(sunday)
 }
 
 /// The install's id: its public key, base64url without padding.
@@ -285,22 +338,42 @@ mod tests {
 
     const MONDAY: i64 = 1_791_763_200; // 2026-10-12 00:00 UTC
 
+    /// NIT-629: after a first send by hand, a send goes once a day from 18:00 local, and Sunday
+    /// evening's closes the week.
     #[test]
-    fn the_weekly_send_waits_for_a_first_send_by_hand_then_goes_once_a_week() {
+    fn the_send_goes_once_a_day_at_any_hour_and_sunday_evening_closes_the_week() {
+        let h = 3600;
         let mut s = State { joined: true, ..Default::default() };
-        let sunday_evening = MONDAY + 6 * 86_400 + 19 * 3600;
-        assert!(!due(&s, sunday_evening, 0), "never sent by hand: never automatic");
-        s.last_sent_at = Some(MONDAY + 3600);
-        s.last_sent_week = Some("2026-W42".into());
-        assert!(!due(&s, MONDAY + 2 * 86_400, 0), "already sent this week");
-        assert!(!due(&s, sunday_evening, 0), "sent this week, even on Sunday evening");
-        s.last_sent_week = Some("2026-W41".into());
-        assert!(due(&s, sunday_evening, 0), "Sunday evening, not sent this week");
-        assert!(!due(&s, MONDAY + 2 * 86_400, 0), "midweek, sent less than a week ago");
-        assert!(due(&s, MONDAY + 3600 + WEEK, 0), "a week since the last send");
-        assert!(!due(&s, sunday_evening, -2 * 3600), "at UTC-2 it is 17:00 there: not evening yet");
+        let sunday_evening = MONDAY + 6 * DAY + 19 * h;
+        let p = plan(&s, sunday_evening, 0);
+        assert!(!p.due && p.next_send_at.is_none(), "never sent by hand: never automatic");
+        // Sent by hand Monday 10:00: the next goes a day later, at whatever hour the app runs then.
+        s.last_sent_at = Some(MONDAY + 10 * h);
+        let p = plan(&s, MONDAY + 20 * h, 0);
+        assert_eq!((p.due, p.next_send_at), (false, Some(MONDAY + DAY + 10 * h)), "once a day: tomorrow at 10:00");
+        let p = plan(&s, MONDAY + DAY + 9 * h, 0);
+        assert!(!p.due, "not a day yet");
+        let p = plan(&s, MONDAY + DAY + 11 * h, 0);
+        assert_eq!((p.due, p.next_send_at), (true, Some(MONDAY + DAY + 11 * h)), "a day since: now");
+        // NIT-634 review: someone who runs the app only in the morning, weeks after the last send,
+        // still sends.
+        assert!(plan(&s, MONDAY + 3 * WEEK + 8 * h, 0).due);
+        // Saturday 20:00's send: the next comes Sunday 18:00, sooner than a day, to close the week.
+        s.last_sent_at = Some(MONDAY + 5 * DAY + 20 * h);
+        let p = plan(&s, MONDAY + 6 * DAY + 12 * h, 0);
+        assert_eq!((p.due, p.next_send_at), (false, Some(MONDAY + 6 * DAY + 18 * h)));
+        assert!(plan(&s, sunday_evening, 0).due);
+        assert_eq!(p.week_closes_at, MONDAY + 6 * DAY + 18 * h);
+        assert!(closes_week(sunday_evening, 0) && !closes_week(MONDAY + 6 * DAY + 17 * h, 0) && !closes_week(MONDAY + 20 * h, 0));
+        s.last_sent_at = Some(sunday_evening);
+        assert_eq!(plan(&s, sunday_evening + h, 0).week_closes_at, MONDAY + 13 * DAY + 18 * h, "closed: the next week's");
+        assert_eq!(plan(&s, sunday_evening + h, 0).next_send_at, Some(sunday_evening + DAY), "and a day later after the closing send");
+        // Local time: at UTC-2, 19:00 UTC on Sunday is 17:00 there, before the week closes.
+        assert!(!closes_week(sunday_evening, -2 * h));
+        s.last_sent_at = Some(MONDAY + 5 * DAY + 20 * h);
+        assert_eq!(plan(&s, MONDAY + 6 * DAY + 12 * h, -2 * h).next_send_at, Some(MONDAY + 6 * DAY + 20 * h), "Sunday 18:00 there is 20:00 UTC");
         s.joined = false;
-        assert!(!due(&s, sunday_evening, 0));
+        assert!(!plan(&s, MONDAY + 3 * WEEK, 0).due);
     }
 
     #[test]
@@ -311,11 +384,13 @@ mod tests {
             schema: 1,
             display_name: "x".into(),
             links: Default::default(),
+            avatar: None,
             week: "2026-W42".into(),
             projects: 0,
             periods: vec![],
             weekly: vec![],
             records: Default::default(),
+            closes_week: false,
         };
         let err = sharing.send_report(&report).unwrap_err().to_string();
         assert!(err.contains("join the Leaderboard first"), "{err}");
@@ -396,11 +471,13 @@ Connection: close
             schema: 1,
             display_name: "x".into(),
             links: Default::default(),
+            avatar: None,
             week: "2026-W43".into(),
             projects: 0,
             periods: vec![],
             weekly: vec![],
             records: Default::default(),
+            closes_week: false,
         };
 
         // Not joined: nothing goes anywhere, whatever is asked.
@@ -412,7 +489,7 @@ Connection: close
         assert_eq!(service.connections(), 0, "before joining");
 
         // Joining and changing the profile: still nothing, and no weekly send before one by hand.
-        let profile = Profile { display_name: "Night Owl".into(), github: Some("octocat".into()), x: None, website: None };
+        let profile = Profile { display_name: "Night Owl".into(), github: Some("octocat".into()), x: None, website: None, avatar: None };
         sharing.join(&profile, &[], Some(&service.url)).unwrap();
         sharing.join(&Profile { display_name: "Owl".into(), ..profile.clone() }, &["NIT".into()], None).unwrap();
         assert!(sharing.status(1_792_000_000).unwrap().state.joined);

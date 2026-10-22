@@ -13,7 +13,14 @@
 //! - `X-Nitely-Signature`: base64url ed25519 over
 //!   `nitely-leaderboard-v1\n{METHOD}\n{path}\n{key}\n{time}\n{hex sha256 of the body}`, where the
 //!   path is the one after the service's base (`/v1/leaderboard/reports`).
+//!
+//! It also serves each person's public page, `/u/<id>`, and its share card (NIT-632; `page`,
+//! `card`), built from the boards it already keeps.
 
+pub mod card;
+pub mod page;
+
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::path::Path;
@@ -45,6 +52,10 @@ const MAX_BODY: usize = 64 << 10;
 const MAX_HEAD: usize = 8 << 10;
 const MAX_CONNECTIONS: usize = 64;
 const IO_TIMEOUT: Duration = Duration::from_secs(10);
+/// Where people's pages live when `serve` is given no other site.
+pub const SITE: &str = "https://nitely.net";
+/// Share cards kept drawn; past this the cache starts over.
+const CARDS_KEPT: usize = 2_000;
 
 // ---- The report, exactly as the client builds it (nitely_crew::leaderboard_report) ----
 
@@ -54,11 +65,19 @@ pub struct Report {
     pub schema: u32,
     pub display_name: String,
     pub links: Links,
+    /// `github` or `x`: which link gives the picture (NIT-630). Pages build its address from the
+    /// handle; nothing here stores or fetches an image.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar: Option<String>,
     pub week: String,
     pub projects: u64,
     pub periods: Vec<Period>,
     pub weekly: Vec<u64>,
     pub records: Records,
+    /// Sent on Sunday evening: the week's final report, which the board keeps as the week's
+    /// (NIT-629). Left out when false, so a report that does not close its week reads as before.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub closes_week: bool,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -149,6 +168,12 @@ pub fn check(r: &Report, now: i64) -> std::result::Result<(), String> {
     {
         return Err("links: a GitHub or X user name and an https website".into());
     }
+    match r.avatar.as_deref() {
+        None => {}
+        Some("github") if r.links.github.is_some() => {}
+        Some("x") if r.links.x.is_some() => {}
+        _ => return Err("avatar: github or x, with that link given".into()),
+    }
     let this = week_of(now);
     if !valid_week(&r.week) || r.week.as_str() > week_of(now + 86_400).as_str() || r.week.as_str() < week_of(now - 8 * 86_400).as_str() {
         return Err(format!("week: this week or last (it is {this} here)"));
@@ -202,7 +227,14 @@ pub fn message(method: &str, path: &str, key: &str, time: i64, body: &[u8]) -> S
 
 pub struct Store {
     conn: Mutex<Connection>,
+    /// Share cards as drawn, by key, with what each showed: a card is drawn again whenever what it
+    /// would show changes (their send, someone else's that moves their rank, a new week), and a
+    /// delete leaves no page to ask for it.
+    cards: Mutex<HashMap<String, Drawn>>,
 }
+
+/// A share card's content and its PNG.
+type Drawn = (card::Card, Arc<Vec<u8>>);
 
 impl Store {
     pub fn open(path: &Path) -> Result<Store> {
@@ -215,7 +247,7 @@ impl Store {
              CREATE TABLE IF NOT EXISTS seen (key TEXT PRIMARY KEY, last_time INTEGER NOT NULL);
              CREATE TABLE IF NOT EXISTS board (period TEXT PRIMARY KEY, json TEXT NOT NULL);",
         )?;
-        let store = Store { conn: Mutex::new(conn) };
+        let store = Store { conn: Mutex::new(conn), cards: Mutex::default() };
         store.rebuild(chrono::Utc::now().timestamp())?;
         Ok(store)
     }
@@ -250,11 +282,13 @@ impl Store {
         Ok(key.clone())
     }
 
-    /// Keeps `report` as `key`'s for its week, replacing one sent earlier that week.
+    /// Keeps `report` as `key`'s for its week, replacing one sent earlier that week, unless that
+    /// one closed the week (NIT-629: Sunday evening's send is the week's last word).
     pub fn put(&self, key: &str, report: &Report, now: i64) -> Result<()> {
         self.conn().execute(
             "INSERT INTO entry (key, week, report, received_at) VALUES (?1, ?2, ?3, ?4)
-             ON CONFLICT (key, week) DO UPDATE SET report = ?3, received_at = ?4",
+             ON CONFLICT (key, week) DO UPDATE SET report = ?3, received_at = ?4
+             WHERE COALESCE(json_extract(entry.report, '$.closes_week'), 0) = 0",
             params![key, report.week, serde_json::to_string(report)?, now],
         )?;
         self.rebuild(now)
@@ -270,6 +304,52 @@ impl Store {
     /// The board for `period`, as last built.
     pub fn board(&self, period: &str) -> Result<Option<String>> {
         Ok(self.conn().query_row("SELECT json FROM board WHERE period = ?1", [period], |r| r.get(0)).optional()?)
+    }
+
+    /// One person's place on each board they are on: their rank, out of how many, and their row,
+    /// with their name, links and series from their latest report. None when they are on no board
+    /// (never sent, left, or past retention).
+    pub fn person(&self, key: &str) -> Result<Option<Value>> {
+        let mut periods = serde_json::Map::new();
+        for period in PERIODS {
+            let Some(board) = self.board(period)? else { continue };
+            let board: Value = serde_json::from_str(&board)?;
+            let entries = board["entries"].as_array().map(Vec::as_slice).unwrap_or_default();
+            if let Some(i) = entries.iter().position(|e| e["id"] == key) {
+                periods.insert(period.into(), json!({ "rank": i + 1, "of": entries.len(), "week": board["week"], "entry": entries[i] }));
+            }
+        }
+        // Every report is on the all-time board, so its row is the latest one.
+        let Some(latest) = periods.get("all").map(|p| p["entry"].clone()) else { return Ok(None) };
+        Ok(Some(json!({
+            "id": key,
+            "display_name": latest["display_name"],
+            "links": latest["links"],
+            "avatar": latest["avatar"],
+            "week": latest["week"],
+            "updated_at": latest["updated_at"],
+            "weekly": latest["weekly"],
+            "records": latest["records"],
+            "periods": periods,
+        })))
+    }
+
+    /// `key`'s share card as a PNG, drawn again only when what it shows has changed.
+    pub fn card(&self, key: &str, site: &str) -> Result<Option<Arc<Vec<u8>>>> {
+        let Some(person) = self.person(key)? else { return Ok(None) };
+        let Some(card) = page::card(&person, site) else { return Ok(None) };
+        let mut cards = self.cards.lock().unwrap_or_else(|p| p.into_inner());
+        if let Some((drawn, png)) = cards.get(key) {
+            if *drawn == card {
+                return Ok(Some(png.clone()));
+            }
+        }
+        let png = Arc::new(card::render(&card)?);
+        if cards.len() >= CARDS_KEPT {
+            cards.clear();
+        }
+        cards.insert(key.to_string(), (card, png.clone()));
+        Ok(Some(png))
     }
 
     /// Drops what is past retention and rebuilds every period's board.
@@ -298,7 +378,7 @@ impl Store {
                 "30d" => latest.values().copied().filter(|r| r.1 >= month_ago).collect(),
                 _ => latest.values().copied().collect(),
             };
-            let mut entries: Vec<Value> = chosen.iter().filter_map(|(key, _, r, _)| entry(key, r, period)).collect();
+            let mut entries: Vec<Value> = chosen.iter().filter_map(|(key, _, r, at)| entry(key, r, period, *at)).collect();
             entries.sort_by(|a, b| {
                 let landed = |v: &Value| v["landed"].as_u64().unwrap_or(0);
                 landed(b).cmp(&landed(a)).then_with(|| a["display_name"].as_str().cmp(&b["display_name"].as_str()))
@@ -316,8 +396,9 @@ impl Store {
     }
 }
 
-/// One row of a board: who (the key, the name and links they chose) and the period's numbers.
-fn entry(key: &str, r: &Report, period: &str) -> Option<Value> {
+/// One row of a board: who (the key, the name and links they chose), the period's numbers, when
+/// the report came, and whether it closed its week.
+fn entry(key: &str, r: &Report, period: &str, received_at: i64) -> Option<Value> {
     let p = r.periods.iter().find(|p| p.period == period)?;
     let mut v = serde_json::to_value(p).ok()?;
     let o = v.as_object_mut()?;
@@ -325,10 +406,15 @@ fn entry(key: &str, r: &Report, period: &str) -> Option<Value> {
     o.insert("id".into(), json!(key));
     o.insert("display_name".into(), json!(r.display_name));
     o.insert("links".into(), serde_json::to_value(&r.links).ok()?);
+    if let Some(a) = &r.avatar {
+        o.insert("avatar".into(), json!(a));
+    }
     o.insert("projects".into(), json!(r.projects));
     o.insert("week".into(), json!(r.week));
     o.insert("weekly".into(), json!(r.weekly));
     o.insert("records".into(), serde_json::to_value(&r.records).ok()?);
+    o.insert("updated_at".into(), json!(received_at));
+    o.insert("closed".into(), json!(r.closes_week));
     Some(v)
 }
 
@@ -396,25 +482,64 @@ pub fn handle(store: &Store, req: &Request, now: i64) -> (u16, &'static str, Str
     }
 }
 
+/// Answers a request for a person's page or card, `/u/<id>` and `/u/<id>/card.png`, whose links
+/// point at `site`; None for any other path. Someone who left, or never sent, has a 404.
+pub fn handle_page(store: &Store, req: &Request, site: &str) -> Option<(u16, &'static str, Vec<u8>)> {
+    let rest = req.path.strip_prefix("/u/")?;
+    if req.method != "GET" {
+        return Some((405, "application/json", json!({ "error": "method not allowed" }).to_string().into_bytes()));
+    }
+    let html = "text/html; charset=utf-8";
+    let (id, png) = match rest.strip_suffix("/card.png") {
+        Some(id) => (id, true),
+        None => (rest.trim_end_matches('/'), false),
+    };
+    if !page::valid_id(id) {
+        return Some((404, html, page::render(None, "", site).into_bytes()));
+    }
+    let failed = |e: anyhow::Error| Some((500, "application/json", json!({ "error": server_error(e).1 }).to_string().into_bytes()));
+    if png {
+        return match store.card(id, site) {
+            Ok(Some(png)) => Some((200, "image/png", png.to_vec())),
+            Ok(None) => Some((404, "application/json", json!({ "error": "not on the board" }).to_string().into_bytes())),
+            Err(e) => failed(e),
+        };
+    }
+    match store.person(id) {
+        Ok(Some(p)) => Some((200, html, page::render(Some(&p), id, site).into_bytes())),
+        Ok(None) => Some((404, html, page::render(None, id, site).into_bytes())),
+        Err(e) => failed(e),
+    }
+}
+
 /// Serves `store` on `listener` until it fails. `base` is a path prefix the proxy may leave on
-/// (`/api`); requests are matched with it taken off.
+/// (`/api`); requests are matched with it taken off. People's pages link to `SITE`.
 pub fn serve(listener: TcpListener, store: Arc<Store>, base: String) {
+    serve_site(listener, store, base, SITE.to_string())
+}
+
+/// `serve`, with people's pages linking to `site` (like `https://example.com`).
+pub fn serve_site(listener: TcpListener, store: Arc<Store>, base: String, site: String) {
     let active = Arc::new(AtomicUsize::new(0));
     for stream in listener.incoming() {
         let Ok(mut stream) = stream else { continue };
         if active.load(Ordering::SeqCst) >= MAX_CONNECTIONS {
-            respond(&mut stream, 503, "application/json", r#"{"error":"busy, try again shortly"}"#, false);
+            respond(&mut stream, 503, "application/json", br#"{"error":"busy, try again shortly"}"#, false);
             continue;
         }
         active.fetch_add(1, Ordering::SeqCst);
-        let (store, base, active) = (store.clone(), base.clone(), active.clone());
+        let (store, base, site, active) = (store.clone(), base.clone(), site.clone(), active.clone());
         std::thread::spawn(move || {
             let (status, kind, body, public) = match read_request(&mut stream, &base) {
-                Ok(req) => {
-                    let (status, kind, body) = handle(&store, &req, chrono::Utc::now().timestamp());
-                    (status, kind, body, status == 200 && req.method == "GET" && req.path.starts_with("/v1/leaderboard/board/"))
-                }
-                Err((status, m)) => (status, "application/json", json!({ "error": m }).to_string(), false),
+                Ok(req) => match handle_page(&store, &req, &site) {
+                    // A page and its card change only when a report comes: a short public cache.
+                    Some((status, kind, body)) => (status, kind, body, status == 200),
+                    None => {
+                        let (status, kind, body) = handle(&store, &req, chrono::Utc::now().timestamp());
+                        (status, kind, body.into_bytes(), status == 200 && req.method == "GET" && req.path.starts_with("/v1/leaderboard/board/"))
+                    }
+                },
+                Err((status, m)) => (status, "application/json", json!({ "error": m }).to_string().into_bytes(), false),
             };
             respond(&mut stream, status, kind, &body, public);
             active.fetch_sub(1, Ordering::SeqCst);
@@ -485,12 +610,13 @@ fn read_some(stream: &mut TcpStream, chunk: &mut [u8], into: &mut Vec<u8>, deadl
     }
 }
 
-fn respond(stream: &mut TcpStream, status: u16, kind: &str, body: &str, public: bool) {
+fn respond(stream: &mut TcpStream, status: u16, kind: &str, body: &[u8], public: bool) {
     let reason = match status {
         200 => "OK",
         400 => "Bad Request",
         401 => "Unauthorized",
         404 => "Not Found",
+        500 => "Internal Server Error",
         405 => "Method Not Allowed",
         408 => "Request Timeout",
         409 => "Conflict",
@@ -502,7 +628,8 @@ fn respond(stream: &mut TcpStream, status: u16, kind: &str, body: &str, public: 
     };
     let cache = if public { "public, max-age=300" } else { "no-store" };
     let _ = stream.set_write_timeout(Some(IO_TIMEOUT));
-    let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: {cache}\r\nConnection: close\r\n\r\n{body}", body.len());
+    let _ = write!(stream, "HTTP/1.1 {status} {reason}\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nCache-Control: {cache}\r\nX-Content-Type-Options: nosniff\r\nConnection: close\r\n\r\n", body.len());
+    let _ = stream.write_all(body);
     let _ = stream.flush();
     let _ = stream.shutdown(std::net::Shutdown::Write);
     // Read what the client still sends for a moment, so the close is clean and it gets the answer.

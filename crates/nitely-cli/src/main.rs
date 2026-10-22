@@ -552,6 +552,9 @@ enum LeaderboardCmd {
         /// An https address.
         #[arg(long)]
         website: Option<String>,
+        /// The picture the board shows: github or x (from that link), or none.
+        #[arg(long)]
+        avatar: Option<String>,
     },
     /// Join the Leaderboard, or change your display name, links or counted projects: makes this
     /// install's signing key the first time. Sends nothing; `send` does.
@@ -568,11 +571,15 @@ enum LeaderboardCmd {
         x: Option<String>,
         #[arg(long)]
         website: Option<String>,
+        /// The picture the board shows: github or x (from that link), or none.
+        #[arg(long)]
+        avatar: Option<String>,
         /// The service's address (default: NITELY_LEADERBOARD_URL, else Nitely's own).
         #[arg(long)]
         url: Option<String>,
     },
-    /// Send this week's report now (after that, the app sends it once a week).
+    /// Send this week's report now (after that, the app sends it once a day; Sunday evening's
+    /// closes the week).
     Send,
     /// Whether you share, your id, the service's address and the last send.
     Status,
@@ -1940,14 +1947,14 @@ fn run(cmd: Cmd) -> Result<()> {
             let db = Db::open_default()?;
             print_json(&nitely_crew::leaderboard::stats_now(&config, &db, &project)?)
         }
-        Cmd::Leaderboard { command: LeaderboardCmd::Report { project, name, github, x, website } } => {
+        Cmd::Leaderboard { command: LeaderboardCmd::Report { project, name, github, x, website, avatar } } => {
             let config = Config::load()?;
             let db = Db::open_default()?;
-            let profile = nitely_crew::leaderboard_report::Profile { display_name: name, github, x, website };
+            let profile = nitely_crew::leaderboard_report::Profile { display_name: name, github, x, website, avatar };
             print_json(&nitely_crew::leaderboard_report::report_now(&config, &db, &project, &profile)?)
         }
-        Cmd::Leaderboard { command: LeaderboardCmd::Join { name, project, github, x, website, url } } => {
-            let profile = nitely_crew::leaderboard_report::Profile { display_name: name, github, x, website };
+        Cmd::Leaderboard { command: LeaderboardCmd::Join { name, project, github, x, website, avatar, url } } => {
+            let profile = nitely_crew::leaderboard_report::Profile { display_name: name, github, x, website, avatar };
             print_json(&nitely_crew::leaderboard_send::Sharing::default_dir().join(&profile, &project, url.as_deref())?)
         }
         Cmd::Leaderboard { command: LeaderboardCmd::Send } => {

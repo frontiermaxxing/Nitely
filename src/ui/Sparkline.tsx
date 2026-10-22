@@ -9,6 +9,8 @@ export function Sparkline(props: {
   kind?: "line" | "bars";
   color?: string;
   label: string;
+  /** Stretch to the container's width (bars keep `width` as their drawing grid). */
+  fill?: boolean;
 }) {
   const { values } = props;
   const w = props.width ?? 96;
@@ -22,7 +24,15 @@ export function Sparkline(props: {
     const step = w / values.length;
     const bw = Math.max(1, step - Math.min(2, step * 0.3));
     return (
-      <svg className="ui-spark" width={w} height={h} viewBox={`0 0 ${w} ${h}`} role="img" aria-label={props.label}>
+      <svg
+        className="ui-spark"
+        width={props.fill ? "100%" : w}
+        height={h}
+        viewBox={`0 0 ${w} ${h}`}
+        preserveAspectRatio={props.fill ? "none" : undefined}
+        role="img"
+        aria-label={props.label}
+      >
         <title>{props.label}</title>
         {values.map((v, i) => {
           const bh = v === 0 ? 1 : Math.max(2, (v / max) * (h - 1));
