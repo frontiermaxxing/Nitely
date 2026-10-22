@@ -118,6 +118,8 @@ pub fn passed_steps(results: &[CommandResult]) -> Vec<String> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FixSpan {
     pub test: String,
+    /// The gate step that ran it: with the name, what tells two packages' tests of one name apart.
+    pub step: String,
     pub failed: String,
     pub fixed: String,
 }
@@ -130,6 +132,10 @@ pub struct FixSpan {
 /// failure stays open for a gate that does run it. A failure closes once every test in it is
 /// settled, and only then are its spans recorded, so a failure is never recorded twice. A test
 /// that passed on the revision it failed on was a flake: settled, with no span.
+///
+/// A pass that left failures open is kept among them as a row with no tests (NIT-565): it settles
+/// the tests whose steps it ran for the failures before it, as a later failure's passed steps do,
+/// and closes only once every row before it is closed.
 pub fn settle(failures: &[Failure], passed: &str, passed_steps: &[String]) -> (Vec<FixSpan>, Vec<usize>) {
     let (mut spans, mut closed) = (Vec::new(), Vec::new());
     for (i, failure) in failures.iter().enumerate() {
@@ -149,15 +155,41 @@ pub fn settle(failures: &[Failure], passed: &str, passed_steps: &[String]) -> (V
                 }
             };
             if fixed != failure.commit {
-                found.push(FixSpan { test: f.test.clone(), failed: failure.commit.clone(), fixed: fixed.to_string() });
+                found.push(FixSpan { test: f.test.clone(), step: f.step.clone(), failed: failure.commit.clone(), fixed: fixed.to_string() });
             }
         }
-        if all {
+        // A kept pass waits for every row before it: a later pass still needs it to date their fixes.
+        let pass_waits = failure.tests.is_empty() && closed.len() < i;
+        if all && !pass_waits {
             spans.extend(found);
             closed.push(i);
         }
     }
     (spans, closed)
+}
+
+/// Whether a pass is kept as a row of its own (NIT-565): it ran some steps and left failures open,
+/// which a later pass will settle, and some of those it may have seen pass already.
+pub fn keep_pass(open_after: usize, passed_steps: &[String]) -> bool {
+    open_after > 0 && !passed_steps.is_empty()
+}
+
+/// A test's record over a project's gates: how often its failure caught something and how often
+/// it was the test's own.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct TestCatches {
+    pub test: String,
+    pub step: String,
+    pub catches: i64,
+    pub false_alarms: i64,
+}
+
+/// Whether the record alone makes a test a candidate to rewrite or delete (NIT-565): its failures
+/// were the test's own more than once and never caught anything. Per test, not per module: one
+/// test that once caught something does not vouch for its neighbours. A step that named no test
+/// (its command stands in for it) is no test to judge.
+pub fn false_alarm_candidate(t: &TestCatches) -> bool {
+    t.false_alarms >= 2 && t.catches == 0 && t.test != t.step
 }
 
 /// One module's record: how often its failures caught something and how often they were the
@@ -196,9 +228,19 @@ impl Db {
             return Ok(());
         }
         // Only what this gate ran settles anything; the rest stays open for a gate that runs it.
-        let (spans, closed) = settle(&failures, commit, &passed_steps(results));
-        for i in closed {
+        let steps = passed_steps(results);
+        let (spans, closed) = settle(&failures, commit, &steps);
+        let open_after = failures.len() - closed.len();
+        for &i in &closed {
             self.conn.execute("UPDATE gate_failure SET resolved_at = ?2 WHERE id = ?1", params![ids[i], now()])?;
+        }
+        // A pass of only some steps that left failures open: kept, so a later full pass dates
+        // only the fixes this one did not see (NIT-565).
+        if keep_pass(open_after, &steps) {
+            self.conn.execute(
+                "INSERT INTO gate_failure (issue_key, commit_sha, tests, passed_steps, failed_at) VALUES (?1, ?2, '[]', ?3, ?4)",
+                params![issue, commit, serde_json::to_string(&steps)?, now()],
+            )?;
         }
         let mut diffs: std::collections::HashMap<(String, String), Option<Verdict>> = std::collections::HashMap::new();
         for span in spans {
@@ -210,8 +252,8 @@ impl Db {
             });
             let Some(v) = v else { continue }; // A revision git cannot diff records nothing.
             self.conn.execute(
-                "INSERT INTO test_catch (issue_key, test, module, verdict, failed_commit, fixed_commit, at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                params![issue, span.test, module_of(&span.test), v.as_str(), span.failed, span.fixed, now()],
+                "INSERT INTO test_catch (issue_key, test, module, verdict, failed_commit, fixed_commit, at, step) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![issue, span.test, module_of(&span.test), v.as_str(), span.failed, span.fixed, now(), span.step],
             )?;
         }
         Ok(())
@@ -226,6 +268,18 @@ impl Db {
              GROUP BY c.module ORDER BY SUM(c.verdict = 'false_alarm') DESC, c.module",
         )?;
         let rows = stmt.query_map([project], |r| Ok(ModuleCatches { module: r.get(0)?, catches: r.get(1)?, false_alarms: r.get(2)? }))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
+    }
+
+    /// A project's catches and false alarms per test and step (NIT-565), most false alarms first:
+    /// what the sweep reads to name a test whose failures were only ever its own.
+    pub fn catches_by_test(&self, project: &str) -> Result<Vec<TestCatches>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT c.test, c.step, SUM(c.verdict = 'catch'), SUM(c.verdict = 'false_alarm') FROM test_catch c
+             JOIN issue i ON i.key = c.issue_key COLLATE NOCASE WHERE i.project = ?1 COLLATE NOCASE
+             GROUP BY c.test, c.step ORDER BY SUM(c.verdict = 'false_alarm') DESC, c.test, c.step",
+        )?;
+        let rows = stmt.query_map([project], |r| Ok(TestCatches { test: r.get(0)?, step: r.get(1)?, catches: r.get(2)?, false_alarms: r.get(3)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 }
@@ -255,7 +309,7 @@ mod tests {
             tests: tests.iter().map(|(t, s)| Failed { test: t.to_string(), step: s.to_string() }).collect(),
             passed_steps: passed.iter().map(|s| s.to_string()).collect(),
         };
-        let span = |t: &str, a: &str, b: &str| FixSpan { test: t.into(), failed: a.into(), fixed: b.into() };
+        let span = |t: &str, a: &str, b: &str| FixSpan { test: t.into(), step: if t == "B" { "npm".into() } else { "cargo".into() }, failed: a.into(), fixed: b.into() };
         let all = ["cargo".to_string(), "npm".to_string()];
         // A's step passed at c2, where npm failed on B; the pass ran both.
         let seen = [failure("c1", &[("A", "cargo")], &["npm"]), failure("c2", &[("B", "npm")], &["cargo"])];
@@ -270,9 +324,48 @@ mod tests {
         assert_eq!(settle(&twice, "c4", &all).0, vec![span("A", "c1", "c2"), span("B", "c2", "c3"), span("A", "c3", "c4")]);
         // Two steps with a test of one name are two tests: beta's failure is not alpha's episode.
         let named = [failure("c1", &[("tests::roundtrip", "cargo test -p alpha")], &[]), failure("c2", &[("tests::roundtrip", "cargo test -p beta")], &["cargo test -p alpha"])];
-        assert_eq!(settle(&named, "c3", &["cargo test -p alpha".to_string(), "cargo test -p beta".to_string()]).0, vec![span("tests::roundtrip", "c1", "c2"), span("tests::roundtrip", "c2", "c3")]);
+        let at = |step: &str, a: &str, b: &str| FixSpan { test: "tests::roundtrip".into(), step: step.into(), failed: a.into(), fixed: b.into() };
+        assert_eq!(
+            settle(&named, "c3", &["cargo test -p alpha".to_string(), "cargo test -p beta".to_string()]).0,
+            vec![at("cargo test -p alpha", "c1", "c2"), at("cargo test -p beta", "c2", "c3")],
+            "each span keeps its step, so the record counts them apart"
+        );
         // The same revision passing is a flake: settled, no span.
         assert_eq!(settle(&[failure("c1", &[("A", "cargo")], &[])], "c1", &all), (vec![], vec![0]));
+    }
+
+    /// NIT-565: a pass that ran only npm fixed B at c3 and left A open. Kept, it dates B's fix at
+    /// c3 when a full pass at c4 settles A, and closes with them.
+    #[test]
+    fn a_partial_pass_keeps_the_fixes_it_saw() {
+        let failure = |c: &str, tests: &[(&str, &str)], passed: &[&str]| Failure {
+            commit: c.into(),
+            tests: tests.iter().map(|(t, s)| Failed { test: t.to_string(), step: s.to_string() }).collect(),
+            passed_steps: passed.iter().map(|s| s.to_string()).collect(),
+        };
+        let span = |t: &str, s: &str, a: &str, b: &str| FixSpan { test: t.into(), step: s.into(), failed: a.into(), fixed: b.into() };
+        let both = failure("c1", &[("A", "cargo"), ("B", "npm")], &[]);
+        let npm = ["npm".to_string()];
+        let (spans, closed) = settle(std::slice::from_ref(&both), "c3", &npm);
+        assert!(spans.is_empty() && closed.is_empty(), "A is open, so nothing of c1 is recorded yet");
+        assert!(keep_pass(1, &npm), "so the pass at c3 is kept");
+        assert!(!keep_pass(0, &npm) && !keep_pass(1, &[]), "not when nothing is open, nor a pass that ran nothing");
+        let kept = failure("c3", &[], &["npm"]);
+        let (spans, closed) = settle(&[both.clone(), kept.clone()], "c4", &["cargo".to_string(), "npm".to_string()]);
+        assert_eq!(spans, vec![span("A", "cargo", "c1", "c4"), span("B", "npm", "c1", "c3")], "B was fixed by c3, not c4");
+        assert_eq!(closed, vec![0, 1], "the kept pass closes once the failure before it does");
+        // While A stays open, a pass of npm only again leaves both rows open.
+        assert_eq!(settle(&[both, kept], "c4", &npm).1, Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_test_whose_failures_were_only_its_own_is_a_candidate() {
+        let t = |catches: i64, false_alarms: i64| TestCatches { test: "store::tests::roundtrip".into(), step: "cargo test".into(), catches, false_alarms };
+        assert!(false_alarm_candidate(&t(0, 2)), "twice its own, never a catch");
+        assert!(!false_alarm_candidate(&t(0, 1)), "once is not a pattern");
+        assert!(!false_alarm_candidate(&t(1, 5)), "it caught something once");
+        let command = TestCatches { test: "npm run build".into(), step: "npm run build".into(), catches: 0, false_alarms: 3 };
+        assert!(!false_alarm_candidate(&command), "a step that named no test is no test to judge");
     }
 
     #[test]

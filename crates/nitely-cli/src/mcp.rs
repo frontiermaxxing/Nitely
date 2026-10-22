@@ -1488,6 +1488,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let report = test_sweep::Report::read(&here.join(req(args, "report")?))?;
             let classes = test_sweep::read_classes(&here.join(req(args, "classes")?))?;
             let repo = test_sweep::repo_facts(&config, &root)?;
+            let record = db.catches_by_test(&project)?;
             let facts = test_sweep::OptimizeFacts {
                 slow_seconds: args.get("slow").and_then(Value::as_f64).unwrap_or(2.0),
                 tests: &repo.tests,
@@ -1495,6 +1496,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 has_ci: repo.has_ci,
                 has_lanes: repo.has_lanes,
                 playbook: repo.target.as_ref(),
+                record: &record,
             };
             json!(report.propose(&mut db, &project, str_arg(args, "issue").map(String::from), &classes, &facts, &actor)?)
         }

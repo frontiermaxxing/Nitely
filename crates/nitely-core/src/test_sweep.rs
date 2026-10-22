@@ -190,9 +190,10 @@ pub struct Flagged {
 
 impl Report {
     /// The tests to classify: slower than `slow_seconds`, flaky or failing at the report's
-    /// revision, or whose body waits on time or asserts UI text or presence. Times are compared
-    /// within one measuring method, as the collector compares them.
-    pub fn flagged(&self, slow_seconds: f64) -> Vec<Flagged> {
+    /// revision, or whose body waits on time or asserts UI text or presence; and those the
+    /// project's gate `record` shows failing only ever for their own sake (NIT-565). Times are
+    /// compared within one measuring method, as the collector compares them.
+    pub fn flagged(&self, slow_seconds: f64, record: &[crate::test_catches::TestCatches]) -> Vec<Flagged> {
         use std::collections::BTreeMap;
         let method_of = |o: &serde_json::Value| o["method"].as_str().unwrap_or("lane").to_string();
         let mut counts: BTreeMap<String, usize> = BTreeMap::new();
@@ -383,6 +384,20 @@ impl Report {
                 );
             }
         }
+        // The gates' record, per test and step: failures that were only ever the test's own.
+        for r in record.iter().filter(|r| crate::test_catches::false_alarm_candidate(r)) {
+            let t = source(&r.test);
+            flag(
+                t.map(key).unwrap_or_else(|| r.test.clone()),
+                t,
+                None,
+                Some(&r.test),
+                format!(
+                    "false alarms: its failures were its own {} times and never caught anything (gate record, `{}`)",
+                    r.false_alarms, r.step
+                ),
+            );
+        }
         out.into_values().collect()
     }
 }
@@ -536,6 +551,9 @@ pub struct OptimizeFacts<'a> {
     pub has_lanes: bool,
     /// The repo's playbook, for the CI-routing proposal; none in a repo Nitely does not keep.
     pub playbook: Option<&'a crate::proposals::Target>,
+    /// The project's gate record per test (`Db::catches_by_test`), which flags the tests whose
+    /// failures were only ever their own.
+    pub record: &'a [crate::test_catches::TestCatches],
 }
 
 /// The goal a classified map proposes (NIT-556), and the `ci_commands` the playbook should list
@@ -859,7 +877,7 @@ impl Report {
         }
         let planned = optimize_plan(
             &self.revision,
-            &self.flagged(facts.slow_seconds),
+            &self.flagged(facts.slow_seconds, facts.record),
             classes,
             facts,
         )?;
@@ -1303,6 +1321,34 @@ mod tests {
     /// The tests to classify come from the evidence (slow by one method, flaky, a hint, a
     /// candidate), and the map needs a class for each of them and for nothing else.
     #[test]
+    fn the_gate_record_flags_a_test_whose_failures_were_only_its_own() {
+        use crate::test_catches::TestCatches;
+        let report = Report {
+            version: 1,
+            revision: "c".repeat(40),
+            generated_at: "now".into(),
+            report_only: true,
+            runs: vec![],
+            observations: vec![],
+            tests: vec![
+                serde_json::json!({"name": "roundtrip", "path": "src/store.rs", "line": 4, "hints": {}}),
+                serde_json::json!({"name": "loads", "path": "src/store.rs", "line": 9, "hints": {}}),
+            ],
+            candidates: vec![],
+            truncated: false,
+            warnings: vec![],
+        };
+        let rec = |test: &str, catches: i64, false_alarms: i64| TestCatches { test: test.into(), step: "cargo test".into(), catches, false_alarms };
+        // Its neighbour once caught something; that does not vouch for it.
+        let record = [rec("store::tests::roundtrip", 0, 3), rec("store::tests::loads", 1, 0)];
+        let flagged = report.flagged(2.0, &record);
+        assert_eq!(flagged.len(), 1, "{flagged:?}");
+        assert_eq!((flagged[0].test.as_str(), flagged[0].printed.as_deref()), ("src/store.rs::roundtrip", Some("store::tests::roundtrip")));
+        assert!(flagged[0].why[0].starts_with("false alarms"), "{:?}", flagged[0].why);
+        assert!(report.flagged(2.0, &[]).is_empty(), "without the record, nothing flags it");
+    }
+
+    #[test]
     fn flagged_tests_need_a_class_each_and_the_map_groups_decisions_by_module() {
         let rev = "c".repeat(40);
         let obs = |id: &str, run: &str, outcome: &str, ms: f64, method: &str| serde_json::json!({"id": id, "name": id.rsplit("::").next().unwrap(), "outcome": outcome, "run": run, "revision": rev, "source": "CI", "method": method, "ambiguous": false, "duration_ms": ms});
@@ -1330,7 +1376,7 @@ mod tests {
             truncated: false,
             warnings: vec![],
         };
-        let flagged = report.flagged(2.0);
+        let flagged = report.flagged(2.0, &[]);
         let names: Vec<(&str, &str)> = flagged
             .iter()
             .map(|f| (f.test.as_str(), f.why[0].as_str()))
@@ -1360,7 +1406,7 @@ mod tests {
         };
         assert_eq!(
             matrix
-                .flagged(2.0)
+                .flagged(2.0, &[])
                 .iter()
                 .find(|f| f.test == "src/cart.rs::adds")
                 .unwrap()
@@ -1694,6 +1740,7 @@ mod tests {
             has_ci: true,
             has_lanes: true,
             playbook: None,
+            record: &[],
         };
         // A deletion must name what covers the test.
         let err = report
@@ -1703,7 +1750,7 @@ mod tests {
         assert!(err.contains("web/count.test.ts::counts"), "{err}");
         classes[3].covered_by = Some("`web/count.test.ts::adds_up`".into());
 
-        let planned = optimize_plan(&rev, &report.flagged(2.0), &classes, &facts).unwrap();
+        let planned = optimize_plan(&rev, &report.flagged(2.0, &[]), &classes, &facts).unwrap();
         let refs: Vec<(&str, &[String])> = planned
             .plan
             .issues
@@ -1747,7 +1794,7 @@ mod tests {
             serde_json::json!({"test": "src/land.rs::pushes", "class": "scenario", "module": "land_rules"}),
         )];
         let flagged_broken: Vec<Flagged> = broken
-            .flagged(2.0)
+            .flagged(2.0, &[])
             .into_iter()
             .filter(|f| f.test == "src/land.rs::pushes")
             .collect();

@@ -44,6 +44,9 @@ pub enum Command {
         /// Where to write the map; standard output when absent.
         #[arg(long, requires = "classes")]
         output: Option<PathBuf>,
+        /// The project whose gate record flags tests too; the one this folder belongs to when absent.
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Measures the gate's tests into an evidence folder for `collect --logs`: CI's logs at HEAD
     /// first; else, shown with its cost cap first, CI runs (--dispatch) or, only for a repo
@@ -433,9 +436,18 @@ pub fn run(command: Command) -> Result<()> {
             classes,
             slow,
             output,
+            project,
         } => {
             let report = Report::read(&file)?;
-            let flagged = report.flagged(slow);
+            // The project's gate record, as `propose` reads it, so both flag the same tests; none
+            // where no Nitely project is found here.
+            let record = (|| -> Result<Vec<nitely_core::test_catches::TestCatches>> {
+                let (config, db) = (Config::load()?, Db::open_default()?);
+                let project = nitely_core::resolve_project(&config, &db, project.as_deref(), &crate::cwd()?)?;
+                db.catches_by_test(&project)
+            })()
+            .unwrap_or_default();
+            let flagged = report.flagged(slow, &record);
             let Some(classes) = classes else {
                 // The template: each flagged test, its evidence, and an empty class to fill.
                 let template: Vec<_> = flagged
@@ -476,6 +488,7 @@ pub fn run(command: Command) -> Result<()> {
             let root = nitely_core::playbook::repo_for_issue(&config, Some(&project), &cwd)?;
             let classes = test_sweep::read_classes(&classes)?;
             let repo = test_sweep::repo_facts(&config, &root)?;
+            let record = db.catches_by_test(&project)?;
             let facts = test_sweep::OptimizeFacts {
                 slow_seconds: slow,
                 tests: &repo.tests,
@@ -483,6 +496,7 @@ pub fn run(command: Command) -> Result<()> {
                 has_ci: repo.has_ci,
                 has_lanes: repo.has_lanes,
                 playbook: repo.target.as_ref(),
+                record: &record,
             };
             crate::print_json(&Report::read(&file)?.propose(
                 &mut db,
