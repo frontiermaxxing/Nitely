@@ -441,7 +441,7 @@ pub(crate) fn start_point(db: &Db, root: &Path, pb: &Playbook, issue: &IssueReco
         let options = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_default();
         let active = db.goal(goal)?.is_some_and(|g| g.state == "active");
         let open = db.goal_branch(goal)?.is_some();
-        let routes = goal_items_route(options.goal_branches, !pb.submodules.is_empty()).is_ok();
+        let routes = goal_items_route(options.goal_branches, options.item_review, !pb.submodules.is_empty()).is_ok();
         if let Some(items) = engage(routes, options.checkpoint.as_ref().map(|c| c.items), active, open, db.goal_branch_turned_off(goal)?) {
             db.enable_goal_branch(goal, root, None, Some(items), actor)?;
         }
@@ -455,12 +455,15 @@ pub(crate) fn start_point(db: &Db, root: &Path, pb: &Playbook, issue: &IssueReco
 }
 
 /// Whether a mode's goal items go through goal branches in a repo, or why they land on main: the
-/// mode must say so (an item gets the item review it asks for on the way in: submit.rs,
-/// `submit_into_goal`, NIT-563); a repo with managed submodules lands its goal items on main for
-/// now (land.rs, item_hop).
-pub fn goal_items_route(goal_branches: Option<bool>, submodules: bool) -> Result<(), &'static str> {
+/// mode must say so, and with no item review, since an item lands into its goal branch without a
+/// reviewer (a mode asking for item reviews gets them on main); a repo with managed submodules
+/// lands its goal items on main for now (land.rs, item_hop).
+pub fn goal_items_route(goal_branches: Option<bool>, item_review: Option<crate::project_modes::ItemReview>, submodules: bool) -> Result<(), &'static str> {
     if goal_branches != Some(true) {
         return Err("Each goal item lands on main like any other change");
+    }
+    if item_review.is_some_and(|r| r != crate::project_modes::ItemReview::Off) {
+        return Err("The mode reviews each goal item, and a goal branch lands items unreviewed, so they land on main");
     }
     if submodules {
         return Err("A repo with managed submodules lands goal items on main for now");
@@ -1070,7 +1073,7 @@ mod tests {
     use crate::submit::{submit, SubmitOptions};
     use crate::test_repo::git as sh;
 
-    // The gate fails while bad.txt is there; the fake reviewer passes everything but risky.txt.
+    // The gate fails while bad.txt is there; the fake reviewer passes everything.
     const PLAYBOOK: &str = r#"
 [worktree]
 dir = "../wt/{key}"
@@ -1078,7 +1081,7 @@ dir = "../wt/{key}"
 commands = ["{gate}"]
 [review]
 reviewer = { "*" = "fake" }
-commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-only --diff-filter=AM goal-1...HEAD 2>/dev/null)\" in *risky.txt*) echo '- [P1] Risky default: risky.txt, the greeting'; echo 'VERDICT: findings';; *) echo 'Fine.'; echo 'VERDICT: clean';; esac"] }
+commands = { fake = ["{sh}", "-c", "cat > /dev/null; echo 'Fine.'; echo 'VERDICT: clean'"] }
 "#;
 
     struct Fixture {
@@ -1153,15 +1156,17 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
 
     #[test]
     fn a_mode_with_goal_branches_turns_a_goals_branch_on_unless_it_was_turned_off() {
-        use crate::project_modes::{preset, Mode};
-        let route = |m: Mode, submodules: bool| goal_items_route(preset(m).goal_branches, submodules);
-        // Fast and Careful land goal items through goal branches, Careful with its item review on
-        // the way in (NIT-563); Release has none.
+        use crate::project_modes::{preset, ItemReview, Mode};
+        let route = |m: Mode, submodules: bool| goal_items_route(preset(m).goal_branches, preset(m).item_review, submodules);
+        // Fast lands goal items through goal branches; Careful reviews each item, which a goal
+        // branch does not, and Release has none.
         assert_eq!(route(Mode::Fast, false), Ok(()));
-        assert_eq!(route(Mode::Careful, false), Ok(()));
+        assert!(route(Mode::Careful, false).unwrap_err().contains("reviews each goal item"));
         assert!(route(Mode::Release, false).is_err());
         assert!(route(Mode::Fast, true).unwrap_err().contains("managed submodules"));
-        assert_eq!(goal_items_route(None, false).is_err(), true, "no mode set: as before");
+        assert_eq!(goal_items_route(Some(true), Some(ItemReview::Blocking), false).is_err(), true);
+        assert_eq!(goal_items_route(Some(true), None, false), Ok(()));
+        assert_eq!(goal_items_route(None, None, false).is_err(), true, "no mode set: as before");
 
         assert_eq!(engage(true, Some(10), true, false, false), Some(10));
         assert_eq!(engage(true, None, true, false, false), Some(CHECKPOINT_ITEMS));
@@ -1221,41 +1226,6 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
         // An issue with no goal still starts from and lands on main.
         let issue = f.db.issue(&none).unwrap().unwrap();
         assert_eq!(playbook::start_task(&f.db, &f.repo, &issue, "claude", &f.actor).unwrap().lands_into, "main");
-        std::fs::remove_dir_all(&f.base).ok();
-    }
-
-    /// NIT-563: Careful's goal items go through the goal branch with an advisory item review, and a
-    /// mode whose item review blocks sends an item back for its P1 until it is fixed.
-    #[test]
-    fn goal_items_get_the_item_review_their_mode_asks_for_on_the_way_into_the_branch() {
-        use crate::project_modes::{ItemReview, Mode, Options};
-        let mut f = fixture("nitely-goal-item-review", false);
-        crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Careful, Default::default());
-        let a = f.issue("A", Some(f.goal));
-        let wt = f.work(&a, "risky.txt", "hello
-");
-        assert!(f.db.goal_branch(f.goal).unwrap().is_some(), "Careful routes goal items through the goal branch");
-        let s = f.submit(&wt);
-        assert!(s.review.as_ref().is_some_and(|r| r.verdict == "changes"), "{s:?}");
-        assert!(s.land.as_ref().is_some_and(|l| l.landed) && f.has("goal-1", "risky.txt"), "advisory: it lands as it is: {:?}", s.next);
-        assert!(f.told(&a, "advisory, found: [P1] Risky default"), "its findings are on the issue");
-
-        let blocking = Options { goal_branches: Some(true), item_review: Some(ItemReview::Blocking), ..Default::default() };
-        crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Custom, blocking);
-        let b = f.issue("B", Some(f.goal));
-        let wt = f.work(&b, "risky.txt", "hello again
-");
-        let s = f.submit(&wt);
-        assert!(s.land.is_none() && s.state == "In Progress", "blocking: sent back for its P1: {s:?}");
-        assert!(f.told(&b, "Item review by fake requested changes: [P1] Risky default"));
-        // Fixed, it goes in.
-        sh(&wt, &["rm", "-q", "risky.txt"]);
-        std::fs::write(wt.join("safe.txt"), "hello
-").unwrap();
-        sh(&wt, &["add", "."]);
-        sh(&wt, &["commit", "-q", "-m", "safe"]);
-        let s = f.submit(&wt);
-        assert!(s.land.as_ref().is_some_and(|l| l.landed) && f.has("goal-1", "safe.txt"), "{:?}", s.next);
         std::fs::remove_dir_all(&f.base).ok();
     }
 
