@@ -499,6 +499,7 @@ pub fn run(command: Command) -> Result<()> {
                 playbook: repo.target.as_ref(),
                 record: &record,
                 package: repo.package.as_ref(),
+                budget: repo.budget.as_ref(),
             };
             crate::print_json(&Report::read(&file)?.propose(
                 &mut db,

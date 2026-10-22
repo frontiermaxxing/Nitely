@@ -1499,6 +1499,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 playbook: repo.target.as_ref(),
                 record: &record,
                 package: repo.package.as_ref(),
+                budget: repo.budget.as_ref(),
             };
             json!(report.propose(&mut db, &project, str_arg(args, "issue").map(String::from), &classes, &facts, &actor)?)
         }

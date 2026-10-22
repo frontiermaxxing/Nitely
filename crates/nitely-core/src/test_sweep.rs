@@ -661,6 +661,55 @@ pub struct OptimizeFacts<'a> {
     pub record: &'a [crate::test_catches::TestCatches],
     /// The repo's package.json, to read `npm test` as the script it runs.
     pub package: Option<&'a serde_json::Value>,
+    /// The repo's test budget, when it has one: the plan then names only the scenarios it lacks.
+    pub budget: Option<&'a crate::test_budget::Budget>,
+}
+
+/// `n` and the word for it: "1 test", "2 tests".
+fn count(n: usize, one: &str, many: &str) -> String {
+    format!("{n} {}", if n == 1 { one } else { many })
+}
+
+/// What the goal says goes, in seconds measured on the tests it would cut (NIT-607): a sum over
+/// the timed ones, or "no measured saving" when none was timed, and the untimed ones by name.
+pub fn saving_words(seconds: &[Option<f64>], names: &[&str]) -> String {
+    let timed: Vec<f64> = seconds.iter().flatten().copied().collect();
+    let untimed: Vec<&str> = seconds.iter().zip(names).filter(|(s, _)| s.is_none()).map(|(_, n)| *n).collect();
+    let sum: f64 = timed.iter().sum();
+    let said = if timed.is_empty() {
+        "no measured saving".to_string()
+    } else {
+        format!("up to {} of measured test time goes", if sum < 10.0 { format!("{sum:.1} s") } else { format!("{sum:.0} s") })
+    };
+    match untimed.as_slice() {
+        [] => said,
+        some if some.len() <= 3 => format!("{said} (no times for {})", some.iter().map(|n| format!("`{n}`")).collect::<Vec<_>>().join(", ")),
+        some => format!("{said} ({} have no times)", count(some.len(), "test", "tests")),
+    }
+}
+
+/// The budget card's title and TOML (NIT-607): the whole budget for a repo without one; for a repo
+/// that has one, only the scenarios it does not name yet; None when it names them all.
+pub fn budget_card(existing: Option<&crate::test_budget::Budget>, slow_seconds: f64, scenarios: &[String]) -> Option<(String, String)> {
+    let missing: Vec<&String> = scenarios.iter().filter(|n| existing.is_none_or(|b| !b.scenarios.contains_key(*n))).collect();
+    let mut toml = String::new();
+    if existing.is_none() {
+        toml.push_str(&format!("test_seconds = {slow_seconds}\n"));
+    } else if missing.is_empty() {
+        return None;
+    }
+    if !missing.is_empty() {
+        toml.push_str("\n[scenarios]\n");
+        for name in &missing {
+            toml.push_str(&format!("{} = {}\n", serde_json::to_string(name).ok()?, serde_json::to_string("real I/O end to end (test map)").ok()?));
+        }
+    }
+    let title = if existing.is_none() {
+        "Set the test time budget and name the scenarios".to_string()
+    } else {
+        format!("Name {} in the test budget", count(missing.len(), "more scenario", "more scenarios"))
+    };
+    Some((title, toml))
 }
 
 /// The goal a classified map proposes (NIT-556), and the `ci_commands` the playbook should list
@@ -792,7 +841,7 @@ pub fn optimize_plan(
         }
         items.push(item(
             "repair".into(),
-            format!("Repair {} failing or flaky tests", failing.len()),
+            format!("Repair {} failing or flaky", count(failing.len(), "test", "tests")),
             body,
             paths(&failing),
             failing.len(),
@@ -854,10 +903,7 @@ pub fn optimize_plan(
         }
         items.push(item(
             "clock-waits".into(),
-            format!(
-                "Replace {} clock waits with events or an injected clock",
-                waits.len()
-            ),
+            format!("Replace {} with events or an injected clock", count(waits.len(), "clock wait", "clock waits")),
             body,
             paths(&waits),
             waits.len(),
@@ -865,26 +911,15 @@ pub fn optimize_plan(
         ));
     }
     let named: Vec<&Flagged> = scenarios.values().flatten().copied().collect();
-    let mut budget = format!("test_seconds = {}\n", facts.slow_seconds);
-    if !named.is_empty() {
-        budget.push_str("\n[scenarios]\n");
-        // One key per printed name: two binaries' `tests::roundtrip` are one entry.
-        let mut names = std::collections::BTreeSet::new();
-        for f in &named {
-            let name = f
-                .printed
-                .clone()
-                .unwrap_or_else(|| f.test.rsplit("::").next().unwrap_or(&f.test).to_string());
-            if !names.insert(name.clone()) {
-                continue;
-            }
-            budget.push_str(&format!(
-                "{} = {}\n",
-                serde_json::to_string(&name)?,
-                serde_json::to_string("real I/O end to end (test map)")?
-            ));
+    // One key per printed name: two binaries' `tests::roundtrip` are one entry.
+    let mut names: Vec<String> = Vec::new();
+    for f in &named {
+        let name = f.printed.clone().unwrap_or_else(|| f.test.rsplit("::").next().unwrap_or(&f.test).to_string());
+        if !names.contains(&name) {
+            names.push(name);
         }
     }
+    let card = budget_card(facts.budget, facts.slow_seconds, &names);
     // The budget works only where a gate's output carries per-test times: say which commands do,
     // what to add where a flag would, and leave the card out when none can.
     let reads: Vec<(&String, BudgetReads)> = facts
@@ -892,7 +927,7 @@ pub fn optimize_plan(
         .iter()
         .map(|t| (t, budget_reads(t, facts.package)))
         .collect();
-    if reads.iter().any(|(_, r)| !matches!(r, BudgetReads::Not)) {
+    if let (Some((title, budget)), true) = (card, reads.iter().any(|(_, r)| !matches!(r, BudgetReads::Not))) {
         let mut how = String::new();
         let mut touches = vec![".nitely/test-budget.toml".to_string()];
         for (t, r) in &reads {
@@ -907,7 +942,8 @@ pub fn optimize_plan(
                 touches.push(".nitely/playbook.toml".into());
             }
         }
-        items.push(item("budget".into(), "Set the test time budget and name the scenarios".into(), format!("Write `.nitely/test-budget.toml` so a gate reports test times and flags a test past the limit unless it is a named scenario:\n\n```toml\n{budget}```\n\nNames are as the runner prints them; check each against a gate's \"Test time\" line. What the gate's test commands give the budget:\n\n{how}\nA playbook change goes through `propose_playbook_change`."), touches, 1, vec![]));
+        let what = if facts.budget.is_some() { "Add these scenarios to `.nitely/test-budget.toml`, so a gate does not flag them" } else { "Write `.nitely/test-budget.toml` so a gate reports test times and flags a test past the limit unless it is a named scenario" };
+        items.push(item("budget".into(), title, format!("{what}:\n\n```toml\n{budget}```\n\nNames are as the runner prints them; check each against a gate's \"Test time\" line. What the gate's test commands give the budget:\n\n{how}\nA playbook change goes through `propose_playbook_change`."), touches, 1, vec![]));
     }
     if !deletions.is_empty() {
         let mut body = "After the cards above land, ask the person once (`ask`) with this list, and delete only what they approve. Every test names what covers it. A decision's old test goes only if its refactor card landed: a card the person dropped keeps its tests, so leave them off the list:\n\n".to_string();
@@ -922,10 +958,7 @@ pub fn optimize_plan(
             .collect();
         items.push(item(
             "delete".into(),
-            format!(
-                "Delete {} tests other tests cover (one approval)",
-                deletions.len()
-            ),
+            format!("Delete {} other tests cover (one approval)", count(deletions.len(), "test", "tests")),
             body,
             paths(&fs),
             deletions.len(),
@@ -950,21 +983,16 @@ pub fn optimize_plan(
         all.extend(missing);
         all
     });
-    let saving: f64 = flagged
+    let cut: Vec<&Flagged> = flagged
         .iter()
-        .filter(|f| {
-            matches!(
-                by_test[f.test.as_str()].class,
-                Class::Decision { .. } | Class::WallClock
-            )
-        })
-        .filter_map(|f| f.seconds)
-        .sum();
+        .filter(|f| matches!(by_test[f.test.as_str()].class, Class::Decision { .. } | Class::WallClock))
+        .collect();
+    let saving = saving_words(&cut.iter().map(|f| f.seconds).collect::<Vec<_>>(), &cut.iter().map(|f| f.test.as_str()).collect::<Vec<_>>());
     let plan = GoalPlan {
         sentence: "Make this repo's tests cost what they're worth".into(),
         title: "Tests that cost what they're worth".into(),
         outcome: format!(
-            "Decisions are tested as pure functions and real I/O by a few named scenarios; no test waits on the clock or checks only that UI text exists; every test stays under {} s unless named; {}up to {saving:.0} s of measured test time goes. Approve the refactors module by module; the deletions wait for one more yes. Measured at {short}.",
+            "Decisions are tested as pure functions and real I/O by a few named scenarios; no test waits on the clock or checks only that UI text exists; every test stays under {} s unless named; {}{saving}. Approve the refactors module by module; the deletions wait for one more yes. Measured at {short}.",
             facts.slow_seconds,
             if ci_commands.is_some() { "the full suites run in CI; " } else { "" }
         ),
@@ -1358,6 +1386,8 @@ pub struct RepoFacts {
     pub has_ci: bool,
     pub has_lanes: bool,
     pub target: Option<crate::proposals::Target>,
+    /// The repo's test budget, when it has one.
+    pub budget: Option<crate::test_budget::Budget>,
 }
 
 pub fn repo_facts(config: &crate::Config, root: &Path) -> Result<RepoFacts> {
@@ -1402,6 +1432,7 @@ pub fn repo_facts(config: &crate::Config, root: &Path) -> Result<RepoFacts> {
         package: std::fs::read(root.join("package.json"))
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok()),
+        budget: crate::test_budget::load(root).ok().flatten(),
         project,
     })
 }
@@ -1494,6 +1525,25 @@ mod tests {
             report.flagged(2.0, &[]).is_empty(),
             "without the record, nothing flags it"
         );
+    }
+
+    /// NIT-607: a goal says what goes only as measured, and proposes only the budget the repo lacks.
+    #[test]
+    fn the_goal_claims_only_measured_savings_and_only_a_missing_budget() {
+        assert_eq!(saving_words(&[None], &["a::slow"]), "no measured saving (no times for `a::slow`)");
+        assert_eq!(saving_words(&[Some(2.5), Some(1.25)], &["a", "b"]), "up to 3.8 s of measured test time goes");
+        assert_eq!(saving_words(&[Some(42.0), None], &["a", "b"]), "up to 42 s of measured test time goes (no times for `b`)");
+        assert_eq!(saving_words(&[None; 4], &["a", "b", "c", "d"]), "no measured saving (4 tests have no times)");
+        assert_eq!(saving_words(&[], &[]), "no measured saving");
+        let scenarios = vec!["land::tests::lands".to_string(), "mcp_stale::waits".to_string()];
+        let (title, toml) = budget_card(None, 2.0, &scenarios).unwrap();
+        assert_eq!(title, "Set the test time budget and name the scenarios");
+        assert!(toml.starts_with("test_seconds = 2\n\n[scenarios]\n\"land::tests::lands\""), "{toml}");
+        let has: crate::test_budget::Budget = toml::from_str("test_seconds = 2\n[scenarios]\n\"land::tests::lands\" = \"a land\"\n").unwrap();
+        let (title, toml) = budget_card(Some(&has), 2.0, &scenarios).unwrap();
+        assert_eq!(title, "Name 1 more scenario in the test budget");
+        assert!(!toml.contains("test_seconds") && !toml.contains("land::tests::lands") && toml.contains("mcp_stale::waits"), "{toml}");
+        assert_eq!(budget_card(Some(&has), 2.0, &scenarios[..1]), None, "every scenario named: no card");
     }
 
     /// The tests to classify come from the evidence (slow by one method, flaky, a hint, a
@@ -1892,6 +1942,7 @@ mod tests {
             playbook: None,
             record: &[],
             package: None,
+            budget: None,
         };
         // A deletion must name what covers the test.
         let err = report
