@@ -1211,8 +1211,9 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
     fn done_on_a_checkpoint_already_on_main_closes_its_checkpoint() {
         let mut f = fixture("nitely-goal-checkpoint-recover", false);
         crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Fast, Default::default());
-        f.db.move_issue(&f.rest, "Canceled", None, Some("not in this test"), &Actor::Human).unwrap();
+        // The items first: a goal whose only issue is canceled is finished (NIT-611).
         let a = f.issue("A", Some(f.goal));
+        f.db.move_issue(&f.rest, "Canceled", None, Some("not in this test"), &Actor::Human).unwrap();
         f.work(&a, "a.txt", "a
 ");
         assert!(f.land(&a).landed);
@@ -1235,9 +1236,10 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
     fn a_goal_under_fast_lands_its_items_through_its_branch_and_checkpoints_when_all_are_in() {
         let mut f = fixture("nitely-goal-branch-mode", false);
         crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Fast, Default::default());
-        f.db.move_issue(&f.rest, "Canceled", None, Some("not in this test"), &Actor::Human).unwrap();
         let main_before = f.head("main");
+        // The items first: a goal whose only issue is canceled is finished (NIT-611).
         let (a, b) = (f.issue("A", Some(f.goal)), f.issue("B", Some(f.goal)));
+        f.db.move_issue(&f.rest, "Canceled", None, Some("not in this test"), &Actor::Human).unwrap();
         let none = f.issue("No goal", None);
 
         let issue = f.db.issue(&a).unwrap().unwrap();

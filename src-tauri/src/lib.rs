@@ -353,10 +353,18 @@ async fn goal_workers(id: i64, workers: i64) -> Result<nitely_core::goals::Goal,
     db()?.save_goal("", Some(id), &change, &ME).map_err(err)
 }
 
-/// The goal rows: every active goal with its issues, of one project or all of them.
+/// The goal rows: every active goal with its issues, of one project or all of them; with
+/// `include_closed`, completed and dropped goals too ("Show completed", NIT-611).
 #[tauri::command]
-async fn goals(project: Option<String>) -> Result<Vec<nitely_core::goals::GoalDetail>, String> {
-    db()?.active_goals(project.as_deref()).map_err(err)
+async fn goals(project: Option<String>, include_closed: Option<bool>) -> Result<Vec<nitely_core::goals::GoalDetail>, String> {
+    db()?.goal_rows(project.as_deref(), include_closed.unwrap_or(false)).map_err(err)
+}
+
+/// The person reopens a completed or dropped goal, or closes one: one click (NIT-611).
+#[tauri::command]
+async fn goal_state(id: i64, state: String) -> Result<nitely_core::goals::Goal, String> {
+    let change = nitely_core::goals::GoalChange { state: Some(state), ..Default::default() };
+    db()?.save_goal("", Some(id), &change, &ME).map_err(err)
 }
 
 #[tauri::command]
@@ -1144,6 +1152,7 @@ pub fn run() {
             set_owner,
             answer_ask,
             dismiss_notice,
+            goal_state,
             accept_finding,
             decline_finding,
             connect_plan,
