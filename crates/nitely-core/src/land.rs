@@ -227,7 +227,26 @@ fn reviewed_first(db: &mut Db, root: &Path, key: &str, actor: &Actor) -> Result<
 fn land_into_goal(db: &mut Db, root: &Path, issue: &IssueRecord, opts: &LandOptions, actor: &Actor, gb: crate::goal_branch::GoalBranch) -> Result<Landed> {
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(issue.key.clone()), ..Default::default() });
     let mut report = Landed { issue: issue.key.clone(), base: gb.branch.clone(), goal_branch: Some(gb.branch.clone()), ..Default::default() };
-    let lock = Lock::take(&crate::goal_branch::lock_path(root, gb.goal)?, &issue.key, opts.break_lock)?;
+    // A checkpoint's main merge or another item's land holds the goal branch for minutes: the item
+    // waits its turn instead of failing its submit (NIT-578). A lock whose land is gone is taken over.
+    let path = crate::goal_branch::lock_path(root, gb.goal)?;
+    let began = std::time::Instant::now();
+    let mut said = false;
+    let lock = loop {
+        if let Some(lock) = Lock::try_take(&path, &issue.key, opts.break_lock)? {
+            break lock;
+        }
+        if !goal_lock_wait(began.elapsed()) {
+            // Long enough: the take says who holds it.
+            break Lock::take(&path, &issue.key, opts.break_lock)?;
+        }
+        if !said {
+            let holder = std::fs::read_to_string(&path).unwrap_or_default();
+            db.log_event(actor, Some(&issue.key), None, "status", &format!("Waiting for {} to be free: {}", gb.branch, holder.trim()))?;
+            said = true;
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+    };
     if let Some(before) = &lock.took_over {
         report.warnings.push(format!("took over the lock of {} that {before} left", gb.branch));
     }
@@ -799,6 +818,15 @@ pub(crate) fn after_land_soon(root: &Path, pb: &Playbook, key: Option<&str>) -> 
 /// itself (which has the `land-after` command), and never when told to run them here.
 pub(crate) fn in_background(exe: Option<&str>, inline: bool) -> bool {
     !inline && exe == Some("nitely")
+}
+
+/// How long an item's land waits for its goal branch's lock before it gives up and says who holds
+/// it (NIT-578): a few item lands and a checkpoint's main merge, each a few minutes.
+const GOAL_LOCK_WAIT_AT_MOST: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Whether an item's land, its goal branch's lock held by a live land for `waited`, waits on.
+pub(crate) fn goal_lock_wait(waited: std::time::Duration) -> bool {
+    waited < GOAL_LOCK_WAIT_AT_MOST
 }
 
 /// What the background after-land run does next (NIT-560): wait while another land holds the lock
@@ -1670,6 +1698,9 @@ mod tests {
         assert!(!in_background(Some("nitely-app"), false) && !in_background(None, false), "the app has no land-after command");
         assert_eq!(after_next(false, false, Duration::ZERO), AfterNext::Run, "quiet: build now");
         assert_eq!(after_next(true, false, Duration::from_secs(30)), AfterNext::Wait, "another land holds the lock");
+        // NIT-578: an item waits for its goal branch's lock, for a bound.
+        assert!(goal_lock_wait(Duration::from_secs(5)), "a main merge holds it for seconds");
+        assert!(!goal_lock_wait(GOAL_LOCK_WAIT_AT_MOST), "then it gives up and says who holds it");
         assert_eq!(after_next(false, true, Duration::from_secs(30)), AfterNext::Wait, "changes wait in the queue");
         assert_eq!(after_next(true, true, QUIET_AT_MOST), AfterNext::Run, "never waits for ever");
     }
