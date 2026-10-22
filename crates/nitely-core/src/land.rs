@@ -1446,6 +1446,12 @@ pub fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, tempor
         return (format!("kept {} (not made by start_task, or --keep)", worktree.display()), vec![]);
     }
     let path = worktree.to_string_lossy().into_owned();
+    // This process may stand in the worktree itself: a background submit job starts there, as does
+    // a land run from it. Windows will not delete a folder a process stands in, and the holders
+    // below leave this process out, so every such land failed to delete it (NIT-582).
+    if let Some(to) = std::env::current_dir().ok().and_then(|cwd| step_out(&cwd, worktree, root)) {
+        std::env::set_current_dir(&to).ok();
+    }
     let held = crate::procs::holders(worktree);
     if !held.is_empty() {
         let names: Vec<String> = held.iter().map(|h| format!("{} (pid {})", h.name, h.pid)).collect();
@@ -1481,6 +1487,12 @@ pub fn cleanup(root: &Path, pb: &Playbook, worktree: &Path, branch: &str, tempor
         Err(message) => message,
     };
     (if teardown.is_empty() { message } else { format!("{message}; {}", teardown.join("; ")) }, vec![])
+}
+
+/// Where this process goes before `worktree` is removed: the main checkout `root`, when its
+/// working directory `cwd` is in the worktree; None when it stands elsewhere.
+pub(crate) fn step_out(cwd: &Path, worktree: &Path, root: &Path) -> Option<PathBuf> {
+    crate::paths::is_within(&cwd.to_string_lossy(), &worktree.to_string_lossy()).then(|| root.to_path_buf())
 }
 
 /// Whether `worktree` is under the playbook's worktree folder, where start_task makes them.
@@ -1548,10 +1560,17 @@ fn finish_removal(root: &Path, worktree: &Path, error: &anyhow::Error) -> std::r
         }
     }
     git(root, &["worktree", "prune"]).ok();
+    // Another process still has it open: an agent's shell or a program started there, which
+    // Windows does not name. Not a failed land: a later one removes it once nothing uses it.
+    let users = crate::procs::holders(worktree);
+    let by = if users.is_empty() {
+        "a process still uses it (an agent's shell or a program started there)".to_string()
+    } else {
+        format!("{} still use{} it", users.iter().map(|h| format!("{} (pid {})", h.name, h.pid)).collect::<Vec<_>>().join(", "), if users.len() == 1 { "s" } else { "" })
+    };
     Err(format!(
-        "git unregistered the worktree but could not delete all of {path} ({}); nothing in it is needed any more. \
-Close whatever still uses it, then delete the folder (PowerShell: `Remove-Item -Recurse -Force \"{path}\"`; sh: `rm -rf \"{path}\"`). \
-The merged branch was kept; delete it with `git branch -d` once the folder is gone",
+        "left {path} for a later land to remove: {by} ({}). Nothing in it is needed any more; `nitely lanes leftovers --remove` removes it once nothing uses it. \
+The merged branch is kept until then",
         first_line(error)
     ))
 }
@@ -1676,6 +1695,20 @@ mod tests {
         assert!(already_landed(true, None, None).is_some(), "a cleaned-up branch is landed too");
         assert_eq!(already_landed(true, Some(true), event), None, "new commits land");
         assert_eq!(already_landed(false, Some(false), event), None, "not Done: the land decides");
+    }
+
+    /// NIT-582: a background submit job starts in the task's worktree and lands it from there, and
+    /// Windows refused to delete the folder it stood in. It steps out to the main checkout first.
+    #[test]
+    fn a_land_standing_in_the_worktree_steps_out_before_removing_it() {
+        let (wt, root) = (Path::new("C:/Code/my-app-worktrees/app-7"), Path::new("C:/Code/my-app"));
+        assert_eq!(step_out(wt, wt, root).as_deref(), Some(root));
+        assert_eq!(step_out(Path::new("C:/Code/my-app-worktrees/app-7/src"), wt, root).as_deref(), Some(root), "any depth");
+        if cfg!(windows) {
+            assert_eq!(step_out(Path::new(r"c:\code\my-app-worktrees\APP-7"), wt, root).as_deref(), Some(root), "any spelling");
+        }
+        assert_eq!(step_out(root, wt, root), None);
+        assert_eq!(step_out(Path::new("C:/Code/my-app-worktrees/app-70"), wt, root), None, "a sibling with a longer name");
     }
 
     /// The main checkout's fast-forward clears an index.lock a killed land left (its mark names a
