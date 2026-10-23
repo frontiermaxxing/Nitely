@@ -3,6 +3,7 @@ import { invoke } from "./backend";
 import type { Ask } from "./types";
 import { agentLabel, agentTitle, ago } from "./util";
 import { Loading } from "./ui";
+import { Markdown } from "./ui/Markdown";
 import "./issue.css";
 
 export { askIdOf } from "./askToken";
@@ -52,7 +53,7 @@ export function AskPanel(props: { id: number; now: number; version: number; onCl
               <p className="ask-meta muted small">
                 <span title={agentTitle(ask.asked_by)}>{agentLabel(ask.asked_by)}</span> asked {ago(props.now, ask.asked_at)}
               </p>
-              <h2 className="ask-question">{ask.question}</h2>
+              <div className="ask-question"><Markdown src={ask.question} onOpenIssue={props.onOpenIssue} /></div>
               {ask.options.length > 0 && (
                 <ul className="ask-options" aria-label="Options">
                   {ask.options.map((o) => (
