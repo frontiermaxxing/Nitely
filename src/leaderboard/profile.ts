@@ -30,6 +30,8 @@ export interface Profile {
   week_closes_at: number | null;
   /** Your public page (NIT-632), once a report is on the board; null before. */
   page: string | null;
+  /** The last time you deleted what you sent (NIT-653): when, how many reports, from where. */
+  deleted: { at: number; reports: number; by: string } | null;
 }
 
 /** `leaderboard_status`, as much of it as the page reads. */
@@ -44,6 +46,16 @@ interface Status {
   week_closes_at?: number | null;
   /** The Leaderboard service this install sends to. */
   url?: string;
+  last_deleted_at?: number | null;
+  last_deleted?: number | null;
+  last_deleted_by?: string | null;
+}
+
+/** "Deleted 3 reports from the board on Oct 22, 7:45 PM, from the app": a delete is never silent (NIT-653). */
+export function deletedLine(d: { at: number; reports: number; by: string }): string {
+  const at = new Date(d.at * 1000).toLocaleString(undefined, { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" });
+  const where = d.by === "app" ? "from the app" : d.by === "cli" ? "with nitely leaderboard" : `(${d.by})`;
+  return `Deleted ${d.reports} report${d.reports === 1 ? "" : "s"} from the board on ${at}, ${where}.`;
 }
 
 /** The public service; its people's pages are on nitely.net, which passes /u/ on to it. */
@@ -75,6 +87,7 @@ function profileOf(s: Status): Profile | null {
     next_send_at: s.next_send_at ?? null,
     week_closes_at: s.week_closes_at ?? null,
     page: pageOf(s.url, s.id, !!s.last_sent_week),
+    deleted: s.last_deleted_at ? { at: s.last_deleted_at, reports: s.last_deleted ?? 0, by: s.last_deleted_by ?? "app" } : null,
   };
 }
 

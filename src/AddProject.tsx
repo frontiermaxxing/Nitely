@@ -10,6 +10,9 @@ const PLAYBOOK_SOURCE: Record<string, string> = {
   generated: "a starting one from the repo's branch and scripts",
 };
 
+/** How Nitely says a folder is in no git repo (connect.rs NOT_A_REPO): the page then offers to make it one. */
+const NOT_A_REPO = "is not in a git repo";
+
 /** A made-up repo path in the platform's usual form, for placeholders and examples. */
 export const exampleRepoPath = () => {
   const platform = navigator.platform;
@@ -26,6 +29,7 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
   const [applied, setApplied] = useState<Applied | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [made, setMade] = useState<string | null>(null);
 
   const load = async (p: string, k: string, n: string) => {
     if (!p.trim()) return;
@@ -43,7 +47,24 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
     setBusy(false);
   };
 
-  useEffect(() => setApplied(null), [path]);
+  useEffect(() => {
+    setApplied(null);
+    setMade(null);
+  }, [path]);
+
+  // A folder in no git repo can be made one here, and then looked at again (NIT-652).
+  const makeRepo = async () => {
+    setBusy(true);
+    try {
+      const said = await invoke<string>("connect_init", { path });
+      setBusy(false);
+      await load(path, key, name);
+      setMade(said);
+    } catch (e) {
+      setError(String(e));
+      setBusy(false);
+    }
+  };
 
   const choose = async () => {
     const picked = await open({ directory: true, title: "Choose a repo folder" }).catch(() => {
@@ -95,7 +116,20 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
         <button type="button" className="btn" onClick={choose}>Choose…</button>
         <button className="btn" disabled={busy || !path.trim()}>Look</button>
       </form>
-      {error && <p className="error">{error}</p>}
+      {error && (
+        <p className="error">
+          {error}
+          {error.includes(NOT_A_REPO) && (
+            <>
+              {" "}
+              <button type="button" className="btn small" disabled={busy} onClick={makeRepo}>
+                Make it a git repo
+              </button>
+            </>
+          )}
+        </p>
+      )}
+      {made && <p className="muted small">{made}</p>}
 
       {plan && (
         <>

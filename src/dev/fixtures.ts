@@ -1771,8 +1771,18 @@ const AGENTS: AgentPlan[] = ["claude", "codex", "cursor"].map((agent) => ({
   ],
 }));
 
+/** Folders the preview has made git repos (connect_init); a path ending in plain-folder is in none until then. */
+const madeRepos = new Set<string>();
+
+function connectInit(args: Record<string, unknown>): string {
+  const path = String(args.path ?? "");
+  madeRepos.add(path);
+  return `Made ${path} a git repo, with main as its first branch. No commit, .gitignore or remote was added: the first commit is yours.`;
+}
+
 function connectPlan(args: Record<string, unknown>): ConnectPlan {
   const path = String(args.path ?? "");
+  if (/plain-folder[\\/]?$/i.test(path) && !madeRepos.has(path)) throw new Error(`${path} is not in a git repo`);
   const name = (args.name as string | null) || path.split(/[\\/]/).filter(Boolean).pop() || "Project";
   const key = (args.key as string | null) || name.replace(/[^A-Za-z]/g, "").slice(0, 3).toUpperCase() || "NEW";
   return {
@@ -2435,6 +2445,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return connectPlan(args);
       case "connect_apply":
         return connectApply(args);
+      case "connect_init":
+        return connectInit(args);
       case "update_status":
         return UPDATE;
       case "dismiss_approval_notice":

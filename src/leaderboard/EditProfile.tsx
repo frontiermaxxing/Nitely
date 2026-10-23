@@ -4,7 +4,7 @@ import type { Project } from "../types";
 import { Button, Checkbox, RemoveButton, Segmented, Switch, TextField } from "../ui";
 import { Avatar, type AvatarChoice } from "./Avatar";
 import { Json, LinkField, fieldOf, type Field } from "./OptIn";
-import { join, leave, sendNow, sharing, stopSharing, type Profile } from "./profile";
+import { deletedLine, join, leave, sendNow, sharing, stopSharing, type Profile } from "./profile";
 import { when } from "./when";
 import { nowSecs } from "../util";
 
@@ -60,6 +60,8 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
   const [busy, setBusy] = useState<"save" | "share" | "leave" | null>(null);
   const [failed, setFailed] = useState<string | null>(null);
   const [leaving, setLeaving] = useState(false);
+  // Turning sharing off deletes what was sent: it asks first, and never on a single click (NIT-653).
+  const [confirmOff, setConfirmOff] = useState(false);
   const act = async (what: "save" | "share" | "leave", run: () => Promise<unknown>) => {
     setBusy(what);
     setFailed(null);
@@ -178,7 +180,7 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
               <Switch
                 checked={on}
                 disabled={busy !== null || changed}
-                onChange={(next) => act("share", next ? sendNow : stopSharing)}
+                onChange={(next) => (next ? act("share", sendNow) : setConfirmOff(true))}
                 label={
                   busy === "share"
                     ? on
@@ -196,7 +198,34 @@ export function ProfileDialog(props: { profile: Profile; projects: Project[]; on
                     ? "Turning it off deletes every report you sent from the board."
                     : "Turning it on sends this week's report now, then one a day; Sunday evening's closes the week."}
               </span>
-              {p.last_error && <span className="ui-field-error">The last send failed: {p.last_error}</span>}
+              {confirmOff && (
+                <span className="lb-leave" role="group" aria-label="Turn sharing off">
+                  <span className="lb-sub">Delete every report you sent from the board? Your profile stays, and nothing more is sent until you turn sharing on.</span>
+                  <Button
+                    variant="danger"
+                    disabled={busy !== null}
+                    onClick={async () => {
+                      await act("share", stopSharing);
+                      setConfirmOff(false);
+                    }}
+                  >
+                    {busy === "share" ? "Deleting…" : "Delete from the board"}
+                  </Button>
+                  <Button variant="quiet" disabled={busy !== null} onClick={() => setConfirmOff(false)}>
+                    Keep sharing
+                  </Button>
+                </span>
+              )}
+              {p.last_error && (
+                <span className="ui-field-error">
+                  The last send failed: {p.last_error}{" "}
+                  {/* Sending again is its own action, so nobody turns sharing off and on to retry. */}
+                  <button className="link" disabled={busy !== null || changed} onClick={() => act("share", sendNow)}>
+                    Send again
+                  </button>
+                </span>
+              )}
+              {!on && p.deleted && <span className="lb-sub">{deletedLine(p.deleted)}</span>}
               <button className="link lb-see-report" aria-expanded={showReport} onClick={() => setShowReport(!showReport)}>
                 {showReport ? "Hide the report" : "See the report"}
               </button>
