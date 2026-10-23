@@ -25,8 +25,9 @@ pub const WAIT_BEFORE: i64 = 120;
 pub const EVERY: i64 = 600;
 /// No input for this long, and the person is away.
 pub const AWAY_AFTER: u64 = 600;
-/// A process is idle when it used under this share of one core over `IDLE_WINDOW`, or over the
-/// whole wait while that is shorter, but never less than `WAIT_BEFORE`.
+/// A process is idle when it used under this share of one core over the last `IDLE_WINDOW`. The
+/// samples start with the wait, so a fresh run is first helped `IDLE_WINDOW` into it: nothing
+/// before the wait says what a program did then.
 pub const IDLE_CPU: f64 = 0.01;
 pub const IDLE_WINDOW: i64 = 300;
 /// How often the processes are sampled while a run waits for memory.
@@ -75,16 +76,18 @@ pub fn due(mode: Mode, available: bool, harness: bool, waited: i64, since_last: 
 }
 
 /// Whether a process that used `cpu_100ns` more processor time over `elapsed` seconds is idle: the
-/// window is long enough and it stayed under `IDLE_CPU` of one core.
+/// window covers at least the last `IDLE_WINDOW`, and it used less than `IDLE_CPU` of one core's
+/// time in `IDLE_WINDOW`. A longer window holds it to that same budget, so whatever it did in the
+/// last five minutes alone is under it too (NIT-657 review).
 pub fn idle(cpu_100ns: u64, elapsed: i64) -> bool {
-    elapsed >= WAIT_BEFORE && (cpu_100ns as f64) < IDLE_CPU * (elapsed as f64) * 10_000_000.0
+    elapsed >= IDLE_WINDOW && (cpu_100ns as f64) < IDLE_CPU * (IDLE_WINDOW as f64) * 10_000_000.0
 }
 
 /// Which sample, of those taken `ages` seconds ago (oldest first), measures idleness now: the
-/// newest at least `IDLE_WINDOW` old, so the window is the last five minutes and not much more, or
-/// while the wait is younger, the oldest, once it is `WAIT_BEFORE` old (NIT-657 review).
+/// newest at least `IDLE_WINDOW` old, so the window is the last five minutes and at most one
+/// sample interval more.
 pub fn baseline(ages: &[i64]) -> Option<usize> {
-    ages.iter().rposition(|a| *a >= IDLE_WINDOW).or_else(|| ages.first().filter(|a| **a >= WAIT_BEFORE).map(|_| 0))
+    ages.iter().rposition(|a| *a >= IDLE_WINDOW)
 }
 
 /// A process as the last sample saw it: identity (pid and creation time) and processor time.
@@ -362,11 +365,12 @@ mod tests {
         // Nitely, 14 was restarted under the same pid, 15 is new.
         let now = [s(10, 10_000_000), s(11, 100_000_000), s(12, 0), s(13, 0), Sample { pid: 14, started: "2".into(), cpu_100ns: 0 }, s(15, 0)];
         assert_eq!(candidates(&before, &now, IDLE_WINDOW, Some(12), &[13]), [(10, "1".to_string())]);
-        assert!(candidates(&before, &now, WAIT_BEFORE - 1, None, &[]).is_empty(), "the window is too short to tell");
-        // Which sample measures: the newest at least five minutes old, else the whole wait once it
-        // is two minutes long, so a fresh run is helped after two minutes and the window stays short.
-        assert_eq!(baseline(&[60]), None);
-        assert_eq!(baseline(&[WAIT_BEFORE, 60]), Some(0), "two minutes into the wait");
+        assert!(candidates(&before, &now, IDLE_WINDOW - 1, None, &[]).is_empty(), "the window is too short to tell");
+        // A longer window keeps the five-minute budget: 4 s over six minutes is 1.1% of five.
+        assert!(!idle(40_000_000, IDLE_WINDOW + 60));
+        assert!(idle(20_000_000, IDLE_WINDOW + 60));
+        // Which sample measures: the newest at least five minutes old.
+        assert_eq!(baseline(&[WAIT_BEFORE, 60]), None, "two minutes of samples say nothing about five");
         assert_eq!(baseline(&[360, 300, 240, 180]), Some(1), "the last five minutes, not six");
 
         let gb = crate::machine::GIB;

@@ -214,7 +214,7 @@ function MemoryTrim() {
     }
   };
   const why = setting.available
-    ? "When a run has waited two minutes for memory, Nitely empties the working memory of your programs that sat idle while it waited, at most every ten minutes. They read it back when you use them again. Never the window you're in, and no admin rights."
+    ? "When a run has waited two minutes for memory, Nitely empties the working memory of your programs that have sat idle for five minutes, at most every ten minutes. They read it back when you use them again. Never the window you're in, and no admin rights."
     : setting.why;
   return (
     <>
