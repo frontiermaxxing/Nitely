@@ -38,7 +38,8 @@ pub fn record(dir: &Path, event: &Event) -> Result<()> {
 /// Whether an event goes in the history: not under a newer recorder, not while recording is paused,
 /// and not when it repeats its run's last kind (NIT-535).
 fn keep_event(version: i64, enabled: bool, prior: Option<&str>, kind: &str) -> bool {
-    version <= performance::RECORDER_VERSION && enabled && prior != Some(kind)
+    // Each trim is its own operation with its own measurements, repeated or not (NIT-657 review).
+    version <= performance::RECORDER_VERSION && enabled && (prior != Some(kind) || kind == "\"memory_trimmed\"")
 }
 fn record_in_store(store: &mut Store, event: &Event) -> Result<()> {
     let kind = serde_json::to_string(&event.kind)?;
@@ -96,6 +97,8 @@ mod tests {
         assert!(!keep_event(v, true, Some("\"started\""), "\"started\""), "a repeat of the run's last kind");
         assert!(!keep_event(v, false, None, "\"started\""), "paused");
         assert!(!keep_event(v + 1, true, None, "\"started\""), "a newer recorder owns the history");
+        assert!(keep_event(v, true, Some("\"memory_trimmed\""), "\"memory_trimmed\""), "a second trim in one wait is recorded too");
+        assert_eq!(serde_json::to_string(&Kind::MemoryTrimmed).unwrap(), "\"memory_trimmed\"");
     }
     #[test]
     fn events_follow_the_coordination_home_and_survive_workload_exit_without_commands() {

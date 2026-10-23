@@ -120,6 +120,8 @@ struct State {
     sample: Option<(i64, Vec<Sample>)>,
 }
 
+/// This process's bookkeeping only. The time between trims is the machine's, in `LAST` (`claim`),
+/// so runs waiting in separate processes share it.
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
 fn harness() -> bool {
@@ -171,6 +173,12 @@ pub fn while_waiting(db: &Db, id: i64, why: String) -> String {
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let state = guard.get_or_insert_with(State::default);
     state.waiting_since.retain(|_, since| now - *since < 86_400);
+    // A wait for memory starts again after the run waited on something else (a slot, a lane, its
+    // checkout): those clear its waiting_memory, which this look has not set yet (NIT-657 review).
+    let resumed: bool = db.conn.query_row("SELECT waiting_memory IS NULL FROM lane_run WHERE id = ?1", [id], |r| r.get(0)).unwrap_or(true);
+    if resumed {
+        state.waiting_since.insert(id, now);
+    }
     let since = *state.waiting_since.entry(id).or_insert(now);
     // Sampling opens every process, so only where a trim could follow.
     if setting.available && !harness() && setting.mode != Mode::Off {
@@ -335,6 +343,30 @@ mod tests {
         assert_eq!(note(&Trim { processes: 12, available_before: 18 * gb, available_after: 21 * gb }).as_deref(), Some("Nitely emptied the working memory of 12 idle programs, 3.0 GB freed"));
         assert_eq!(note(&Trim { processes: 3, available_before: 18 * gb, available_after: 18 * gb }), None, "said only when it helped");
         assert!(setting().available == cfg!(windows));
+    }
+
+    /// NIT-657 review: the two minutes are spent waiting for memory alone: a wait on something else
+    /// in between (which clears the run's waiting_memory) starts them again.
+    #[test]
+    fn the_wait_for_memory_starts_again_after_a_wait_on_something_else() {
+        let dir = crate::paths::unique_temp("nitely-memory-trim-wait", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let db = Db::open(&dir.join("t.db")).unwrap();
+        db.conn.execute("INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, priority, lane_count, scheduler) VALUES ('APP', 'C:/Code/app', 'x', 'run', 's', 't', 'b', 'c', 'queued', 'local', 1, 0, 1, 3)", []).unwrap();
+        let id = db.conn.last_insert_rowid();
+        let since = || STATE.lock().unwrap().as_ref().and_then(|s| s.waiting_since.get(&id).copied());
+        while_waiting(&db, id, "waiting for memory".into());
+        let first = since().unwrap();
+        db.conn.execute("UPDATE lane_run SET waiting_memory = 'waiting for memory' WHERE id = ?1", [id]).unwrap();
+        STATE.lock().unwrap().as_mut().unwrap().waiting_since.insert(id, first - 600);
+        while_waiting(&db, id, "waiting for memory".into());
+        assert_eq!(since(), Some(first - 600), "still the same wait");
+        // It waited for a slot meanwhile, which cleared its waiting_memory.
+        db.conn.execute("UPDATE lane_run SET waiting_memory = NULL WHERE id = ?1", [id]).unwrap();
+        while_waiting(&db, id, "waiting for memory".into());
+        assert!(since().unwrap() >= first, "a new wait");
+        drop(db);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     /// NIT-657 review: the ten minutes between trims hold across Nitely's processes, and a run is
