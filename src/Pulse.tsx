@@ -190,7 +190,11 @@ export function Pulse(props: {
           <RightNow data={data} board={props.board} ctx={ctx} />
           <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} landQueue={landQueueLength(batches)} />
           <WaitingStrip waits={waits} now={now} onOpenIssue={props.onOpenIssue} />
-          <GoalRows heading version={props.version} onOpenIssue={props.onOpenIssue} />
+        </>
+      )}
+      <GoalRows heading version={props.version} onOpenIssue={props.onOpenIssue} />
+      {data && (
+        <>
           {data.projects.length > 0 && (
             <section>
               <h2>
@@ -359,20 +363,29 @@ const LIVE_ORDER = { working: 0, waiting: 1, idle: 2, stale: 3, ended: 4 } as co
 
 /** Every agent with a session open: who, on what, how far, and what it is doing now. */
 function RightNow({ data, board, ctx }: { data: PulseData; board: Board | null; ctx: Context }) {
+  const [showInactive, setShowInactive] = useState(false);
   const issues = new Map<string, IssueRecord>();
   for (const p of data.projects) for (const f of [...p.issues, ...p.done_today]) issues.set(f.issue.key, f.issue);
   const rank = (s: Session) => LIVE_ORDER[livenessOf(s, ctx.now) ?? "ended"];
   const sessions = openSessions(board, ctx.now).sort((a, b) => rank(a.s) - rank(b.s) || b.s.last_seen_at - a.s.last_seen_at);
+  const active = sessions.filter(({ s }) => ["working", "waiting"].includes(livenessOf(s, ctx.now) ?? "ended"));
+  const inactive = sessions.length - active.length;
+  const shown = showInactive ? sessions : active;
   return (
     <section>
-      <h2>
-        Right now <span className="head-note">every agent with a session open</span>
+      <h2 className="now-heading">
+        Right now <span className="head-note">working and waiting agents</span>
+        {inactive > 0 && (
+          <button className="link now-expand" aria-expanded={showInactive} onClick={() => setShowInactive((value) => !value)}>
+            {showInactive ? "Hide" : "Show"} {inactive} inactive
+          </button>
+        )}
       </h2>
-      {sessions.length === 0 ? (
-        <p className="muted small">No agent has a session open. Work they pick up shows here as it starts.</p>
+      {shown.length === 0 ? (
+        <p className="muted small">No agents are working or waiting right now.</p>
       ) : (
         <div className="now-list">
-          {sessions.map(({ s, key, issue: own, report, repo: where }) => {
+          {shown.map(({ s, key, issue: own, report, repo: where }) => {
             const issue = (key ? issues.get(key) : undefined) ?? own ?? undefined;
             const live = livenessOf(s, ctx.now);
             const waiting = live === "waiting";
