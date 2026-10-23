@@ -17,6 +17,12 @@ product.
 
 ## Principles
 
+Issue opens use the full reading surface, including in a separate window. The title and track
+lead into compact expandable facts, the Markdown body and evidence, then the actions. History
+stays expanded in a right column with its own scroll; below 900px it follows the content in one
+scrolling column. The shared Markdown renderer escapes raw HTML and only opens safe web links
+or known issue links. Existing hash routes keep issue opens shareable and preserve navigation.
+
 1. **Answer at a glance.** The top of every screen says whether anything needs you, what is
    moving and what is stuck, before any detail. One line is enough: see the header of Now
    (`5 moving  2 waiting on you  4 idle sessions`) and the summary on a project page.
