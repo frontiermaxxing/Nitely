@@ -1184,14 +1184,23 @@ impl Db {
     /// Every issue (native and mirrored), most urgent first; `project` narrows to one project's
     /// native issues.
     pub fn list_issues(&self, project: Option<&str>, include_closed: bool) -> Result<Vec<IssueRecord>> {
+        self.read_issues(project, include_closed, false)
+    }
+
+    /// Lifecycle processing must still see archived work already in flight.
+    pub(crate) fn all_issues(&self, include_closed: bool) -> Result<Vec<IssueRecord>> {
+        self.read_issues(None, include_closed, true)
+    }
+
+    fn read_issues(&self, project: Option<&str>, include_closed: bool, include_archived: bool) -> Result<Vec<IssueRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ISSUE_COLUMNS} FROM issue
              WHERE (?1 IS NULL OR project = ?1 COLLATE NOCASE)
-               AND (?1 IS NOT NULL OR key IN (SELECT key FROM active_issue))
+               AND (?3 OR ?1 IS NOT NULL OR key IN (SELECT key FROM active_issue))
                AND (?2 OR state_type NOT IN ('completed', 'canceled'))
              ORDER BY CASE priority WHEN 0 THEN 5 ELSE priority END, number, key"
         ))?;
-        let rows = stmt.query_map(params![project, include_closed], issue_from_row)?;
+        let rows = stmt.query_map(params![project, include_closed, include_archived], issue_from_row)?;
         let mut issues: Vec<IssueRecord> = rows.collect::<rusqlite::Result<_>>()?;
         self.hydrate_issue_list(&mut issues)?;
         Ok(issues)
@@ -2086,9 +2095,19 @@ impl Db {
     /// The questions waiting on the person. One whose issue has closed is not: its issue's close
     /// closed it (and one asked before that rule, on an issue closed since, is passed over too).
     pub fn open_asks(&self) -> Result<Vec<Ask>> {
+        self.read_open_asks(false)
+    }
+
+    /// A hidden question still participates in acceptance and review safety rules.
+    pub(crate) fn all_open_asks(&self) -> Result<Vec<Ask>> {
+        self.read_open_asks(true)
+    }
+
+    fn read_open_asks(&self, include_archived: bool) -> Result<Vec<Ask>> {
+        let table = if include_archived { "ask" } else { "active_ask" };
         let mut stmt = self.conn.prepare(
             &format!(
-                "SELECT {ASK_COLUMNS} FROM active_ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
+                "SELECT {ASK_COLUMNS} FROM {table} a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
                  WHERE a.answer IS NULL AND a.closed IS NULL
                    AND (i.key IS NULL OR i.state_type NOT IN ('completed', 'canceled'))
                  ORDER BY a.asked_at"

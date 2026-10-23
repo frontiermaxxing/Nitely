@@ -483,6 +483,7 @@ mod tests {
         assert_eq!(db.issues().unwrap().iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), [other.as_str()]);
         assert_eq!(db.list_issues(Some("APP"), true).unwrap().len(), 2);
         assert!(db.open_asks().unwrap().is_empty());
+        assert_eq!(db.all_open_asks().unwrap().len(), 1, "hidden asks still guard in-flight review and acceptance");
         assert_eq!(db.ask(ask.id).unwrap().unwrap().question, "Which behavior?");
         assert_eq!(db.issue(&second).unwrap().unwrap().blocked_by, [first.clone()]);
         assert!(db.next_task("APP", "codex:new").unwrap().is_none());
