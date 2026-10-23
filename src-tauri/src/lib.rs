@@ -889,6 +889,22 @@ async fn set_machine_limits(floor_gb: Option<f64>, cap_gb: Option<f64>) -> Resul
     Ok(nitely_core::machine::now())
 }
 
+/// When Nitely may empty idle programs' working memory while a run waits for memory, and whether
+/// this system can (NIT-657).
+#[tauri::command]
+async fn memory_trim_setting() -> Result<nitely_core::memory_trim::Setting, String> {
+    Ok(nitely_core::memory_trim::setting())
+}
+
+/// Sets it: None puts back the default, only while the person is away.
+#[tauri::command]
+async fn set_memory_trim(mode: Option<nitely_core::memory_trim::Mode>) -> Result<nitely_core::memory_trim::Setting, String> {
+    let mut config = Config::load().map_err(err)?;
+    config.memory_trim = mode;
+    config.save().map_err(err)?;
+    Ok(nitely_core::memory_trim::setting())
+}
+
 /// Every request waiting now, why, and what it waits behind (NIT-322).
 #[tauri::command]
 async fn waits_overview() -> Result<nitely_crew::waits::Waits, String> {
@@ -1138,6 +1154,8 @@ pub fn run() {
             set_performance_settings,
             clear_performance_history,
             set_machine_limits,
+            memory_trim_setting,
+            set_memory_trim,
             batches_overview,
             waits_overview,
             open_lane_log,
