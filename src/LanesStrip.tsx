@@ -25,11 +25,11 @@ export function useLanes(version: number): LanesOverview | null {
  * The build lanes on Now and Overview (docs/build-lanes.md): one chip per lane with its project,
  * what it runs or that it is idle, and each project's queue. Nothing when no repo has lanes.
  */
-export function LanesStrip(props: { version: number; now: number; onOpenIssue: (key: string) => void; landQueue?: number }) {
+export function LanesStrip(props: { version: number; now: number; onOpenIssue: (key: string) => void; landQueue?: number; cards?: boolean }) {
   const lanes = useLanes(props.version);
   if (!lanes || lanes.projects.length === 0) return null;
   return (
-    <section className="lanes-strip" aria-label="Build lanes">
+    <section className={`lanes-strip${props.cards ? " lanes-cards" : ""}`} aria-label="Build lanes">
       <h2>
         Build lanes
         {machineWords(lanes).length > 0 && (
@@ -54,6 +54,7 @@ export function LanesStrip(props: { version: number; now: number; onOpenIssue: (
           const elsewhere = remoteRuns(p);
           return (
             <div key={`${p.project}-${p.repo}`} className="lanes-project">
+              {props.cards && <h3 className="lanes-project-title">{p.project} <span className="head-note">{p.repo}</span></h3>}
               {laneChips(p).map((c) => (
                 <Chip key={c.lane} chip={c} now={props.now} onOpenIssue={props.onOpenIssue} />
               ))}

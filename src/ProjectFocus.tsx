@@ -65,6 +65,12 @@ export function ProjectFocus(props: { project: string; version: number; goals: G
           />
         </div>
         {selected && <button className="link" disabled={busy} onClick={() => save(null, focus.allow_urgent)}>Clear focus</button>}
+        {selected && <Switch
+          checked={focus.allow_urgent}
+          disabled={busy || !focus.active}
+          onChange={(on) => save(focus.goal, on)}
+          label={`Allow urgent (P1) work to interrupt${!focus.active ? " when the goal is active" : ""}`}
+        />}
         {busy && <span className="muted small" role="status">Saving…</span>}
       </div>
       {!focus && !error && <Loading />}
@@ -78,14 +84,6 @@ export function ProjectFocus(props: { project: string; version: number; goals: G
               ? "Choose a goal to direct the crew and other agents without changing issue priorities."
               : "Start a goal to choose where agents work next."}
         </p>
-        {selected && <div className="project-focus-urgent">
-          <Switch
-            checked={focus.allow_urgent}
-            disabled={busy || !focus.active}
-            onChange={(on) => save(focus.goal, on)}
-            label={`Allow urgent (P1) work to interrupt${!focus.active ? " when the goal is active" : ""}`}
-          />
-        </div>}
       </>}
       {error && <p className="error" role="alert">{error} <button className="link" disabled={busy} onClick={() => setRetry((n) => n + 1)}>Retry</button></p>}
     </section>
