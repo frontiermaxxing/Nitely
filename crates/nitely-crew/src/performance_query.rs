@@ -522,7 +522,7 @@ mod tests {
             fixture.store.append_attribution(&mut attributed, true).unwrap();
         }
         for (run, boot) in [(1, Some("a")), (2, Some("b")), (3, None)] {
-            performance_events::record(&fixture.dir, &Event { wall_ms: NOW-80_000, boot: boot.map(str::to_string), kind: Kind::Started, project: "APP".into(), issue: None, run, memory_cap_bytes: None }).unwrap();
+            performance_events::record(&fixture.dir, &Event { wall_ms: NOW-80_000, boot: boot.map(str::to_string), kind: Kind::Started, project: "APP".into(), issue: None, run, memory_cap_bytes: None, trim: None }).unwrap();
         }
         let query = Query { view: View::History, before_last_restart: true, limit: 1, ..Default::default() };
         let report = fixture.query(query.clone());

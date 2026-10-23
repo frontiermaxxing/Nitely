@@ -3002,6 +3002,7 @@ fn take_turn(
                             // Held while it waits, the slot and lane would keep the rest waiting too.
                             drop(lock);
                             drop(slot);
+                            let why = crate::memory_trim::while_waiting(db, id, why);
                             after_look(db, id, &mut waiting, &Look::Memory(why), timeout, sleep)?;
                             continue 'turn;
                         }
@@ -3108,6 +3109,7 @@ pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &
                         }
                         Some(why) => {
                             drop(slot);
+                            let why = crate::memory_trim::while_waiting(db, id, why);
                             after_look(db, id, &mut waiting, &Look::Memory(why), 0, &mut pause)?;
                             continue;
                         }
