@@ -873,7 +873,7 @@ when it has one): a gap there is a finding like any other, and comes before line
     // Findings the person is deciding now: a round that still sees one says it in the same words,
     // so the request stays attached to it (NIT-353). Only a finding's words, which a review wrote,
     // never the asking agent's reasoning, and nothing about its weight.
-    let deciding: Vec<crate::accept::AskedFinding> = db.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).filter_map(|a| a.finding).collect();
+    let deciding: Vec<crate::accept::AskedFinding> = db.all_open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).filter_map(|a| a.finding).collect();
     if !deciding.is_empty() {
         c.push_str("\nThe person is deciding these findings of an earlier round. If one still holds, report it in exactly these words, so their decision stays attached to it; report it only if it still holds:\n");
         for f in &deciding {

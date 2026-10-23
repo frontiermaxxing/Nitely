@@ -159,7 +159,8 @@ pub fn build(board: &Leaderboard, projects: u64, profile: &Profile) -> Result<Re
 /// The report now, over `projects` (empty: every project), as `profile`.
 pub fn report_now(config: &nitely_core::Config, db: &nitely_core::db::Db, projects: &[String], profile: &Profile) -> Result<Report> {
     let board = crate::leaderboard::stats_now(config, db, projects)?;
-    let counted = if projects.is_empty() { db.projects()?.len() } else { board.projects.len() };
+    let active = db.projects()?;
+    let counted = active.iter().filter(|p| projects.is_empty() || projects.iter().any(|key| key.eq_ignore_ascii_case(&p.key))).count();
     build(&board, counted as u64, profile)
 }
 

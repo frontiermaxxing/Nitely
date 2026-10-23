@@ -558,7 +558,7 @@ pub fn land_on_approval(db: &mut Db, config: &crate::Config, key: &str, dir: &st
 pub fn land_approved(db: &mut Db, config: &crate::Config, reported: &mut HashMap<String, String>) -> Result<Vec<Landed>> {
     let mut landed = Vec::new();
     let approved: Vec<IssueRecord> =
-        db.list_issues(None, false)?.into_iter().filter(|i| i.state == "Approved" && i.origin == "nitely").collect();
+        db.all_issues(false)?.into_iter().filter(|i| i.state == "Approved" && i.origin == "nitely").collect();
     for issue in approved {
         let Some(at) = db.standing_approval(&issue.key)? else { continue };
         // Approved a moment ago and not signed yet: the app signs right after the move.
@@ -2438,6 +2438,9 @@ when_changed = ["billing"]
         let dir = f.repo.to_string_lossy().into_owned();
         assert!(land_on_approval(&mut f.db, &crate::Config::default(), &b, &dir).unwrap().is_none(), "not approved yet");
         approve(&mut f.db, &b);
+        // Archiving hides this project, but cannot strand work already approved for landing.
+        f.db.set_project_archived("NIT", true, &Actor::Human).unwrap();
+        assert!(f.db.list_issues(None, false).unwrap().is_empty());
         // The app approves with no directory: with two repos linked to the project, the one with
         // the issue's branch lands it. Its after-land step fails, which the issue is told.
         let other = f.base.join("other");

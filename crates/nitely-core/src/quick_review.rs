@@ -99,6 +99,7 @@ pub fn waiting(db: &Db, project: &str, root: &Path) -> Result<Vec<Waiting>> {
 pub fn tick_all(db: &mut Db, config: &Config) -> Result<()> {
     for r in &config.repos {
         let Some(project) = &r.project else { continue };
+        if db.project_archived(project)? { continue; }
         let root = Path::new(&r.root);
         let waiting = waiting(db, project, root)?;
         if due(waiting.len(), waiting.first().map(|w| w.landed_at), now()) {

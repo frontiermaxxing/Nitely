@@ -110,7 +110,7 @@ impl Db {
         let start = format!("%{}%", crate::submit_rules::STALLED_NOTICE_START.replace('%', ""));
         let end = format!("%{}", crate::submit_rules::STALLED_NOTICE_END);
         let mut stmt = self.conn.prepare(
-            "SELECT e.id, e.issue_key, e.ts, e.summary FROM event e
+            "SELECT e.id, e.issue_key, e.ts, e.summary FROM active_event e
              WHERE e.ts >= ?3 AND NOT EXISTS (SELECT 1 FROM notice_dismissed d WHERE d.event_id = e.id)
                AND ((e.type = 'note' AND e.summary LIKE ?1 AND e.summary LIKE ?2
                      AND e.id = (SELECT MAX(x.id) FROM event x WHERE x.issue_key = e.issue_key AND x.type = 'note' AND x.summary LIKE ?1 AND x.summary LIKE ?2))
@@ -135,7 +135,7 @@ impl Db {
         let latest: Option<(String, Option<String>, i64, Option<String>)> = self
             .conn
             .query_row(
-                "SELECT type, issue_key, ts, summary FROM event WHERE type IN ('land_after', 'land_after_failed') ORDER BY ts DESC, id DESC LIMIT 1",
+                "SELECT type, issue_key, ts, summary FROM active_event WHERE type IN ('land_after', 'land_after_failed') ORDER BY ts DESC, id DESC LIMIT 1",
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
             )
@@ -548,8 +548,18 @@ fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
         .cloned()
         .collect();
 
-    let remote_sessions = sessions.iter().filter(|s| s.cwd.starts_with("remote:")).cloned().collect();
+
     let agents = agents(db, config, &sessions, &views, &issues, &aliases, &paths)?;
+    let archived = db.archived_project_keys()?;
+    let visible = |project: Option<&str>, key: Option<&str>| {
+        !project.is_some_and(|p| archived.contains(&p.to_uppercase()))
+            && !key.and_then(|k| k.split_once('-')).is_some_and(|(p, _)| archived.contains(&p.to_uppercase()))
+    };
+    let remote: Vec<&Session> = sessions.iter().filter(|s| s.cwd.starts_with("remote:")).collect();
+    let remote_work = if archived.is_empty() { SessionWork::new() } else { db.issues_sessions_work_on(&remote.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), now())? };
+    let remote_sessions = remote.into_iter().filter(|s| visible(None, remote_work.get(&s.id).and_then(|w| w.0.as_deref()))).cloned().collect();
+    let views = views.into_iter().filter(|v| visible(v.project.as_deref(), None)).collect();
+    let agents = agents.into_iter().filter(|a| visible(a.project.as_deref(), a.issue_key.as_deref())).collect();
     Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents, after_land_failed: db.after_land_failed()?, notices: db.notices()? })
 }
 
