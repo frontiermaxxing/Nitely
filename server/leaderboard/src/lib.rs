@@ -58,9 +58,12 @@ pub const SITE: &str = "https://nitely.net";
 const CARDS_KEPT: usize = 2_000;
 
 // ---- The report, exactly as the client builds it (nitely_crew::leaderboard_report) ----
+//
+// A field this service does not know is dropped, not refused (NIT-653): a newer app must not lose
+// its place on the board because the service is older. Nothing outside these structs is kept: a
+// row is stored and served as they serialize it, so an unknown field never reaches the database.
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Report {
     pub schema: u32,
     pub display_name: String,
@@ -81,7 +84,6 @@ pub struct Report {
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Links {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub github: Option<String>,
@@ -92,7 +94,6 @@ pub struct Links {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Period {
     pub period: String,
     pub landed: u64,
@@ -109,7 +110,6 @@ pub struct Period {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Durations {
     pub median: i64,
     pub p90: i64,
@@ -117,14 +117,12 @@ pub struct Durations {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Week {
     pub landed: u64,
     pub active_days: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Vendor {
     pub vendor: String,
     pub landed: u64,
@@ -132,14 +130,12 @@ pub struct Vendor {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Rounds {
     pub mean: f64,
     pub max: u64,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
 pub struct Records {
     pub best_day: u64,
     pub best_week: u64,
