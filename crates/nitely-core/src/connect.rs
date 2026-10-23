@@ -145,7 +145,8 @@ pub fn init_repo(path: &str) -> Result<String> {
         bail!("{} is not a folder", dir.display());
     }
     let enclosing = crate::git::main_root(&dir.to_string_lossy());
-    if let Some(why) = init_refusal(dir, enclosing.as_deref(), dirs::home_dir().as_deref()) {
+    // The home folder as agent_home reads it (the harness's own under NITELY_AGENT_HOME).
+    if let Some(why) = init_refusal(dir, enclosing.as_deref(), Some(&agent_home())) {
         bail!("{why}");
     }
     // `--initial-branch` needs git 2.28; an older git names the unborn branch by hand.
