@@ -66,7 +66,7 @@ impl Digest {
 /// The person's own moves, as the event table records them.
 const DECISIONS: &[&str] = &["answer", "issue_moved", "issue_edited", "goal_changed", "note", "project_review_mode_changed", "project_focus_changed", "project_yolo_changed", "reviewer_settings_changed", "owner_changed", "issue_created", "ask_closed"];
 /// Outcomes of work, whoever's they are: lands, sent-backs, a goal done or dropped.
-const OUTCOMES: &[&str] = &["landed", "land_failed", "goal_state"];
+const OUTCOMES: &[&str] = &["landed", "land_failed", "goal_state", "memory_wait"];
 /// Who files the recovery issue when the full check on the integration branch fails
 /// (verification_backstop.rs): that issue's filing is the failure's news.
 const BACKSTOP: &str = "verification-backstop";
@@ -191,6 +191,8 @@ fn line(e: &FeedEvent) -> String {
         "ask_closed" => format!("The person closed the ask{on}"),
         "reviewer_settings_changed" => format!("The person changed the reviewer settings: {said}"),
         "land_failed" => format!("{} was sent back from landing: {said}", e.issue_key.as_deref().unwrap_or("A change")),
+        // A run held for memory past ten minutes with nothing of Nitely's running (NIT-656).
+        "memory_wait" => said,
         _ => format!("The person changed{on}: {said}"),
     }
 }
