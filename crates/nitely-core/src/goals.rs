@@ -163,8 +163,7 @@ impl Db {
     /// A goal and every issue in it, the open ones in the order `list_issues` gives.
     pub fn goal_detail(&self, id: i64) -> Result<GoalDetail> {
         let goal = self.goal(id)?.with_context(|| format!("no goal {id}"))?;
-        let issues: Vec<IssueRecord> =
-            self.list_issues(Some(&goal.project), true)?.into_iter().filter(|i| i.goal == Some(id)).collect();
+        let issues = self.goal_issues(&[id])?;
         let (risks, finish) = (crate::goal_report::risks(&issues), self.expected_finish(goal.id, goal.progress.open)?);
         Ok(GoalDetail { goal, issues, risks, finish })
     }
@@ -182,18 +181,18 @@ impl Db {
             Some(p) => vec![self.project(p)?.with_context(|| format!("no project {p}"))?.key],
             None => self.projects()?.into_iter().map(|p| p.key).collect(),
         };
+        let mut goals = Vec::new();
+        for key in projects { goals.extend(self.goals(&key, include_closed)?); }
+        let issues = self.goal_issues(&goals.iter().map(|g| g.id).collect::<Vec<_>>())?;
+        let mut by_goal = std::collections::HashMap::<i64, Vec<IssueRecord>>::new();
+        for issue in issues {
+            if let Some(id) = issue.goal { by_goal.entry(id).or_default().push(issue); }
+        }
         let mut out = Vec::new();
-        for key in projects {
-            let goals = self.goals(&key, include_closed)?;
-            if goals.is_empty() {
-                continue;
-            }
-            let issues = self.list_issues(Some(&key), true)?;
-            for goal in goals {
-                let mine: Vec<IssueRecord> = issues.iter().filter(|i| i.goal == Some(goal.id)).cloned().collect();
-                let (risks, finish) = (crate::goal_report::risks(&mine), self.expected_finish(goal.id, goal.progress.open)?);
-                out.push(GoalDetail { goal, issues: mine, risks, finish });
-            }
+        for goal in goals {
+            let mine = by_goal.remove(&goal.id).unwrap_or_default();
+            let (risks, finish) = (crate::goal_report::risks(&mine), self.expected_finish(goal.id, goal.progress.open)?);
+            out.push(GoalDetail { goal, issues: mine, risks, finish });
         }
         Ok(out)
     }

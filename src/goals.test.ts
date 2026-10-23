@@ -1,3 +1,4 @@
+import { showGoal } from "./goals.ts";
 // Runs with `npm test` (scripts/test.mjs: tsc, then node:test).
 
 import { test } from "node:test";
@@ -145,4 +146,20 @@ test("what triage answered so you were not needed", () => {
   assert.equal(triagedLine(0), null);
   assert.equal(triagedLine(1), "Triage answered a question without you");
   assert.equal(triagedLine(4), "Triage answered 4 questions without you");
+});
+
+
+test("finished cards hide only when no checkpoint or open work remains", () => {
+  const goal = { id: 1, state: "active", progress: { total: 17, done: 17, dropped: 0, open: 0 } } as import("./types").Goal;
+  assert.equal(showGoal(goal, false), false);
+  assert.equal(showGoal(goal, true), true);
+  assert.equal(showGoal(goal, false, 1), true);
+  assert.equal(showGoal({ ...goal, progress: { ...goal.progress, open: 1 } }, false), true);
+  assert.equal(showGoal({ ...goal, progress: { total: 0, done: 0, dropped: 0, open: 0 } }, false), true);
+  const branch = { state: "green", items: 1 } as import("./types").GoalBranchSummary;
+  assert.equal(showGoal({ ...goal, branch }, false), true);
+  assert.equal(showGoal({ ...goal, branch: { ...branch, items: 0, state: "red" } }, false), true);
+  assert.equal(showGoal({ ...goal, branch: { ...branch, items: 0, checkpoint_issue: "APP-2" } }, false), true);
+  assert.equal(showGoal({ ...goal, state: "done" }, false), false);
+  assert.equal(showGoal({ ...goal, state: "done" }, true), true);
 });

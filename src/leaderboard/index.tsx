@@ -27,7 +27,10 @@ export function Leaderboard(props: { now: number; version: number; projects: Pro
   const [error, setError] = useState<string | null>(null);
   const projects = profile?.projects ?? [];
   const projectsKey = projects.join(",");
+  const ready = profile !== undefined;
+  useEffect(() => { setStats(null); setError(null); }, [projectsKey]);
   useEffect(() => {
+    if (!ready || tab !== "you") return;
     let live = true;
     invoke<LeaderboardStats>("leaderboard_stats", { projects }).then(
       (s) => live && (setStats(s), setError(null)),
@@ -36,7 +39,7 @@ export function Leaderboard(props: { now: number; version: number; projects: Pro
     return () => {
       live = false;
     };
-  }, [projectsKey, props.version]);
+  }, [ready, tab, projectsKey, props.version]);
 
   return (
     <div className="page lb">

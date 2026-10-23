@@ -1186,14 +1186,30 @@ impl Db {
         ))?;
         let rows = stmt.query_map(params![project, include_closed], issue_from_row)?;
         let mut issues: Vec<IssueRecord> = rows.collect::<rusqlite::Result<_>>()?;
-        let deps = Deps::load(&self.conn)?;
-        for i in &mut issues {
-            deps.fill(i);
-        }
-        self.fill_tracks(&mut issues)?;
-        // Stable, so issues of equal urgency keep their priority and number order.
-        issues.sort_by_key(|i| rank(i.urgency));
+        self.hydrate_issue_list(&mut issues)?;
         Ok(issues)
+    }
+
+    /// Goal rows only need issues belonging to the selected goals. Hydrate them together so
+    /// shared dependencies and timelines are read once, even across many projects.
+    pub(crate) fn goal_issues(&self, ids: &[i64]) -> Result<Vec<IssueRecord>> {
+        if ids.is_empty() { return Ok(Vec::new()); }
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ISSUE_COLUMNS} FROM issue WHERE goal IN (SELECT value FROM json_each(?1))
+             ORDER BY CASE priority WHEN 0 THEN 5 ELSE priority END, number, key"
+        ))?;
+        let rows = stmt.query_map([serde_json::to_string(ids)?], issue_from_row)?;
+        let mut issues = rows.collect::<rusqlite::Result<Vec<_>>>()?;
+        self.hydrate_issue_list(&mut issues)?;
+        Ok(issues)
+    }
+
+    fn hydrate_issue_list(&self, issues: &mut [IssueRecord]) -> Result<()> {
+        let deps = Deps::load(&self.conn)?;
+        for i in issues.iter_mut() { deps.fill(i); }
+        self.fill_tracks(issues)?;
+        issues.sort_by_key(|i| rank(i.urgency));
+        Ok(())
     }
 
     /// Records that `key` cannot start before `blocker` closes.
@@ -1899,9 +1915,10 @@ impl Db {
         let open: HashSet<String> = issues.iter().filter(|i| i.is_open()).map(|i| i.key.to_uppercase()).collect();
         let mut timelines: HashMap<String, Vec<TimelineEntry>> = HashMap::new();
         let mut stmt = self.conn.prepare(
-            "SELECT issue_key, ts, actor, type, summary FROM event WHERE issue_key IS NOT NULL ORDER BY ts, id",
+            "SELECT issue_key, ts, actor, type, summary FROM event
+             WHERE issue_key COLLATE NOCASE IN (SELECT value FROM json_each(?1)) ORDER BY ts, id",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([serde_json::to_string(&open)?], |r| {
             Ok((r.get::<_, String>(0)?, TimelineEntry { ts: r.get(1)?, actor: r.get(2)?, kind: r.get(3)?, summary: r.get(4)?, place: None }))
         })?;
         for row in rows {

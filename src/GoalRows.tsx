@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke } from "./backend";
 import type { GoalDetail, GoalRisk } from "./types";
-import { crewOnGoal, finishLine, goalBranchLine, goalCounts, goalOrder, riskTone, targetLine } from "./goals";
+import { crewOnGoal, finishLine, goalBranchLine, goalCounts, goalOrder, goalWorkFinished, showGoal, riskTone, targetLine } from "./goals";
 import { IssueToken, Meter, Switch } from "./ui";
 import { ProjectFocus } from "./ProjectFocus";
 import "./goal-rows.css";
@@ -23,13 +23,13 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
 
   useEffect(() => {
     let live = true;
-    invoke<GoalDetail[]>("goals", { project: props.project ?? null, includeClosed: showCompleted })
+    invoke<GoalDetail[]>("goals", { project: props.project ?? null, includeClosed: true })
       .then((g) => live && (setGoals(g), setError(null)))
       .catch((e) => live && setError(String(e)));
     return () => {
       live = false;
     };
-  }, [props.project, props.version, reordered, showCompleted]);
+  }, [props.project, props.version, reordered]);
 
   const reopen = (id: number) => {
     invoke("goal_state", { id, state: "active" })
@@ -48,17 +48,18 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   if (error) return <p className="error">{error}</p>;
   if (!goals) return null;
   if (!props.project && goals.length === 0) return null;
+  const visible = goals.filter((g) => showGoal(g.goal, showCompleted, props.focus?.id));
   const rows = (
     <>
       {/* The focus picker never offers a completed goal. */}
       {props.project && <ProjectFocus key={props.project} project={props.project} version={props.version} goals={goals.filter((g) => g.goal.state === "active")} />}
-      {props.project && (
+      {goals.length > 0 && (
         <div className="goal-rows-tools">
           <Switch checked={showCompleted} onChange={setShowCompleted} label="Show completed" />
         </div>
       )}
       <div className="goal-rows">
-        {goals.map((g, n) => (
+        {visible.map((g, n) => (
           <GoalRow
             // A new request for the same goal remounts its row, so the scroll and the outline run again.
             key={g.goal.id === props.focus?.id ? `${g.goal.id}@${props.focus.at}` : g.goal.id}
@@ -132,6 +133,7 @@ export function GoalRow(props: { detail: GoalDetail; showProject?: boolean; focu
         <span className="goal-title" title={goal.outcome}>
           {goal.title}
         </span>
+        {goal.state === "active" && goalWorkFinished(goal) && <span className="goal-state" title="All cards are finished; the goal outcome is still active.">Cards finished</span>}
         {goal.state !== "active" && <span className="goal-state">{goal.state === "done" ? "Completed" : "Dropped"}</span>}
         {props.onReopen && (
           <button className="link goal-reopen" onClick={props.onReopen} title="Make it active again: agents take its open issues, and it can be the focus">
