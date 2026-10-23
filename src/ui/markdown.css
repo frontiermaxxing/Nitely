@@ -1,0 +1,23 @@
+.brief-doc { font-size: var(--text-md); line-height: 1.6; color: var(--fg); overflow-wrap: anywhere; }
+.brief-doc > :first-child { margin-top: 0; }
+.brief-doc h2, .brief-doc h3, .brief-doc h4, .brief-doc h5, .brief-doc h6 { margin: 26px 0 8px; line-height: 1.3; font-weight: var(--weight-strong); }
+.brief-doc h2 { font-size: var(--text-lg); }
+.brief-doc h3 { font-size: var(--text-md); }
+.brief-doc h4, .brief-doc h5, .brief-doc h6 { font-size: var(--text-md); color: var(--fg-2); }
+.brief-doc p, .brief-doc ul, .brief-doc ol, .brief-doc blockquote, .brief-doc pre, .brief-table { margin: 0 0 12px; }
+.brief-doc ul, .brief-doc ol { padding-left: 1.4em; }
+.brief-doc li { margin: 2px 0; }
+.brief-doc li.brief-task { list-style: none; margin-left: -1.4em; }
+.brief-task .ui-check-box { margin: 0 7px 0 0; }
+.brief-doc blockquote { padding-left: 12px; border-left: 2px solid var(--line-strong); color: var(--fg-2); }
+.brief-doc hr { border: 0; border-top: 1px solid var(--line); margin: 20px 0; }
+.brief-doc code { font-family: var(--font-mono); font-size: 0.88em; background: var(--sunken); border-radius: var(--radius-sm); padding: 1px 4px; }
+.brief-doc pre { background: var(--sunken); border-radius: var(--radius); padding: 10px 12px; overflow-x: auto; }
+.brief-doc pre code { background: none; padding: 0; font-size: 12px; }
+.brief-doc a { color: inherit; text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 2px; }
+.brief-doc a:hover { text-decoration-color: currentColor; }
+.brief-doc .link { font: inherit; color: inherit; }
+.brief-table { overflow-x: auto; }
+.brief-table table { border-collapse: collapse; font-size: var(--text-sm); }
+.brief-table th, .brief-table td { text-align: left; vertical-align: top; padding: 6px 14px 6px 0; border-bottom: 1px solid var(--line); }
+.brief-table th { font-weight: var(--weight-medium); color: var(--fg-2); }
