@@ -359,6 +359,10 @@ enum Cmd {
         /// Make the changes.
         #[arg(long)]
         yes: bool,
+        /// When the folder is in no git repo, make it one (`git init`, first branch main; nothing
+        /// committed) before planning.
+        #[arg(long)]
+        init: bool,
     },
     /// Manage the repos Nitely watches.
     Repo {
@@ -2046,9 +2050,12 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Connect { path, project, name, yes } => {
+        Cmd::Connect { path, project, name, yes, init } => {
             let mut config = Config::load()?;
             let mut db = Db::open_default()?;
+            if init && nitely_core::git::main_root(&path).is_none() {
+                println!("{}", nitely_core::connect::init_repo(&path)?);
+            }
             let plan = nitely_core::connect::plan(&db, &config, &path, project.as_deref(), name.as_deref())?;
             let new = if plan.project_exists { "existing" } else { "new" };
             println!("{} → project {} ({}, {new}), integration branch {}", plan.root, plan.project_key, plan.project_name, plan.integration_branch);

@@ -590,6 +590,12 @@ async fn connect_plan(path: String, key: Option<String>, name: Option<String>) -
     nitely_core::connect::plan(&db()?, &config, &path, key.as_deref(), name.as_deref()).map_err(err)
 }
 
+/// Makes a folder that is in no repo a git repo on main, so Add a project can go on (NIT-652).
+#[tauri::command]
+async fn connect_init(path: String) -> Result<String, String> {
+    nitely_core::connect::init_repo(&path).map_err(err)
+}
+
 /// Adds the repo. The plan is recomputed here rather than taken from the page, so what is written
 /// is what Nitely decides now.
 #[tauri::command]
@@ -1159,6 +1165,7 @@ pub fn run() {
             accept_finding,
             decline_finding,
             connect_plan,
+            connect_init,
             connect_apply,
             agent_setup,
             agent_setup_apply,
