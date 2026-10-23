@@ -347,6 +347,7 @@ export interface Project {
   key: string;
   name: string;
   open_issues: number;
+  archived?: boolean;
 }
 
 /** What agents learned about a project, and when the setup sweep read it (crates/nitely-core/src/brief.rs). */

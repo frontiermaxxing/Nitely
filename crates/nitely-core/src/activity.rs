@@ -333,6 +333,13 @@ pub fn activity(config: &Config, db: &Db, from: i64, to: i64) -> Result<Activity
             std::cmp::Reverse(b.last_seen_at),
         ))
     });
+    let archived = db.archived_project_keys()?;
+    out.retain(|l| !l.project.as_deref().is_some_and(|p| archived.contains(&p.to_uppercase())));
+    for lane in &mut out {
+        let visible = |key: &str| !key.split_once('-').is_some_and(|(p, _)| archived.contains(&p.to_uppercase()));
+        lane.issues.retain(|k| visible(k));
+        lane.marks.retain(|m| m.issue_key.as_deref().is_none_or(&visible));
+    }
     let mut named: Vec<String> = Vec::new();
     for k in out.iter().flat_map(|l| l.issues.iter().chain(l.marks.iter().filter_map(|m| m.issue_key.as_ref()))) {
         if !named.contains(k) {

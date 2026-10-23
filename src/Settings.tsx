@@ -1,6 +1,7 @@
 import { useEffect } from "react";
 import type { View } from "./App";
 import { CrewSettings } from "./CrewSettings";
+import { ArchivedProjects } from "./ArchivedProjects";
 import { LanesSettings } from "./LanesStrip";
 import { LinksSettings } from "./LinksSettings";
 import { Network } from "./Network";
@@ -19,6 +20,7 @@ export const SETTINGS_SECTIONS = [
   { id: "reviews", label: "Review defaults" },
   { id: "crew", label: "Crew" },
   { id: "lanes", label: "Build lanes" },
+  { id: "archived", label: "Archived projects" },
   { id: "links", label: "Issue links" },
   { id: "phone", label: "Phone" },
   { id: "machines", label: "Other machines" },
@@ -106,6 +108,10 @@ export function Settings(props: {
 
       <Section id="lanes" label="Build lanes" why="Where builds and tests run: a few warm checkouts per project that keep their build output, so agents' worktrees hold source only.">
         <LanesSettings version={props.version} />
+      </Section>
+
+      <Section id="archived" label="Archived projects" why="Archived projects are kept out of navigation and combined totals. Restoring brings their data and task selection back.">
+        <ArchivedProjects version={props.version} onChanged={props.onChanged} />
       </Section>
 
       <Section id="links" label="Issue links" why="The links agents write to issues, in chats, pull requests and notes, open the issue here.">
