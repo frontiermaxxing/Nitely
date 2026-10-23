@@ -988,6 +988,7 @@ function heldFiles(project: string): Held[] {
 // ----- The NIT crew: the specs marked crew are its running workers -----
 
 let crewPaused = false;
+let memoryTrim: "off" | "away" | "always" = "away";
 
 // Each repo's [crew] as the Crew section edits it (crates/nitely-crew/src/crew_settings.rs): Nitely
 // commits its own playbook and runs a crew, Orbit's playbook is kept by Nitely with the crew off,
@@ -2391,6 +2392,11 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return clearPerformance();
       case "set_machine_limits":
         return lanesOverview().machine;
+      case "set_memory_trim":
+        memoryTrim = (args.mode as typeof memoryTrim | null) ?? "away";
+        return { mode: memoryTrim, available: true, why: null };
+      case "memory_trim_setting":
+        return { mode: memoryTrim, available: true, why: null };
       case "batches_overview":
         return batchesOverview();
       case "waits_overview":

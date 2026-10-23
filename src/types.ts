@@ -1149,6 +1149,14 @@ export interface LaneRun {
 }
 
 /** The machine's memory and how builds share it (machine.rs `Now`, NIT-266); bytes. */
+/** When Nitely may empty idle programs' working memory while a run waits for memory (NIT-657),
+ * and whether this system can: on macOS and Linux it cannot, and `why` says so. */
+export interface MemoryTrimSetting {
+  mode: "off" | "away" | "always";
+  available: boolean;
+  why: string | null;
+}
+
 export interface MachineNow {
   memory: { total: number; available: number } | null;
   /** Nothing new starts below `floor` free; one run and all it starts may hold `cap`. `*_from`:

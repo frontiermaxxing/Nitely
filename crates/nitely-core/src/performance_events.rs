@@ -7,7 +7,7 @@ use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
-pub enum Kind { Started, Ended, WaitingForMemory, MemoryWaitEnded, OutOfMemory }
+pub enum Kind { Started, Ended, WaitingForMemory, MemoryWaitEnded, OutOfMemory, MemoryTrimmed }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Event {
     pub wall_ms: i64,
@@ -18,6 +18,10 @@ pub struct Event {
     pub issue: Option<String>,
     pub run: i64,
     pub memory_cap_bytes: Option<u64>,
+    /// For `MemoryTrimmed`: how many idle programs, and the memory available before and after
+    /// (memory_trim.rs, NIT-657).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trim: Option<crate::memory_trim::Trim>,
 }
 pub(crate) fn schema(db: &rusqlite::Connection) -> Result<()> {
     db.execute_batch("CREATE TABLE IF NOT EXISTS performance_event(id INTEGER PRIMARY KEY, wall_ms INTEGER NOT NULL, project TEXT NOT NULL, run INTEGER NOT NULL, kind TEXT NOT NULL, json TEXT NOT NULL CHECK(length(json)<=1024));
@@ -55,9 +59,16 @@ fn record_in_store(store: &mut Store, event: &Event) -> Result<()> {
 /// Recorder failures never stop a workload. The event stays with its coordination database,
 /// including test/harness homes and lane callers whose child changes NITELY_HOME.
 pub fn lane(db: &crate::Db, run: i64, kind: Kind) {
+    lane_with(db, run, kind, None)
+}
+/// A trim of idle programs' memory for waiting run `run` (NIT-657).
+pub fn lane_trim(db: &crate::Db, run: i64, trim: crate::memory_trim::Trim) {
+    lane_with(db, run, Kind::MemoryTrimmed, Some(trim))
+}
+fn lane_with(db: &crate::Db, run: i64, kind: Kind, trim: Option<crate::memory_trim::Trim>) {
     let Some(dir) = db.conn.path().filter(|p| !p.is_empty()).and_then(|p| Path::new(p).parent()) else { return };
     let row = db.conn.query_row("SELECT project,issue_key,memory_cap FROM lane_run WHERE id=?1", [run], |r| Ok((r.get::<_, String>(0)?,r.get::<_, Option<String>>(1)?,r.get::<_, Option<i64>>(2)?)));
-    if let Ok((project, issue, cap)) = row { let _ = record(&dir.join("performance"), &Event { wall_ms: performance::wall_ms(), boot: performance::boot_id(), kind, project, issue, run, memory_cap_bytes: cap.and_then(|v| u64::try_from(v).ok()) }); }
+    if let Ok((project, issue, cap)) = row { let _ = record(&dir.join("performance"), &Event { wall_ms: performance::wall_ms(), boot: performance::boot_id(), kind, project, issue, run, memory_cap_bytes: cap.and_then(|v| u64::try_from(v).ok()), trim }); }
 }
 pub fn read(store: &Store, from: i64, to: i64, project: Option<&str>, limit: usize) -> Result<(Vec<Event>, bool)> {
     read_for_boot(store, from, to, project, limit, None)
@@ -117,7 +128,7 @@ mod tests {
     #[test]
     fn pause_clear_and_retention_apply_to_durable_events() {
         let dir = crate::paths::unique_temp("performance-event-retention", "");
-        let event = |at, run| Event { wall_ms: at, boot: None, kind: Kind::Started, project: "APP".into(), issue: None, run, memory_cap_bytes: None };
+        let event = |at, run| Event { wall_ms: at, boot: None, kind: Kind::Started, project: "APP".into(), issue: None, run, memory_cap_bytes: None, trim: None };
         record(&dir, &event(1, 1)).unwrap();
         record(&dir, &event(31*86_400_000, 2)).unwrap();
         let store = Store::open(&dir).unwrap();
@@ -151,7 +162,7 @@ mod tests {
                 std::thread::sleep(std::time::Duration::from_millis(5));
                 attempt < 1000
             })).unwrap();
-            record_in_store(&mut writer, &Event { wall_ms: performance::wall_ms(), boot: None, kind: Kind::Started, project: "APP".into(), issue: None, run: 1, memory_cap_bytes: None }).unwrap();
+            record_in_store(&mut writer, &Event { wall_ms: performance::wall_ms(), boot: None, kind: Kind::Started, project: "APP".into(), issue: None, run: 1, memory_cap_bytes: None, trim: None }).unwrap();
         });
         wait.recv_timeout(std::time::Duration::from_secs(10)).unwrap();
         tx.commit().unwrap();
