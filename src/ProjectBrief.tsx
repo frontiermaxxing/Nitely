@@ -168,4 +168,3 @@ function SetupLine(props: { brief: Brief; now: number }) {
     </span>
   );
 }
-
