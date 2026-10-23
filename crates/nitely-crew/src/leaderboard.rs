@@ -459,9 +459,9 @@ fn spread(mut values: Vec<i64>) -> Option<Spread> {
 }
 
 /// The numbers now, over `projects` (empty: every project): tokens from the agents' own session
-/// files on this machine (`usage::scan`, counts only), sessions' projects from `config`.
+/// files on this machine (`usage::scan_projects`, counts only), sessions' projects from `config`.
 pub fn stats_now(config: &nitely_core::Config, db: &Db, projects: &[String]) -> Result<Leaderboard> {
-    let tokens = crate::usage::scan(config, db, 0);
+    let tokens = crate::usage::scan_projects(config, db, 0);
     let project_of_dir = |dir: &str| config.repo_for_dir(dir).and_then(|r| r.project.clone());
     stats(db, &Inputs { now: nitely_core::db::now(), utc_offset: local_offset(), projects, tokens: &tokens, project_of_dir: &project_of_dir })
 }

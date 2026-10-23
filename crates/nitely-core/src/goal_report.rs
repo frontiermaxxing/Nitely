@@ -137,15 +137,26 @@ pub struct Report {
 impl Db {
     /// The report since `since`, for every project or one.
     pub fn goal_report(&self, project: Option<&str>, since: i64) -> Result<Report> {
+        let key = project.map(|key| self.project(key)?.ok_or_else(|| anyhow::anyhow!("no project {key}")).map(|p| p.key)).transpose()?;
+        let project = key.as_deref();
+        self.goal_report_from_issues(project, since, &self.list_issues(project, true)?)
+    }
+
+    /// Reuse an already hydrated issue snapshot when building a view such as Overview.
+    pub fn goal_report_from_issues(&self, project: Option<&str>, since: i64, issues: &[IssueRecord]) -> Result<Report> {
         let ts = now();
         let landed = self.landed_with_goals_since(since)?;
         let mut in_goal = std::collections::HashSet::new();
         let mut goals = Vec::new();
-        for d in self.active_goals(project)? {
-            let open = d.goal.progress.open;
-            let mine: Vec<Landed> = landed.iter().filter(|(_, g, _)| *g == Some(d.goal.id)).map(|(l, _, _)| l.clone()).collect();
+        let projects = match project {
+            Some(key) => vec![self.project(key)?.ok_or_else(|| anyhow::anyhow!("no project {key}"))?],
+            None => self.projects()?,
+        };
+        for goal in projects.iter().map(|p| self.goals(&p.key, false)).collect::<Result<Vec<_>>>()?.into_iter().flatten() {
+            let mine_issues: Vec<IssueRecord> = issues.iter().filter(|i| i.goal == Some(goal.id)).cloned().collect();
+            let mine: Vec<Landed> = landed.iter().filter(|(_, g, _)| *g == Some(goal.id)).map(|(l, _, _)| l.clone()).collect();
             in_goal.extend(mine.iter().map(|l| l.key.clone()));
-            goals.push(GoalReport { risks: risks(&d.issues), finish: self.expected_finish(d.goal.id, open)?, landed: mine, goal: d.goal });
+            goals.push(GoalReport { risks: risks(&mine_issues), finish: self.expected_finish(goal.id, goal.progress.open)?, landed: mine, goal });
         }
         let other_landed = landed
             .into_iter()
@@ -343,6 +354,22 @@ mod tests {
         let other = db.save_goal("NIT", None, &GoalChange { title: Some("Quiet".into()), outcome: Some("o".into()), ..Default::default() }, &Actor::Human).unwrap().id;
         assert_eq!(db.expected_finish(other, 2).unwrap(), None);
         assert_eq!(db.expected_finish(goal, 0).unwrap(), None, "nothing left");
+    }
+
+    #[test]
+    fn an_old_project_key_still_reports_the_renamed_goals_risks() {
+        let mut db = db();
+        let goal = db.save_goal("NIT", None, &GoalChange { title: Some("Ship exports".into()), outcome: Some("Export works".into()), ..Default::default() }, &Actor::Human).unwrap();
+        let key = issue(&mut db, "Approve the export format", Some(goal.id));
+        db.move_issue(&key, "Needs You", None, Some("choose the format"), &Actor::Agent("codex:test".into())).unwrap();
+        db.rekey_project("NIT", "APP").unwrap();
+        let report = db.goal_report(Some("NIT"), now() - 60).unwrap();
+        assert_eq!(report.goals.len(), 1);
+        assert_eq!(report.goals[0].goal.project, "APP");
+        assert_eq!(report.goals[0].risks.len(), 1);
+        assert_eq!(report.goals[0].risks[0].why, "waits on you");
+        assert!(report.goals[0].risks[0].key.starts_with("APP-"));
+        assert_eq!(report.needed.len(), 1);
     }
 
     #[test]

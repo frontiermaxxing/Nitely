@@ -1,7 +1,7 @@
 // How a goal's issues are drawn on its row: in station order, done to the left, and as a meter of
 // whose move it is. Pure, so node:test runs it (src/goals.test.ts).
 
-import type { IssueRecord } from "./types";
+import type { Goal, IssueRecord } from "./types";
 // Straight from the module rather than ./ui, so node:test can load this file without the CSS.
 import { stationIndex, trackOf, type Track } from "./ui/lifecycle.ts";
 
@@ -188,4 +188,15 @@ export function targetLine(date: string | null | undefined, today: Date, complet
   if (days < 0) return { text: `by ${label} · ${-days} day${days === -1 ? "" : "s"} late`, late: true };
   if (days === 0) return { text: `by ${label} · today`, late: false };
   return { text: `by ${label} · in ${days} day${days === 1 ? "" : "s"}`, late: false };
+}
+
+/** Finished cards are hidden without declaring the goal's outcome achieved. Pending checkpoints stay visible. */
+export function goalWorkFinished(goal: Goal): boolean {
+  const b = goal.branch;
+  return goal.progress.total > 0 && goal.progress.open === 0 &&
+    !(b && (b.state === "red" || b.items > 0 || b.checkpoint_issue));
+}
+
+export function showGoal(goal: Goal, completed: boolean, focused?: number): boolean {
+  return completed || goal.id === focused || (goal.state === "active" && !goalWorkFinished(goal));
 }
