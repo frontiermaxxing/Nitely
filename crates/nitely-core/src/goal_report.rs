@@ -137,6 +137,8 @@ pub struct Report {
 impl Db {
     /// The report since `since`, for every project or one.
     pub fn goal_report(&self, project: Option<&str>, since: i64) -> Result<Report> {
+        let key = project.map(|key| self.project(key)?.ok_or_else(|| anyhow::anyhow!("no project {key}")).map(|p| p.key)).transpose()?;
+        let project = key.as_deref();
         self.goal_report_from_issues(project, since, &self.list_issues(project, true)?)
     }
 
@@ -352,6 +354,22 @@ mod tests {
         let other = db.save_goal("NIT", None, &GoalChange { title: Some("Quiet".into()), outcome: Some("o".into()), ..Default::default() }, &Actor::Human).unwrap().id;
         assert_eq!(db.expected_finish(other, 2).unwrap(), None);
         assert_eq!(db.expected_finish(goal, 0).unwrap(), None, "nothing left");
+    }
+
+    #[test]
+    fn an_old_project_key_still_reports_the_renamed_goals_risks() {
+        let mut db = db();
+        let goal = db.save_goal("NIT", None, &GoalChange { title: Some("Ship exports".into()), outcome: Some("Export works".into()), ..Default::default() }, &Actor::Human).unwrap();
+        let key = issue(&mut db, "Approve the export format", Some(goal.id));
+        db.move_issue(&key, "Needs You", None, Some("choose the format"), &Actor::Agent("codex:test".into())).unwrap();
+        db.rekey_project("NIT", "APP").unwrap();
+        let report = db.goal_report(Some("NIT"), now() - 60).unwrap();
+        assert_eq!(report.goals.len(), 1);
+        assert_eq!(report.goals[0].goal.project, "APP");
+        assert_eq!(report.goals[0].risks.len(), 1);
+        assert_eq!(report.goals[0].risks[0].why, "waits on you");
+        assert!(report.goals[0].risks[0].key.starts_with("APP-"));
+        assert_eq!(report.needed.len(), 1);
     }
 
     #[test]
