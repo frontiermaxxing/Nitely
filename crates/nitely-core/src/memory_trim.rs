@@ -152,6 +152,15 @@ pub(crate) fn last_trim(dir: &Path) -> Option<(i64, String)> {
     Some((at.trim().parse().ok()?, said.trim().to_string()))
 }
 
+/// Replaces the machine's last trim in one step: written beside it, then renamed over it, so a
+/// process reading it never sees it empty and takes that for no trim (NIT-657 review).
+fn write_last(dir: &Path, text: &str) {
+    let tmp = dir.join(format!("{LAST}.{}", std::process::id()));
+    if std::fs::write(&tmp, text).is_ok() && std::fs::rename(&tmp, dir.join(LAST)).is_err() {
+        std::fs::remove_file(&tmp).ok();
+    }
+}
+
 /// Takes the machine's next trim for this process when none was made in the last `EVERY`: true
 /// when it is this one's to make. The claim file makes the check and the write one step between
 /// processes; one left by a process that died is taken over after a minute.
@@ -166,7 +175,7 @@ pub(crate) fn claim(dir: &Path, now: i64) -> bool {
     }
     let mine = last_trim(dir).is_none_or(|(at, _)| now - at >= EVERY);
     if mine {
-        std::fs::write(dir.join(LAST), format!("{now}\t")).ok();
+        write_last(dir, &format!("{now}\t"));
     }
     std::fs::remove_file(&lock).ok();
     mine
@@ -212,7 +221,7 @@ pub fn while_waiting(db: &Db, id: i64, why: String) -> String {
             if let Some(trim) = os::trim(&pids) {
                 crate::performance_events::lane_trim(db, id, trim);
                 if let Some(said) = note(&trim) {
-                    std::fs::write(dir.join(LAST), format!("{now}\t{said}")).ok();
+                    write_last(&dir, &format!("{now}\t{said}"));
                 }
             }
         }
