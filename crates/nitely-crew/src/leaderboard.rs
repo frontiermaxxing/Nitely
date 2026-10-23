@@ -112,7 +112,7 @@ pub struct PeriodStats {
     pub from: i64,
     pub to: i64,
     pub landed: u64,
-    /// Landed per day over the period's days (all time: since the first landing).
+    /// Landed per day over the period's days (all time: since the first thing it counts).
     pub landed_per_day: f64,
     /// Of the landed changes that were reviewed, the share whose first review passed (0 to 1).
     pub first_pass_rate: Option<f64>,
@@ -227,14 +227,22 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
     let day_start = |t: i64| (t + inputs.utc_offset).div_euclid(DAY) * DAY - inputs.utc_offset;
 
     let this_week = week_start(inputs.now);
-    let first_landing = changes.iter().map(|c| c.landed_at).min();
+    let asks = asks(db, &counted)?;
+    let sessions = sessions(db, inputs, &counted)?;
+    let counted_tokens = |t: &&crate::usage::Attributed| projects.is_empty() || t.project.as_deref().is_some_and(|p| projects.contains(&p.to_uppercase()));
+    // All time starts at the earliest thing it counts, not the first landing: tokens, sessions and
+    // asks before it count too, so all time never sums to less than 30 days (NIT-654).
+    let first = [
+        changes.iter().map(|c| c.landed_at).min(),
+        inputs.tokens.iter().filter(counted_tokens).map(|t| t.usage.ts).filter(|ts| *ts > 0).min(),
+        sessions.iter().map(|(start, _)| *start).min(),
+        asks.iter().map(|(answered, _)| *answered).min(),
+    ];
     let spans = [
         ("week", this_week),
         ("30d", inputs.now - 30 * DAY),
-        ("all", first_landing.map(day_start).unwrap_or(inputs.now).min(inputs.now)),
+        ("all", first.into_iter().flatten().min().map(day_start).unwrap_or(inputs.now).min(inputs.now)),
     ];
-    let asks = asks(db, &counted)?;
-    let sessions = sessions(db, inputs, &counted)?;
     let mut periods = Vec::new();
     for (name, from) in spans {
         let to = inputs.now;
@@ -606,6 +614,32 @@ mod tests {
     }
 
     /// An empty database has numbers too: zeros and nothing to rate.
+    /// NIT-654: all time starts at the earliest thing it counts. A person whose tokens and sessions
+    /// began before their first landing saw all time sum to less than 30 days.
+    #[test]
+    fn all_time_starts_at_the_first_thing_it_counts_so_it_is_never_less_than_30_days() {
+        let (db, base) = db();
+        let now = MONDAY + 12 * 3600;
+        change(&db, "NIT-1", "claude", now - DAY, &["pass"], now - DAY + 600);
+        db.conn
+            .execute("INSERT INTO session (id, vendor, cwd, started_at, last_seen_at, state) VALUES ('s1', 'claude', 'C:/Code/nitely', ?1, ?2, 'ended')", params![now - 12 * DAY, now - 12 * DAY + 3 * 3600])
+            .unwrap();
+        let record = |ts: i64, n: u64| Attributed {
+            usage: Usage { vendor: "claude", session: "s1".into(), ts, model: "m".into(), input: n, output: 0, cache_read: 0, cache_write: 0, cwd: String::new(), branch: String::new() },
+            project: Some("NIT".into()),
+            issue: None,
+        };
+        let records = vec![record(now - 10 * DAY, 5_000), record(now - DAY, 1_000)];
+        let project_of = |_: &str| Some("NIT".to_string());
+        let b = stats(&db, &Inputs { now, utc_offset: 0, projects: &[], tokens: &records, project_of_dir: &project_of }).unwrap();
+        let (month, all) = (&b.periods[1], &b.periods[2]);
+        assert_eq!(all.from, MONDAY - 12 * DAY, "the day of the first session, before the first landing");
+        assert_eq!((all.tokens, month.tokens), (6_000, 6_000));
+        assert!(all.landed >= month.landed && all.tokens >= month.tokens && all.agent_hours >= month.agent_hours && all.sessions >= month.sessions);
+        assert_eq!(all.agent_hours, 3.0);
+        std::fs::remove_dir_all(base).ok();
+    }
+
     #[test]
     fn no_history_reads_as_zeros() {
         let (db, base) = db();
