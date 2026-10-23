@@ -1,5 +1,9 @@
 ALTER TABLE project ADD COLUMN archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1));
 
+-- Match case-insensitive history joins without scanning every issue per event.
+CREATE INDEX issue_archive_key ON issue (key COLLATE NOCASE, project);
+CREATE INDEX project_archive_key ON project (key COLLATE NOCASE, archived);
+
 -- Default cross-project reads share this filter; explicit issue/history reads keep their data.
 CREATE VIEW active_issue AS
 SELECT i.* FROM issue i WHERE NOT EXISTS
