@@ -61,7 +61,7 @@ fn copy_dir(from: &Path, to: &Path, template: &Path, base: &Path, objects: bool)
             let text = std::fs::read_to_string(&src).unwrap();
             std::fs::write(&dst, re_root(&text, template, base)).unwrap();
         } else {
-            std::fs::copy(&src, &dst).unwrap();
+            std::fs::copy(&src, &dst).unwrap_or_else(|error| panic!("copy fixture {} to {}: {error}", src.display(), dst.display()));
         }
     }
 }
