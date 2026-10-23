@@ -212,10 +212,11 @@ struct Change {
 
 /// The numbers for `inputs`, read from `db`.
 pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
+    let archived = db.archived_project_keys()?;
     let projects: Vec<String> = inputs.projects.iter().map(|p| p.to_uppercase()).collect();
     let counted = |key_or_project: &str| {
         let project = key_or_project.split('-').next().unwrap_or("").to_uppercase();
-        projects.is_empty() || projects.contains(&project)
+        !archived.contains(&project) && (projects.is_empty() || projects.contains(&project))
     };
     let changes = changes(db, &counted)?;
     let week_start = |t: i64| {
@@ -229,7 +230,7 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
     let this_week = week_start(inputs.now);
     let asks = asks(db, &counted)?;
     let sessions = sessions(db, inputs, &counted)?;
-    let counted_tokens = |t: &&crate::usage::Attributed| projects.is_empty() || t.project.as_deref().is_some_and(|p| projects.contains(&p.to_uppercase()));
+    let counted_tokens = |t: &&crate::usage::Attributed| t.project.as_deref().map_or(projects.is_empty(), &counted);
     // All time starts at the earliest thing it counts, not the first landing: tokens, sessions and
     // asks before it count too, so all time never sums to less than 30 days (NIT-654).
     let first = [
@@ -263,7 +264,7 @@ pub fn stats(db: &Db, inputs: &Inputs) -> Result<Leaderboard> {
             .tokens
             .iter()
             .filter(|t| t.usage.ts >= from && t.usage.ts <= to)
-            .filter(|t| projects.is_empty() || t.project.as_deref().is_some_and(|p| projects.contains(&p.to_uppercase())))
+            .filter(|t| t.project.as_deref().map_or(projects.is_empty(), &counted))
             .map(|t| t.usage.tokens())
             .sum();
         // Per vendor: landed, reviewed, passed the first review.

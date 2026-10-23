@@ -1177,8 +1177,15 @@ function parseBranch(branch: string): [string | null, string | null] {
   return [vendor, m ? `${m[1].toUpperCase()}-${m[2]}` : null];
 }
 
+function visibleProject(key: string | null | undefined): boolean {
+  return !world.projects.some((p) => p.archived && p.key === key?.toUpperCase());
+}
+function visibleIssue(key: string | null | undefined): boolean {
+  return visibleProject(key?.split("-")[0]);
+}
+
 function snapshot(): Board {
-  const repos: RepoView[] = REPOS.map((repo) => {
+  const repos: RepoView[] = REPOS.filter((r) => visibleProject(r.project)).map((repo) => {
     const main: TaskRow = {
       worktree: repo.root,
       branch: repo.integration,
@@ -1299,17 +1306,17 @@ function snapshot(): Board {
     repos,
     agents,
     // Only those without a worktree row, as in nitely-core: the others are flagged on their row.
-    needs_me_issues: world.issues.filter((i) => (i.state === "Needs You" || isOwnWork(i)) && !repos.some((r) => r.rows.some((row) => row.issue_key === i.key))),
-    asks: world.asks.filter((a) => a.answer === null),
+    needs_me_issues: world.issues.filter((i) => visibleProject(i.project) && (i.state === "Needs You" || isOwnWork(i)) && !repos.some((r) => r.rows.some((row) => row.issue_key === i.key))),
+    asks: world.asks.filter((a) => a.answer === null && visibleIssue(a.issue_key)),
     notices: world.notices,
     sync: [
       { source: "github", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
       { source: "bitbucket", last_attempt: NOW - 95, last_ok: NOW - 95, last_error: null },
     ],
     // An agent on the Mac, reaching this machine's backlog through `nitely serve`.
-    remote_sessions: [
+    remote_sessions: visibleProject("ORB") ? [
       { id: "claude@mac", vendor: "claude", cwd: "remote:mac", started_at: NOW - 2 * HOUR, last_seen_at: NOW - 140, last_activity: "Filed ORB-281: Mac sidebar flickers on resize", state: "working" },
-    ],
+    ] : [],
   };
 }
 
@@ -1352,7 +1359,7 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
   const now = Math.floor(Date.now() / 1000);
   const since = Math.max(sinceArg || 0, now - 7 * 24 * HOUR);
   const today = iso(dayStart);
-  const projects = world.projects.map((p) => {
+  const projects = world.projects.filter((p) => !p.archived).map((p) => {
     const mine = issues({ project: p.key, includeClosed: true });
     return {
       key: p.key,
@@ -1363,7 +1370,7 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
       verification_audits: verificationAudit(p.key),
     };
   });
-  const events = [...world.timelines.entries()].flatMap(([key, tl]) => tl.map((t) => ({ ...t, key })));
+  const events = [...world.timelines.entries()].filter(([key]) => visibleIssue(key)).flatMap(([key, tl]) => tl.map((t) => ({ ...t, key })));
   const all: Happening[] = events
     .filter((e) => e.ts >= since && HAPPENING[e.kind])
     .sort((a, b) => b.ts - a.ts)
@@ -1385,8 +1392,8 @@ function pulse(sinceArg: number, dayStart: number): Pulse {
     now,
     since,
     projects,
-    asks: world.asks.filter((a) => a.answer === null),
-    approvals: world.issues.filter((i) => i.state === "Needs You"),
+    asks: world.asks.filter((a) => a.answer === null && visibleIssue(a.issue_key)),
+    approvals: world.issues.filter((i) => visibleProject(i.project) && i.state === "Needs You"),
     happened: all.slice(0, 300),
     happened_counts,
     stuck_issues: { got: gotStuck.size, keys: [...gotStuck].sort() },
@@ -2112,7 +2119,7 @@ function goals(args: Record<string, unknown>): GoalDetail[] {
   const project = args.project ? String(args.project).toUpperCase() : null;
   const rank = (id: number) => goalRanks.get(id) ?? Number.MAX_SAFE_INTEGER;
   const closed = args.includeClosed === true;
-  return GOALS.filter((g) => (!project || g.project === project) && (closed || (g.state ?? "active") === "active"))
+  return GOALS.filter((g) => (project ? g.project === project : visibleProject(g.project)) && (closed || (g.state ?? "active") === "active"))
     .sort((a, b) => rank(a.id) - rank(b.id))
     .map((g) => {
       const goal = goalRecord(g);
@@ -2152,7 +2159,7 @@ function goalReport(since: number): GoalReport {
   const active = goals({});
   const byKey = new Map<string, { key: string; title: string; ts: number }>();
   for (const e of landedEvents()) {
-    if (e.ts < since) continue;
+    if (e.ts < since || !visibleIssue(e.key)) continue;
     const prev = byKey.get(e.key);
     if (!prev || prev.ts < e.ts) byKey.set(e.key, { key: e.key, title: world.issues.find((i) => i.key === e.key)?.title ?? e.key, ts: e.ts });
   }
@@ -2178,7 +2185,7 @@ function goalReport(since: number): GoalReport {
     now: Math.floor(Date.now() / 1000),
     goals: active.map((g) => ({ goal: g.goal, landed: landed.filter((l) => goalOf(l.key) === g.goal.id), risks: g.risks ?? [], finish: g.finish ?? null })),
     other_landed: landed.filter((l) => !inGoal.has(goalOf(l.key) ?? -1)),
-    needed,
+    needed: needed.filter((n) => visibleIssue(n.issue_key)),
     triaged: [
       { ts: Math.max(since, Math.floor(Date.now() / 1000) - 2 * HOUR), issue_key: "NIT-30", question: "Does NIT-29 already change the review track?", answer: "No: NIT-29 only adds the lanes; the track is NIT-30's." },
       { ts: Math.max(since, Math.floor(Date.now() / 1000) - HOUR), issue_key: "HAR-14", question: "Is the date picker shared with HAR-13?", answer: "Yes, src/booking/DatePicker.tsx." },
@@ -2269,7 +2276,15 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
       case "opened_link":
         return null;
       case "projects":
-        return world.projects;
+        return world.projects.filter((p) => !p.archived);
+      case "archived_projects":
+        return world.projects.filter((p) => p.archived);
+      case "set_project_archived": {
+        const p = world.projects.find((p) => p.key === args.key);
+        if (!p) throw new Error("No project");
+        p.archived = !!args.archived;
+        return p;
+      }
       case "approve_goal_plan":
         return approveGoalPlan(args);
       case "start_goal":

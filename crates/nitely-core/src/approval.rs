@@ -318,7 +318,7 @@ impl Db {
     /// person approves it again in the app: approvals given before they were signed, or written
     /// into the database. The app runs it on start, after making its key; returns the keys moved.
     pub fn unsigned_approvals_back_to_needs_you(&mut self, public: &[u8; 32]) -> Result<Vec<String>> {
-        let approved: Vec<String> = self.list_issues(None, false)?.into_iter().filter(|i| i.origin == "nitely" && i.state == "Approved").map(|i| i.key).collect();
+        let approved: Vec<String> = self.all_issues(false)?.into_iter().filter(|i| i.origin == "nitely" && i.state == "Approved").map(|i| i.key).collect();
         let mut moved = Vec::new();
         for key in approved {
             let Some(at) = self.human_approval_at(&key)? else { continue };

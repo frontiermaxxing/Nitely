@@ -582,6 +582,7 @@ impl Supervisor {
 
     /// Why no worker may start now, or None when slots may be filled.
     fn why_not_starting(&self, db: &Db, playbook: &Playbook, moment: &Moment, draining: bool) -> Result<Option<String>> {
+        if db.project_archived(&self.project)? { return Ok(Some("project archived".into())); }
         let rules = &playbook.crew;
         // Read only as far as the decision gets: the database, the token scan and the disk cost.
         let paused = || db.crew_control(&self.project).map(|c| c.paused);

@@ -267,6 +267,7 @@ pub struct Project {
     pub key: String,
     pub name: String,
     pub open_issues: i64,
+    pub archived: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -864,17 +865,22 @@ impl Db {
             "INSERT INTO project (key, name, created_at) VALUES (?1, ?2, ?3)",
             params![key, name.trim(), now()],
         )?;
-        Ok(Project { key, name: name.trim().into(), open_issues: 0 })
+        Ok(Project { key, name: name.trim().into(), open_issues: 0, archived: false })
     }
 
     pub fn projects(&self) -> Result<Vec<Project>> {
+        Ok(self.all_projects()?.into_iter().filter(|p| !p.archived).collect())
+    }
+
+    /// Includes archived projects for explicit lookup and restoration.
+    pub fn all_projects(&self) -> Result<Vec<Project>> {
         let mut stmt = self.conn.prepare(
             "SELECT p.key, p.name,
                (SELECT COUNT(*) FROM issue i WHERE i.project = p.key
-                  AND i.state_type NOT IN ('completed', 'canceled'))
+                  AND i.state_type NOT IN ('completed', 'canceled')), p.archived
              FROM project p ORDER BY p.key",
         )?;
-        let rows = stmt.query_map([], |r| Ok(Project { key: r.get(0)?, name: r.get(1)?, open_issues: r.get(2)? }))?;
+        let rows = stmt.query_map([], |r| Ok(Project { key: r.get(0)?, name: r.get(1)?, open_issues: r.get(2)?, archived: r.get(3)? }))?;
         Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
@@ -892,7 +898,7 @@ impl Db {
 
     /// A project by its current key only.
     pub fn project_exact(&self, key: &str) -> Result<Option<Project>> {
-        Ok(self.projects()?.into_iter().find(|p| p.key.eq_ignore_ascii_case(key.trim())))
+        Ok(self.all_projects()?.into_iter().find(|p| p.key.eq_ignore_ascii_case(key.trim())))
     }
 
     // ----- issues -----
@@ -1178,13 +1184,23 @@ impl Db {
     /// Every issue (native and mirrored), most urgent first; `project` narrows to one project's
     /// native issues.
     pub fn list_issues(&self, project: Option<&str>, include_closed: bool) -> Result<Vec<IssueRecord>> {
+        self.read_issues(project, include_closed, false)
+    }
+
+    /// Lifecycle processing must still see archived work already in flight.
+    pub(crate) fn all_issues(&self, include_closed: bool) -> Result<Vec<IssueRecord>> {
+        self.read_issues(None, include_closed, true)
+    }
+
+    fn read_issues(&self, project: Option<&str>, include_closed: bool, include_archived: bool) -> Result<Vec<IssueRecord>> {
         let mut stmt = self.conn.prepare(&format!(
             "SELECT {ISSUE_COLUMNS} FROM issue
              WHERE (?1 IS NULL OR project = ?1 COLLATE NOCASE)
+               AND (?3 OR ?1 IS NOT NULL OR key IN (SELECT key FROM active_issue))
                AND (?2 OR state_type NOT IN ('completed', 'canceled'))
              ORDER BY CASE priority WHEN 0 THEN 5 ELSE priority END, number, key"
         ))?;
-        let rows = stmt.query_map(params![project, include_closed], issue_from_row)?;
+        let rows = stmt.query_map(params![project, include_closed, include_archived], issue_from_row)?;
         let mut issues: Vec<IssueRecord> = rows.collect::<rusqlite::Result<_>>()?;
         self.hydrate_issue_list(&mut issues)?;
         Ok(issues)
@@ -1503,7 +1519,7 @@ impl Db {
                         CASE WHEN i.labels LIKE '%\"planning\"%' THEN 0 ELSE 1 END,
                         CASE WHEN g.id IS NULL THEN 2 WHEN g.target_date IS NULL THEN 1 ELSE 0 END, g.target_date, i.state,
                         i.state = 'Todo' AND COALESCE((SELECT e.summary FROM event e WHERE e.issue_key = i.key AND e.type IN ('issue_moved', 'claimed') ORDER BY e.id DESC LIMIT 1), '') LIKE ?3
-                 FROM issue i LEFT JOIN goal g ON g.id = i.goal AND g.state = 'active'
+                 FROM active_issue i LEFT JOIN goal g ON g.id = i.goal AND g.state = 'active'
                  WHERE i.project = ?1 COLLATE NOCASE AND i.origin = 'nitely' AND i.owner != 'human'
                    AND (i.state = 'Todo' OR (i.state = 'In Progress' AND (i.claimed_at IS NULL OR i.claimed_at < ?2)))",
             )?;
@@ -1844,6 +1860,8 @@ impl Db {
     pub fn claim_for_start(&self, key: &str, agent: &str, mine: &[String], take_over: bool) -> Result<Option<String>> {
         let ts = now();
         let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
+        let archived: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM issue i JOIN project p ON p.key = i.project WHERE i.key = ?1 COLLATE NOCASE AND p.archived = 1)", [key], |r| r.get(0))?;
+        if archived { bail!("this project is archived; restore it in Settings before starting new work"); }
         let (key, state, claimed_by, claimed_at, origin, owner): StartRow = tx
             .query_row("SELECT key, state, claimed_by, claimed_at, origin, owner FROM issue WHERE key = ?1 COLLATE NOCASE", [key], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?))
@@ -2077,9 +2095,19 @@ impl Db {
     /// The questions waiting on the person. One whose issue has closed is not: its issue's close
     /// closed it (and one asked before that rule, on an issue closed since, is passed over too).
     pub fn open_asks(&self) -> Result<Vec<Ask>> {
+        self.read_open_asks(false)
+    }
+
+    /// A hidden question still participates in acceptance and review safety rules.
+    pub(crate) fn all_open_asks(&self) -> Result<Vec<Ask>> {
+        self.read_open_asks(true)
+    }
+
+    fn read_open_asks(&self, include_archived: bool) -> Result<Vec<Ask>> {
+        let table = if include_archived { "ask" } else { "active_ask" };
         let mut stmt = self.conn.prepare(
             &format!(
-                "SELECT {ASK_COLUMNS} FROM ask a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
+                "SELECT {ASK_COLUMNS} FROM {table} a LEFT JOIN issue i ON i.key = a.issue_key COLLATE NOCASE
                  WHERE a.answer IS NULL AND a.closed IS NULL
                    AND (i.key IS NULL OR i.state_type NOT IN ('completed', 'canceled'))
                  ORDER BY a.asked_at"

@@ -145,6 +145,8 @@ impl Db {
     /// Reuse an already hydrated issue snapshot when building a view such as Overview.
     pub fn goal_report_from_issues(&self, project: Option<&str>, since: i64, issues: &[IssueRecord]) -> Result<Report> {
         let ts = now();
+        let archived = self.archived_project_keys()?;
+        let visible = |key: &Option<String>| project.is_some() || !key.as_deref().and_then(|k| k.split_once('-')).is_some_and(|(p, _)| archived.contains(&p.to_uppercase()));
         let landed = self.landed_with_goals_since(since)?;
         let mut in_goal = std::collections::HashSet::new();
         let mut goals = Vec::new();
@@ -160,10 +162,12 @@ impl Db {
         }
         let other_landed = landed
             .into_iter()
-            .filter(|(l, _, p)| !in_goal.contains(&l.key) && project.is_none_or(|k| p.eq_ignore_ascii_case(k)))
+            .filter(|(l, _, p)| !in_goal.contains(&l.key) && project.map_or(!archived.contains(&p.to_uppercase()), |k| p.eq_ignore_ascii_case(k)))
             .map(|(l, _, _)| l)
             .collect();
         let (needed, triaged) = (self.needed_since(project, since)?, self.triaged_since(project, since)?);
+        let needed = needed.into_iter().filter(|n| visible(&n.issue_key)).collect();
+        let triaged = triaged.into_iter().filter(|t| visible(&t.issue_key)).collect();
         Ok(Report { since, now: ts, goals, other_landed, needed, triaged })
     }
 
