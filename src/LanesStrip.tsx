@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import { capWords, chipName, chipWords, executorName, laneChips, limitsOf, machineWords, memoryWords, paceHeadline, queueWords, remoteRuns, remoteWords, sizeWords, waiting, type LaneChip } from "./lanes";
-import type { LaneRun, LanesOverview, MachineNow } from "./types";
+import type { LaneRun, LanesOverview, MachineNow, MemoryTrimSetting } from "./types";
 import { openExternal } from "./util";
-import { Button, SettingsRow, StateDot, TextField } from "./ui";
+import { Button, Select, SettingsRow, StateDot, TextField } from "./ui";
 import "./styles/lanes.css";
 
 /** Reads every repo's build lanes, again whenever the data changes (`version`). Null until read. */
@@ -189,7 +189,51 @@ function MachineLimits(props: { machine: MachineNow | undefined; slots: LanesOve
         {typeof parsed === "string" && <span className="error">{parsed}</span>}
       </div>
       {note && <p className="muted setting-feedback">{note}</p>}
+      <MemoryTrim />
     </div>
+  );
+}
+
+type TrimMode = MemoryTrimSetting["mode"];
+
+/** Whether Nitely may empty idle programs' working memory while a run waits for memory (NIT-657).
+ * It saves as soon as one is picked; on macOS and Linux it is off, with why. */
+function MemoryTrim() {
+  const [setting, setSetting] = useState<MemoryTrimSetting | null>(null);
+  const [note, setNote] = useState<string | null>(null);
+  useEffect(() => {
+    invoke<MemoryTrimSetting>("memory_trim_setting").then(setSetting, () => setSetting(null));
+  }, []);
+  if (!setting) return null;
+  const choose = async (mode: TrimMode | null) => {
+    try {
+      setSetting(await invoke<MemoryTrimSetting>("set_memory_trim", { mode }));
+      setNote(null);
+    } catch (e) {
+      setNote(String(e));
+    }
+  };
+  const why = setting.available
+    ? "When a run has waited two minutes for memory, Nitely empties the working memory of your programs that have sat idle for five minutes, at most every ten minutes. They read it back when you use them again. Never the window you're in, and no admin rights."
+    : setting.why;
+  return (
+    <>
+      <SettingsRow label="Free idle programs' memory" why={why}>
+        <Select<TrimMode>
+          aria-label="Free idle programs' memory"
+          value={setting.mode === "away" ? null : setting.mode}
+          defaultValue="away"
+          disabled={!setting.available}
+          onChange={choose}
+          options={[
+            { value: "off", label: "Off" },
+            { value: "away", label: "When I'm away", detail: "No input for ten minutes" },
+            { value: "always", label: "Whenever a run waits" },
+          ]}
+        />
+      </SettingsRow>
+      {note && <p className="error setting-feedback">{note}</p>}
+    </>
   );
 }
 

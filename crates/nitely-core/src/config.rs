@@ -40,6 +40,10 @@ pub struct Config {
     /// (once a repo is connected), `false` when the person turned it off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub links_service: Option<bool>,
+    /// When Nitely may empty the working memory of the person's idle programs while a run waits
+    /// for memory (memory_trim.rs, NIT-657). None: only while the person is away.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_trim: Option<crate::memory_trim::Mode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
