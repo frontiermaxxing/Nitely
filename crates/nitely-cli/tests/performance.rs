@@ -64,7 +64,7 @@ fn performance_project_filters_keep_recorded_keys_after_a_project_rename() {
     drop(db);
     let at = nitely_core::performance::wall_ms()-10_000;
     let workload = Workload { id: "finished-build".into(), kind: "build".into(), context: Context { project: Some("APP".into()), issue: Some("APP-1".into()), ..Default::default() }, root: Identity { boot: "boot".into(), pid: 1, started: "1".into() }, start_ms: at-5000, end_ms: Some(at), end_observed: false, job_accounting: None };
-    let event = Event { wall_ms: at, boot: Some("boot".into()), kind: Kind::Ended, project: "APP".into(), issue: Some("APP-1".into()), run: 1, memory_cap_bytes: None };
+    let event = Event { wall_ms: at, boot: Some("boot".into()), kind: Kind::Ended, project: "APP".into(), issue: Some("APP-1".into()), run: 1, memory_cap_bytes: None, trim: None };
     let conn = rusqlite::Connection::open(dir.join("history.sqlite")).unwrap();
     conn.execute("INSERT INTO workloads(id,json,ended) VALUES(?1,?2,?3)", rusqlite::params![workload.id,serde_json::to_string(&workload).unwrap(),at]).unwrap();
     conn.execute("INSERT INTO performance_event(wall_ms,project,run,kind,json) VALUES(?1,'APP',1,'ended',?2)", rusqlite::params![at,serde_json::to_string(&event).unwrap()]).unwrap();
