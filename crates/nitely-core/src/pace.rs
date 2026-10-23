@@ -336,7 +336,7 @@ mod tests {
 
     #[test]
     fn memory_is_short_under_the_floor_and_a_cap_and_recovers_past_a_margin() {
-        let limits = machine::limits_for(64 * GIB, None, None);
+        let limits = machine::limits_for(64 * GIB, Some((12.8, "settings")), None);
         let free = |gb: u64| Measured { start_ms: Some(23.0), memory: Some(Memory { total: 64 * GIB, available: gb * GIB }) };
         let line = (limits.floor + limits.cap) / GIB; // 12.8 + 16 = 28 GB, rounded down
         let short = pace_for(&free(line - 2), Some(&limits), &Pace::default());
