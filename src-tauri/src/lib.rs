@@ -457,7 +457,7 @@ async fn leaderboard_board(period: String) -> Result<serde_json::Value, String> 
 #[tauri::command]
 async fn leaderboard_delete(leave: bool) -> Result<u64, String> {
     let sharing = nitely_crew::leaderboard_send::Sharing::default_dir();
-    if leave { sharing.leave() } else { sharing.delete() }.map_err(err)
+    if leave { sharing.leave("app") } else { sharing.delete("app") }.map_err(err)
 }
 
 /// A project's tokens per day and by agent and model, and what landed, over `days` days.

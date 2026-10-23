@@ -25,6 +25,11 @@ use crate::leaderboard_report::{Profile, Report};
 /// Where reports go unless NITELY_LEADERBOARD_URL or the saved setting says otherwise.
 pub const DEFAULT_URL: &str = "https://api.nitely.net";
 const STATE_FILE: &str = "leaderboard.json";
+/// Every delete, one JSON line each, kept after leaving too (NIT-653).
+const DELETES_FILE: &str = "leaderboard-deletes.jsonl";
+/// Report fields a service older than this client may not know: left out and sent again when it
+/// refuses one of them, rather than not sending at all (NIT-653).
+const NEWER_FIELDS: &[&str] = &["avatar", "closes_week"];
 const KEY_FILE: &str = "leaderboard-key";
 const WEEK: i64 = 7 * 86_400;
 const DAY: i64 = 86_400;
@@ -45,6 +50,11 @@ pub struct State {
     pub last_sent_week: Option<String>,
     pub last_sent_at: Option<i64>,
     pub last_error: Option<String>,
+    /// The last time this install deleted what it sent from the board (NIT-653): when, how many
+    /// reports, and from where (`app` or `cli`). A delete is never silent: the app shows this.
+    pub last_deleted_at: Option<i64>,
+    pub last_deleted: Option<u64>,
+    pub last_deleted_by: Option<String>,
 }
 
 /// The sharing status, for the app and `nitely leaderboard status`.
@@ -170,8 +180,18 @@ impl Sharing {
         if !state.joined {
             bail!("join the Leaderboard first: nothing is sent before you do");
         }
-        let body = serde_json::to_vec(report)?;
-        let result = self.call(&state, "POST", "/v1/leaderboard/reports", Some(&body));
+        let mut body = serde_json::to_value(report)?;
+        let result = loop {
+            let result = self.call(&state, "POST", "/v1/leaderboard/reports", Some(&serde_json::to_vec(&body)?));
+            // An older service refusing a field this client added: send the report without it.
+            let refused = result.as_ref().err().and_then(|e| unknown_field(&format!("{e:#}")));
+            match refused.filter(|f| NEWER_FIELDS.contains(&f.as_str()) && body.get(f).is_some()) {
+                Some(field) => {
+                    body.as_object_mut().map(|o| o.remove(&field));
+                }
+                None => break result,
+            }
+        };
         state.last_error = result.as_ref().err().map(|e| format!("{e:#}"));
         if result.is_ok() {
             state.last_sent_week = Some(report.week.clone());
@@ -181,25 +201,42 @@ impl Sharing {
         result.map(|_| ())
     }
 
-    /// Deletes everything this install sent from the board, and stays joined.
-    pub fn delete(&self) -> Result<u64> {
+    /// Deletes everything this install sent from the board, and stays joined. Only ever on the
+    /// person's word: `by` says where they asked (`app`, `cli`), and the delete is recorded in the
+    /// state and in leaderboard-deletes.jsonl, so it is never silent (NIT-653).
+    pub fn delete(&self, by: &str) -> Result<u64> {
         let state = self.state()?;
         if self.secret()?.is_none() {
             return Ok(0);
         }
         let answer = self.call(&state, "DELETE", "/v1/leaderboard/entries", Some(b""))?;
+        let deleted = answer["deleted"].as_u64().unwrap_or(0);
+        let now = nitely_core::db::now();
         let mut state = state;
         state.last_sent_week = None;
         state.last_sent_at = None;
+        state.last_deleted_at = Some(now);
+        state.last_deleted = Some(deleted);
+        state.last_deleted_by = Some(by.to_string());
         self.save(&state)?;
-        Ok(answer["deleted"].as_u64().unwrap_or(0))
+        self.log_delete(now, deleted, by);
+        Ok(deleted)
+    }
+
+    /// One line in leaderboard-deletes.jsonl. Best effort: the delete itself already happened.
+    fn log_delete(&self, at: i64, deleted: u64, by: &str) {
+        use std::io::Write;
+        let line = serde_json::json!({ "at": at, "deleted": deleted, "by": by });
+        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(self.dir.join(DELETES_FILE)) {
+            let _ = writeln!(f, "{line}");
+        }
     }
 
     /// Leaves: deletes what was sent (unless it never sent anything), then forgets the profile and
-    /// the key, so a later join is a new id.
-    pub fn leave(&self) -> Result<u64> {
+    /// the key, so a later join is a new id. `by` as for `delete`.
+    pub fn leave(&self, by: &str) -> Result<u64> {
         let state = self.state()?;
-        let deleted = if state.last_sent_at.is_some() || state.last_sent_week.is_some() { self.delete()? } else { 0 };
+        let deleted = if state.last_sent_at.is_some() || state.last_sent_week.is_some() { self.delete(by)? } else { 0 };
         for file in [STATE_FILE, KEY_FILE] {
             match std::fs::remove_file(self.dir.join(file)) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e).with_context(|| format!("removing {file}")),
@@ -312,6 +349,12 @@ fn next_send(last: i64, utc_offset: i64) -> i64 {
     (last + DAY).min(sunday)
 }
 
+/// The field an older service named in its refusal (`unknown field `avatar``), if any.
+fn unknown_field(error: &str) -> Option<String> {
+    let rest = error.split("unknown field `").nth(1)?;
+    Some(rest.split('`').next()?.to_string())
+}
+
 /// The install's id: its public key, base64url without padding.
 pub fn public_id(secret: &[u8; 32]) -> String {
     URL_SAFE_NO_PAD.encode(SigningKey::from_bytes(secret).verifying_key().to_bytes())
@@ -394,8 +437,8 @@ mod tests {
         };
         let err = sharing.send_report(&report).unwrap_err().to_string();
         assert!(err.contains("join the Leaderboard first"), "{err}");
-        assert_eq!(sharing.delete().unwrap(), 0, "no key: nothing to delete, nothing asked");
-        assert_eq!(sharing.leave().unwrap(), 0);
+        assert_eq!(sharing.delete("test").unwrap(), 0, "no key: nothing to delete, nothing asked");
+        assert_eq!(sharing.leave("test").unwrap(), 0);
         assert!(!dir.join(KEY_FILE).exists() && !dir.join(STATE_FILE).exists());
         std::fs::remove_dir_all(dir).ok();
     }
@@ -453,6 +496,103 @@ Connection: close
         }
     }
 
+    /// A stand-in for a service older than this client: it refuses a report naming `avatar`, as
+    /// one built before NIT-630 did, takes any other, and answers a delete with two reports. It
+    /// keeps every request body it was sent.
+    fn older_service() -> (String, std::sync::Arc<std::sync::Mutex<Vec<String>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://127.0.0.1:{}", listener.local_addr().unwrap().port());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let bodies = seen.clone();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                let Ok(mut conn) = conn else { break };
+                conn.set_read_timeout(Some(std::time::Duration::from_secs(2))).ok();
+                // Headers, then as much body as Content-Length says.
+                let mut buf = Vec::new();
+                let mut chunk = [0u8; 4096];
+                let (head, mut body) = loop {
+                    let n = conn.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break (String::new(), Vec::new());
+                    }
+                    buf.extend_from_slice(&chunk[..n]);
+                    if let Some(i) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                        break (String::from_utf8_lossy(&buf[..i]).to_string(), buf[i + 4..].to_vec());
+                    }
+                };
+                let length: usize = head.lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse().unwrap_or(0))).unwrap_or(0);
+                while body.len() < length {
+                    let n = conn.read(&mut chunk).unwrap_or(0);
+                    if n == 0 {
+                        break;
+                    }
+                    body.extend_from_slice(&chunk[..n]);
+                }
+                let body = String::from_utf8_lossy(&body).to_string();
+                bodies.lock().unwrap().push(body.clone());
+                let (status, answer) = if head.starts_with("DELETE") {
+                    ("200 OK", r#"{"deleted":2}"#.to_string())
+                } else if body.contains("\"avatar\"") {
+                    ("400 Bad Request", r#"{"error":"not a schema 1 report: unknown field `avatar`, expected one of `schema`, `display_name`"}"#.to_string())
+                } else {
+                    ("200 OK", r#"{"ok":true,"week":"2026-W43"}"#.to_string())
+                };
+                let _ = write!(conn, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{answer}", answer.len());
+            }
+        });
+        (url, seen)
+    }
+
+    /// NIT-653: a client newer than its service keeps its place: the report goes again without the
+    /// field the service does not know. And deleting is the person's act, recorded where they see
+    /// it: in the state the app shows, and in a log that outlives leaving.
+    #[test]
+    fn a_newer_client_still_sends_and_a_delete_is_never_silent() {
+        let (url, seen) = older_service();
+        let dir = nitely_core::paths::unique_temp("nitely-leaderboard-newer", "");
+        let sharing = Sharing::new(&dir);
+        let profile = Profile { display_name: "Night Owl".into(), github: Some("octocat".into()), x: None, website: None, avatar: Some("github".into()) };
+        sharing.join(&profile, &[], Some(&url)).unwrap();
+        let mut report = crate::leaderboard_report::Report {
+            schema: 1,
+            display_name: "Night Owl".into(),
+            links: crate::leaderboard_report::Links { github: Some("https://github.com/octocat".into()), ..Default::default() },
+            avatar: Some("github".into()),
+            week: "2026-W43".into(),
+            projects: 1,
+            periods: vec![],
+            weekly: vec![],
+            records: Default::default(),
+            closes_week: false,
+        };
+        sharing.send_report(&report).unwrap();
+        let state = sharing.state().unwrap();
+        assert_eq!((state.last_sent_week.as_deref(), state.last_error.as_deref()), (Some("2026-W43"), None), "sent, with nothing left failing");
+        let bodies = seen.lock().unwrap().clone();
+        assert_eq!(bodies.len(), 2, "refused once, then sent without the field");
+        assert!(bodies[0].contains("\"avatar\"") && !bodies[1].contains("\"avatar\"") && bodies[1].contains("Night Owl"));
+
+        // A refusal the client cannot answer by leaving out a newer field stays an error, and a
+        // failed send forgets nothing that was sent before.
+        report.avatar = None;
+        report.display_name = "avatar".into();
+        assert!(sharing.send_report(&report).is_err());
+        let state = sharing.state().unwrap();
+        assert!(state.last_error.is_some() && state.last_sent_week.as_deref() == Some("2026-W43"), "{state:?}");
+
+        assert_eq!(sharing.delete("app").unwrap(), 2);
+        let state = sharing.state().unwrap();
+        assert_eq!((state.last_sent_week, state.last_deleted, state.last_deleted_by.as_deref()), (None, Some(2), Some("app")));
+        assert!(state.last_deleted_at.is_some());
+        sharing.leave("cli").unwrap();
+        let log = std::fs::read_to_string(dir.join(DELETES_FILE)).unwrap();
+        let lines: Vec<serde_json::Value> = log.lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+        assert_eq!(lines.iter().map(|l| (l["deleted"].as_u64(), l["by"].as_str().map(str::to_string))).collect::<Vec<_>>(), [(Some(2), Some("app".to_string()))], "leaving after the delete had nothing more to delete, and the log outlives it");
+        std::fs::remove_dir_all(dir).ok();
+    }
+
     /// NIT-449: the leaderboard reaches its service only when the person asks it to. Reading the
     /// status, joining, saving changes, the weekly check before a first send by hand, and leaving
     /// without having sent all stay on this machine; viewing the board is the one request a
@@ -485,7 +625,7 @@ Connection: close
         assert_eq!(sharing.send_if_due(&config, &db).unwrap(), None);
         assert!(sharing.send(&config, &db).is_err(), "sending before joining is refused");
         assert!(sharing.send_report(&report).is_err());
-        assert_eq!(sharing.delete().unwrap(), 0);
+        assert_eq!(sharing.delete("test").unwrap(), 0);
         assert_eq!(service.connections(), 0, "before joining");
 
         // Joining and changing the profile: still nothing, and no weekly send before one by hand.
@@ -502,7 +642,7 @@ Connection: close
         assert_eq!(service.connections(), 1, "viewing the board is one request");
 
         // Leaving without ever sending deletes nothing remotely, so it asks nothing.
-        assert_eq!(sharing.leave().unwrap(), 0);
+        assert_eq!(sharing.leave("test").unwrap(), 0);
         assert_eq!(service.connections(), 1, "leaving unsent stays on this machine");
         drop(db);
         std::fs::remove_dir_all(dir).ok();

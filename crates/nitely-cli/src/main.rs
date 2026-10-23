@@ -590,9 +590,17 @@ enum LeaderboardCmd {
         period: String,
     },
     /// Delete everything you sent from the board, and keep sharing.
-    Delete,
+    Delete {
+        /// Yes, delete it: nothing is deleted without it.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Stop sharing: delete what you sent and forget this install's key.
-    Leave,
+    Leave {
+        /// Yes, delete it and leave: nothing is deleted without it.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1964,8 +1972,19 @@ fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::Leaderboard { command: LeaderboardCmd::Status } => print_json(&nitely_crew::leaderboard_send::Sharing::default_dir().status(nitely_core::db::now())?),
         Cmd::Leaderboard { command: LeaderboardCmd::Board { period } } => print_json(&nitely_crew::leaderboard_send::Sharing::default_dir().board(&period)?),
-        Cmd::Leaderboard { command: LeaderboardCmd::Delete } => print_json(&serde_json::json!({ "deleted": nitely_crew::leaderboard_send::Sharing::default_dir().delete()? })),
-        Cmd::Leaderboard { command: LeaderboardCmd::Leave } => print_json(&serde_json::json!({ "deleted": nitely_crew::leaderboard_send::Sharing::default_dir().leave()? })),
+        // Deleting what was sent is the person's call, made on purpose (NIT-653).
+        Cmd::Leaderboard { command: LeaderboardCmd::Delete { yes } } => {
+            if !yes {
+                bail!("this deletes every report this install sent from the public board; run it again with --yes if that is what you want");
+            }
+            print_json(&serde_json::json!({ "deleted": nitely_crew::leaderboard_send::Sharing::default_dir().delete("cli")? }))
+        }
+        Cmd::Leaderboard { command: LeaderboardCmd::Leave { yes } } => {
+            if !yes {
+                bail!("this deletes every report this install sent from the public board and forgets its key; run it again with --yes if that is what you want");
+            }
+            print_json(&serde_json::json!({ "deleted": nitely_crew::leaderboard_send::Sharing::default_dir().leave("cli")? }))
+        }
         Cmd::Spend { issue, project, days } => {
             let config = Config::load()?;
             let db = Db::open_default()?;
