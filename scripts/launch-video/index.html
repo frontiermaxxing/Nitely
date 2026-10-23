@@ -1,0 +1,1004 @@
+<!doctype html>
+<!-- The launch video's picture. Every frame is a pure function of time: seek(t) draws it, so
+     render.mjs can capture any frame exactly. Open it with ?play to watch it live, or ?t=16.3 for one
+     frame. Sample data only. -->
+<html>
+<head>
+<meta charset="utf-8">
+<title>Nitely launch</title>
+<style>
+@font-face { font-family: G; src: url(../../site/assets/geist.woff2) format("woff2"); font-weight: 100 900; }
+@font-face { font-family: GM; src: url(../../site/assets/geist-mono.woff2) format("woff2"); font-weight: 100 900; }
+html, body { margin: 0; background: #000; overflow: hidden; }
+#stage { position: relative; width: 1920px; height: 1080px; overflow: hidden; background: #0d0d0c;
+  font-family: G; color: #ecebe6; -webkit-font-smoothing: antialiased; }
+canvas { position: absolute; left: 0; top: 0; }
+#world { position: absolute; inset: 0; transform-origin: 50% 50%; perspective: 1800px; }
+.scene { position: absolute; inset: 0; display: none; perspective: 1800px; }
+.abs { position: absolute; left: 0; top: 0; will-change: transform, opacity; }
+.mono { font-family: GM; }
+.w { display: inline-block; white-space: pre; will-change: transform, opacity, filter; }
+
+/* Cold open */
+#clock { left: 0; width: 1920px; top: 300px; text-align: center; font: 500 26px GM; letter-spacing: .32em; color: #7c7b75; }
+.big { left: 0; width: 1920px; text-align: center; font-weight: 600; letter-spacing: -0.035em; }
+#l1, #l2 { top: 600px; font-size: 104px; }
+
+/* Chaos */
+.term { width: 420px; height: 236px; background: #141413; border: 1px solid #363633; border-radius: 10px;
+  overflow: hidden; box-shadow: 0 24px 60px rgba(0,0,0,.55); transform-origin: 50% 50%; }
+.term .bar { height: 30px; display: flex; align-items: center; gap: 7px; padding: 0 12px; background: #1b1b1a;
+  border-bottom: 1px solid #292927; font: 500 13px GM; color: #7c7b75; }
+.term .bar i { width: 9px; height: 9px; border-radius: 50%; background: #363633; display: inline-block; }
+.term .bar span { margin-left: 8px; }
+.term pre { margin: 0; padding: 10px 14px; font: 400 14px/1.55 GM; color: #a7a69f; white-space: pre; }
+.term .err { color: var(--fail); } .term .warn { color: var(--amber); } .term .ok { color: var(--live); }
+#slam { left: 0; top: 440px; width: 1920px; text-align: center; font-size: 168px; font-weight: 680; letter-spacing: -0.045em; line-height: 1; }
+#slamBand { left: 0; top: 300px; width: 1920px; height: 480px;
+  background: radial-gradient(ellipse 52% 46% at 50% 50%, rgba(8,8,7,.92), rgba(8,8,7,.6) 55%, rgba(8,8,7,0) 100%); }
+.toast { width: 470px; padding: 18px 20px; background: #1b1b1a; border: 1px solid #363633; border-left: 3px solid var(--fail);
+  border-radius: 10px; box-shadow: 0 20px 50px rgba(0,0,0,.5); font-size: 20px; }
+.toast b { display: block; font: 500 14px GM; color: #7c7b75; margin-bottom: 6px; font-weight: 500; }
+#notif { left: 1600px; top: 60px; font: 600 22px GM; padding: 10px 18px; border-radius: 999px; background: var(--fail); color: #141413; }
+#question { top: 505px; font-size: 64px; font-weight: 560; color: #ecebe6; letter-spacing: -0.03em; }
+
+/* Reveal */
+#mark { transform-origin: 50% 50%; }
+#mark circle { transform-box: fill-box; transform-origin: center; }
+#word { white-space: nowrap; font-size: 220px; font-weight: 640; letter-spacing: -0.055em; line-height: 1; }
+#tag { top: 690px; font-size: 58px; font-weight: 520; color: #a7a69f; letter-spacing: -0.025em; }
+.st { width: 0; height: 0; }
+.st .dot { position: absolute; left: -15px; top: -15px; width: 30px; height: 30px; border-radius: 50%;
+  background: #141413; border: 3px solid #363633; box-sizing: border-box; }
+.st .lab { position: absolute; left: -120px; width: 240px; top: 34px; text-align: center; font-size: 26px; font-weight: 520; color: #a7a69f; }
+#runner { width: 22px; height: 22px; margin: -11px 0 0 -11px; border-radius: 50%; background: #fff; }
+
+/* Features */
+.ftext { left: 130px; top: 330px; width: 660px; }
+.fnum { font: 500 20px GM; letter-spacing: .2em; color: var(--live); margin-bottom: 26px; }
+.ftitle { font-size: 94px; font-weight: 620; letter-spacing: -0.045em; line-height: .98; margin-bottom: 30px; }
+.fsub { font-size: 31px; line-height: 1.38; color: #a7a69f; max-width: 600px; }
+.panel { left: 860px; top: 190px; width: 940px; height: 700px; transform-origin: 30% 50%; }
+.card { background: #1b1b1a; border: 1px solid #292927; border-radius: 16px; box-shadow: 0 40px 100px rgba(0,0,0,.55); }
+.tile { display: flex; align-items: center; justify-content: center; font: 650 19px G; color: #fff; border-radius: 11px; letter-spacing: -0.02em; }
+.row { position: absolute; left: 0; width: 940px; height: 76px; border-top: 1px solid #292927; display: flex; align-items: center; font-size: 23px; }
+.row .rk { font: 500 19px GM; color: #7c7b75; width: 120px; margin-left: 74px; }
+.row .ttl { flex: 1; color: #ecebe6; }
+.row .stat { width: 230px; font: 500 17px GM; color: #7c7b75; display: flex; align-items: center; gap: 10px; }
+.row .sdot { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #7c7b75; box-sizing: border-box; }
+.row .prio { position: absolute; left: 30px; top: 28px; display: flex; gap: 3px; align-items: flex-end; height: 18px; }
+.row .prio i { width: 4px; background: #55544f; border-radius: 1px; display: block; }
+.row .accent { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--live); }
+.code { font: 400 25px/1.6 GM; color: #ecebe6; padding: 30px 36px; white-space: pre; }
+.tk-h { color: var(--live); } .tk-k { color: #ecebe6; } .tk-s { color: #e6c08a; } .tk-c { color: #7c7b75; } .tk-p { color: #a7a69f; }
+#cursor { display: inline-block; width: 13px; height: 28px; background: var(--live); vertical-align: -5px; margin-left: 1px; }
+.chip { position: absolute; height: 58px; padding: 0 22px; border-radius: 12px; border: 2px solid #363633; display: flex;
+  align-items: center; font-size: 23px; font-weight: 540; color: #7c7b75; background: #141413; box-sizing: border-box; white-space: nowrap; }
+.diff { width: 330px; padding: 16px 18px; box-sizing: border-box; }
+.diff .hd { font: 500 15px GM; color: #7c7b75; margin-bottom: 12px; }
+.diff .ln { height: 20px; border-radius: 4px; margin-bottom: 8px; }
+.find { padding: 14px 20px; border-radius: 12px; border: 1px solid var(--fail); background: rgba(240,118,106,.1); font-size: 21px; white-space: nowrap; }
+.find b { font: 650 18px GM; color: var(--fail); margin-right: 12px; }
+.ov { width: 1000px; height: 640px; overflow: hidden; }
+.ovstats { display: flex; border-bottom: 1px solid #292927; }
+.ovstats > div { flex: 1; padding: 22px 24px; border-right: 1px solid #292927; }
+.ovstats .n { font-size: 54px; font-weight: 600; letter-spacing: -0.04em; line-height: 1; }
+.ovstats .l { font-size: 18px; color: #a7a69f; margin-top: 8px; }
+.ovrow { height: 52px; display: flex; align-items: center; border-bottom: 1px solid #222220; font-size: 17px; padding: 0 20px; gap: 14px; }
+.ovrow .tile { width: 26px; height: 26px; font-size: 11px; border-radius: 6px; }
+.ovrow .who { width: 140px; color: #a7a69f; }
+.ovrow .k { font: 500 15px GM; color: #7c7b75; width: 82px; }
+.ovrow .t { width: 300px; color: #ecebe6; white-space: nowrap; overflow: hidden; }
+.ovrow .trk { width: 110px; display: flex; gap: 5px; align-items: center; }
+.ovrow .trk i { width: 7px; height: 7px; border-radius: 50%; background: #363633; display: block; }
+.ovrow .act { flex: 1; color: #a7a69f; white-space: nowrap; overflow: hidden; }
+.inbox { width: 900px; }
+.ibhead { display: flex; align-items: center; gap: 16px; font-size: 40px; font-weight: 600; letter-spacing: -0.03em; margin-bottom: 26px; }
+.badge { min-width: 46px; height: 46px; border-radius: 23px; background: var(--amber); color: #141413; font: 650 25px G;
+  display: flex; align-items: center; justify-content: center; padding: 0 12px; box-sizing: border-box; }
+.dec { position: absolute; left: 0; width: 900px; height: 150px; box-sizing: border-box; padding: 24px 28px; border-left: 5px solid var(--amber); }
+.dec .kind { font: 500 17px GM; color: var(--amber); letter-spacing: .08em; margin-bottom: 10px; }
+.dec .q { font-size: 28px; font-weight: 540; letter-spacing: -0.015em; }
+.dec .meta { font-size: 19px; color: #7c7b75; margin-top: 10px; }
+.dec .act { position: absolute; right: 26px; top: 26px; display: flex; gap: 10px; }
+.key { min-width: 44px; height: 44px; border-radius: 9px; border: 1px solid #363633; border-bottom-width: 4px; display: flex;
+  align-items: center; justify-content: center; font: 600 20px GM; color: #ecebe6; background: #222220; padding: 0 10px; box-sizing: border-box; }
+.reply { margin-top: 12px; font: 400 22px G; color: #ecebe6; border: 1px solid #363633; border-radius: 9px; padding: 8px 14px; height: 24px; }
+
+/* Night */
+#bigclock { left: 0; width: 1920px; top: 250px; text-align: center; font: 500 230px GM; letter-spacing: -0.04em; line-height: 1; }
+#nightcap { left: 0; width: 1920px; top: 530px; text-align: center; font-size: 40px; font-weight: 520; color: #a7a69f; }
+#nightcap b { font: 500 32px GM; color: var(--live); margin-right: 18px; font-weight: 500; }
+#hist { left: 560px; top: 640px; width: 800px; height: 150px; }
+#stats { left: 0; width: 1920px; top: 830px; text-align: center; font-size: 30px; color: #a7a69f; }
+#stats b { color: #ecebe6; font-weight: 620; }
+#stats span { margin: 0 22px; }
+#wake { top: 560px; font-size: 92px; }
+
+/* End */
+#eyebrow { left: 0; width: 1920px; top: 286px; text-align: center; font: 500 24px GM; letter-spacing: .22em; color: #7c7b75; }
+#endtag { top: 650px; font-size: 54px; font-weight: 540; color: #ecebe6; letter-spacing: -0.03em; }
+#endfine { top: 760px; font-size: 28px; color: #7c7b75; }
+#endurl { left: 810px; top: 846px; width: 300px; height: 74px; border-radius: 37px; border: 2px solid #ecebe6; box-sizing: border-box;
+  display: flex; align-items: center; justify-content: center; font: 560 30px GM; }
+</style>
+</head>
+<body>
+<div id="stage">
+  <canvas id="bg" width="1920" height="1080"></canvas>
+  <div id="world">
+    <section class="scene" id="s1">
+      <div class="abs mono" id="clock"></div>
+      <div class="abs big" id="l1">One of you.</div>
+      <div class="abs big" id="l2">Dozens of them.</div>
+    </section>
+    <section class="scene" id="s2">
+      <div id="terms"></div>
+      <div class="abs" id="slamBand"></div>
+      <div class="abs" id="slam"></div>
+      <div id="toasts"></div>
+      <div class="abs" id="notif"></div>
+    </section>
+    <section class="scene" id="s2b">
+      <div class="abs big" id="question">What if they worked like a team?</div>
+    </section>
+    <section class="scene" id="s3">
+      <div class="abs" id="logo">
+        <svg id="mark" class="abs" viewBox="0 0 22 10" width="300" height="136.4" overflow="visible">
+          <path id="mLine" d="M3 5H19" stroke="#7c7b75" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+          <circle id="mC1" cx="3.5" cy="5" r="2.5" fill="#7c7b75"/>
+          <circle id="mC2" cx="11" cy="5" r="3.5" fill="#ecebe6"/>
+          <circle id="mC3" cx="18.5" cy="5" r="2.5" fill="#0d0d0c" stroke="#7c7b75" stroke-width="1.5"/>
+        </svg>
+        <div class="abs" id="word"></div>
+      </div>
+      <div class="abs big" id="tag"><span id="tagA">One person.</span> <span id="tagB">A team of coding agents.</span></div>
+      <div class="abs" id="track"></div>
+    </section>
+    <section class="scene" id="s4"></section>
+    <section class="scene" id="s5">
+      <div class="abs" id="bigclock"></div>
+      <div class="abs" id="nightcap"></div>
+      <canvas id="hist" width="800" height="150"></canvas>
+      <div class="abs" id="stats"></div>
+      <div class="abs big" id="wake"><span id="wakeA">You wake to decisions,</span> <span id="wakeB">not noise.</span></div>
+    </section>
+    <section class="scene" id="s6">
+      <div class="abs" id="eyebrow">FOR CLAUDE CODE, CODEX AND CURSOR</div>
+      <div class="abs" id="logo2">
+        <svg id="mark2" class="abs" viewBox="0 0 22 10" width="230" height="104.5" overflow="visible">
+          <path d="M3 5H19" stroke="#7c7b75" stroke-width="1.5" stroke-linecap="round" fill="none"/>
+          <circle cx="3.5" cy="5" r="2.5" fill="#7c7b75"/>
+          <circle id="m2C2" cx="11" cy="5" r="3.5" fill="#ecebe6" style="transform-box: fill-box; transform-origin: center"/>
+          <circle cx="18.5" cy="5" r="2.5" fill="#0d0d0c" stroke="#7c7b75" stroke-width="1.5"/>
+        </svg>
+        <div class="abs" id="word2" style="white-space: nowrap; font-size: 170px; font-weight: 640; letter-spacing: -0.055em; line-height: 1">Nitely</div>
+      </div>
+      <div class="abs big" id="endtag">One person. A team of coding agents.</div>
+      <div class="abs big" id="endfine">Free and open source. Windows today, macOS next.</div>
+      <div class="abs" id="endurl">nitely.net</div>
+    </section>
+  </div>
+  <canvas id="fx" width="1920" height="1080"></canvas>
+</div>
+<script src="cues.js"></script>
+<script>
+"use strict";
+const W = 1920, H = 1080, Q = CUES;
+
+/* ---------- math ---------- */
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const P = (t, a, b) => clamp((t - a) / (b - a));
+const lerp = (a, b, x) => a + (b - a) * x;
+const E = {
+  outExpo: (x) => (x >= 1 ? 1 : 1 - Math.pow(2, -10 * x)),
+  inExpo: (x) => (x <= 0 ? 0 : Math.pow(2, 10 * x - 10)),
+  outCubic: (x) => 1 - Math.pow(1 - x, 3),
+  inCubic: (x) => x * x * x,
+  inOut: (x) => (x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2),
+  outBack: (x) => { const c1 = 1.9, c3 = c1 + 1; return 1 + c3 * Math.pow(x - 1, 3) + c1 * Math.pow(x - 1, 2); },
+  outQuint: (x) => 1 - Math.pow(1 - x, 5),
+};
+function rng(seed) {
+  return function () {
+    seed |= 0; seed = (seed + 0x6d2b79f5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+// Smooth deterministic noise, -1..1.
+const nz = (x, s = 0) => (Math.sin(x * 1.7 + s) + Math.sin(x * 3.1 + s * 2.3) * 0.5 + Math.sin(x * 5.3 + s * 0.7) * 0.25) / 1.75;
+// Decaying impulse after each time in `times`.
+const hits = (t, times, rate = 10) => times.reduce((a, s) => a + (t >= s ? Math.exp(-(t - s) * rate) : 0), 0);
+
+function oklch(L, C, h) {
+  h = (h * Math.PI) / 180;
+  const a = C * Math.cos(h), b = C * Math.sin(h);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.291485548 * b) ** 3;
+  const f = (x) => { x = clamp(x); return Math.round(255 * (x <= 0.0031308 ? 12.92 * x : 1.055 * Math.pow(x, 1 / 2.4) - 0.055)); };
+  return [f(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s), f(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s), f(-0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s)];
+}
+const rgb = (c, a = 1) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+const C = {
+  live: oklch(0.78, 0.13, 170), amber: oklch(0.81, 0.14, 75), fail: oklch(0.7, 0.17, 25),
+  claude: oklch(0.64, 0.14, 42), codex: oklch(0.6, 0.09, 255), cursor: oklch(0.5, 0.012, 260),
+  fg: [236, 235, 230], fg2: [167, 166, 159], fg3: [124, 123, 117], line: [54, 54, 51],
+};
+const root = document.documentElement.style;
+root.setProperty("--live", rgb(C.live)); root.setProperty("--amber", rgb(C.amber)); root.setProperty("--fail", rgb(C.fail));
+const VEND = { Cl: C.claude, Cx: C.codex, Cu: C.cursor };
+
+/* ---------- dom helpers ---------- */
+const $ = (s, el = document) => el.querySelector(s);
+const $$ = (s, el = document) => [...el.querySelectorAll(s)];
+function h(html) { const d = document.createElement("div"); d.innerHTML = html.trim(); return d.firstChild; }
+function tf(el, o = {}) {
+  const { x = 0, y = 0, s = 1, sx = 1, sy = 1, r = 0, rx = 0, ry = 0, o: op = 1, blur = 0 } = o;
+  el.style.transform = `translate3d(${x.toFixed(2)}px,${y.toFixed(2)}px,0) rotateX(${rx}deg) rotateY(${ry}deg) rotate(${r}deg) scale(${s * sx},${s * sy})`;
+  el.style.opacity = clamp(op).toFixed(3);
+  el.style.filter = blur > 0.1 ? `blur(${blur.toFixed(1)}px)` : "none";
+  el.style.visibility = op <= 0.002 ? "hidden" : "visible";
+}
+function words(el) {
+  const text = el.textContent; el.textContent = "";
+  const spans = [];
+  for (const w of text.split(/(\s+)/).filter((x) => x.length)) {
+    if (/^\s+$/.test(w)) { el.appendChild(document.createTextNode(" ")); continue; }
+    const s = document.createElement("span"); s.className = "w"; s.textContent = w; el.appendChild(s); spans.push(s);
+  }
+  return spans;
+}
+function letters(el) {
+  const text = el.textContent; el.textContent = "";
+  return [...text].map((ch) => { const s = document.createElement("span"); s.className = "w"; s.textContent = ch; el.appendChild(s); return s; });
+}
+// Words rise out of a blur, and leave upward.
+function rise(spans, t, at, { stagger = 0.06, dur = 0.55, dy = 70, out = null, outDur = 0.35 } = {}) {
+  spans.forEach((sp, i) => {
+    const k = E.outExpo(P(t, at + i * stagger, at + i * stagger + dur));
+    let y = (1 - k) * dy, o = k, blur = (1 - k) * 14;
+    if (out != null) { const e = E.inCubic(P(t, out + i * 0.025, out + i * 0.025 + outDur)); y -= e * dy * 0.7; o *= 1 - e; blur += e * 12; }
+    tf(sp, { y, o, blur });
+  });
+}
+
+/* ---------- canvases ---------- */
+const bg = $("#bg").getContext("2d"), fx = $("#fx").getContext("2d");
+const grain = [];
+{
+  const R = rng(99);
+  for (let g = 0; g < 6; g++) {
+    const c = document.createElement("canvas"); c.width = c.height = 512;
+    const x = c.getContext("2d"), img = x.createImageData(512, 512);
+    for (let i = 0; i < img.data.length; i += 4) { const v = R() * 255; img.data[i] = img.data[i + 1] = img.data[i + 2] = v; img.data[i + 3] = 255; }
+    x.putImageData(img, 0, 0); grain.push(c);
+  }
+}
+function glow(ctx, x, y, r, c, a) {
+  const g = ctx.createRadialGradient(x, y, 0, x, y, r);
+  g.addColorStop(0, rgb(c, a)); g.addColorStop(1, rgb(c, 0));
+  ctx.fillStyle = g; ctx.fillRect(x - r, y - r, 2 * r, 2 * r);
+}
+function disc(ctx, x, y, r, c, a = 1) { ctx.beginPath(); ctx.arc(x, y, Math.max(0, r), 0, Math.PI * 2); ctx.fillStyle = rgb(c, a); ctx.fill(); }
+
+/* ================= scene 1: cold open ================= */
+const s1 = {
+  clock: $("#clock"), l1: words($("#l1")), l2: words($("#l2")),
+  levels: [], colors: [],
+};
+{
+  const R = rng(7), radii = [300, 200, 135, 92, 64, 46];
+  s1.levels.push([{ x: 960, y: 420 }]);
+  for (let k = 0; k < 6; k++) {
+    const next = [];
+    for (const d of s1.levels[k]) {
+      const ang = k === 0 ? 0.08 : R() * Math.PI * 2, r = radii[k] * (0.85 + 0.3 * R());
+      const dx = Math.cos(ang) * r, dy = Math.sin(ang) * r * 0.6;
+      next.push({ x: d.x + dx, y: d.y + dy }, { x: d.x - dx, y: d.y - dy });
+    }
+    s1.levels.push(next);
+  }
+  const R2 = rng(11);
+  s1.colors = s1.levels[6].map(() => { const v = R2(); return v < 0.62 ? C.live : v < 0.82 ? C.claude : v < 0.94 ? C.codex : C.fg2; });
+}
+const DOT_R = [15, 12.5, 10.5, 9, 8, 7, 6];
+function swarm(t) {
+  // Where each dot is, how big, and its color.
+  const D = Q.doublings;
+  let L = 0; while (L < 6 && t >= D[L]) L++;
+  const k = L === 0 ? 1 : E.outBack(P(t, D[L - 1], D[L - 1] + 0.42));
+  const rootY = lerp(540, 420, E.inOut(P(t, 1.25, 1.9)));
+  const pts = s1.levels[L].map((d, j) => {
+    const par = L === 0 ? d : s1.levels[L - 1][j >> 1];
+    let x = lerp(par.x, d.x, k), y = lerp(par.y, d.y, k);
+    if (L === 0 || (L === 1 && k < 1)) y += rootY - 420;
+    const amp = 46 * E.inCubic(P(t, 6.6, 8.1));
+    x += amp * nz(t * 1.3, j * 1.9); y += amp * 0.8 * nz(t * 1.1, j * 3.7 + 5);
+    const ci = j * (1 << (6 - L));
+    return { x, y, r: lerp(DOT_R[Math.max(0, L - 1)], DOT_R[L], k), c: L >= 4 ? s1.colors[ci] : C.live };
+  });
+  return pts;
+}
+function drawSwarm(t) {
+  if (t > 8.6) return;
+  const pts = swarm(t), fade = 1 - P(t, 8.0, 8.5);
+  const breathe = 1 + 0.07 * Math.sin((t / 2.4) * Math.PI * 2) + 0.18 * hits(t, [0, 2], 7);
+  const born = E.outCubic(P(t, 0.15, 1.0));
+  bg.save(); bg.globalCompositeOperation = "lighter";
+  for (const p of pts) glow(bg, p.x, p.y, p.r * 5.5, p.c, 0.22 * fade * born);
+  bg.restore();
+  for (const p of pts) disc(bg, p.x, p.y, p.r * (t < 4 ? breathe : 1) * born, p.c, fade);
+  // A ring where each split happens.
+  for (const d of Q.doublings) {
+    const e = P(t, d, d + 0.5); if (e <= 0 || e >= 1) continue;
+    const L = Q.doublings.indexOf(d) + 1;
+    for (const p of s1.levels[L - 1]) {
+      bg.beginPath(); bg.arc(p.x, p.y + (L === 1 ? lerp(540, 420, 1) - 420 : 0), 10 + e * 60, 0, Math.PI * 2);
+      bg.strokeStyle = rgb(C.live, (1 - e) * 0.35); bg.lineWidth = 2; bg.stroke();
+    }
+  }
+}
+function updateS1(t) {
+  const n = Math.floor(P(t, Q.clockType, Q.clockType + 0.4) * 5);
+  s1.clock.textContent = "23:40".slice(0, n) + (t < 3.4 && Math.floor(t * 2.5) % 2 ? "_" : " ");
+  tf(s1.clock, { o: 1 - P(t, 6.6, 7.2), y: -40 * E.outCubic(P(t, 1.25, 1.9)) });
+  rise(s1.l1, t, Q.line1, { out: 3.55 });
+  rise(s1.l2, t, Q.line2, { stagger: 0.09, out: 7.3 });
+}
+
+/* ================= scene 2: chaos ================= */
+const termLines = [
+  ["$ claude", "> take the auth bug", "Editing src/auth/session.ts", "Running npm test", "<e>FAIL  session.test.ts (3)", "Retrying with a new approach…", "Editing src/auth/session.ts"],
+  ["$ codex", "> fix the flaky checkout test", "Reading src/checkout/cart.ts", "Editing src/checkout/cart.ts", "$ git push origin main", "<e>! [rejected] main -> main (fetch first)", "<w>Pulling and retrying…"],
+  ["$ cursor-agent", "> add rate limits", "Editing api/limits.go", "$ git merge feature/limits", "<e>CONFLICT (content): api/limits.go", "<e>Automatic merge failed", "<w>Resolving by hand…"],
+  ["$ claude", "> fix the auth bug", "<w>Note: someone else is editing session.ts", "Editing src/auth/session.ts", "$ git commit -am wip", "<e>error: tests failing on main", "Investigating…"],
+  ["$ codex", "> who changed limits.go?", "Searching history…", "3 agents touched it today", "<e>build failed: 14 errors", "<w>Waiting for a reply…", "<w>Waiting for a reply…"],
+  ["$ claude", "> ship the export feature", "Editing src/export.ts", "<w>No review configured", "$ git push --force", "<o>pushed to main", "<e>CI: 6 checks failed"],
+];
+const s2 = { terms: [], slam: $("#slam"), band: $("#slamBand"), notif: $("#notif"), toasts: [] };
+{
+  const R = rng(21), pts = s1.levels[6];
+  const names = ["claude · acme", "codex · orbit", "cursor · harbor", "claude · orbit", "codex · acme", "claude · harbor"];
+  Q.terminals.forEach((at, i) => {
+    const p = pts[(i * 5 + 3) % 64];
+    const lines = termLines[i % termLines.length];
+    const el = h(`<div class="abs term"><div class="bar"><i></i><i></i><i></i><span>${names[i % names.length]}</span></div><pre></pre></div>`);
+    $("#terms").appendChild(el);
+    s2.terms.push({ el, pre: $("pre", el), at, x: clamp(p.x, 120, 1800) - 210 + (R() - 0.5) * 120, y: clamp(p.y + (R() - 0.5) * 160, 60, 1020) - 118, r: (R() - 0.5) * 12, lines, shown: -1 });
+  });
+  const tdata = [["codex · orbit", "CONFLICT in api/limits.go"], ["claude · acme", "Tests failing on main"], ["cursor · harbor", "Which branch should I use?"], ["claude · orbit", "Is anyone reviewing this?"]];
+  tdata.forEach(([a, b], i) => { const el = h(`<div class="abs toast"><b>${a}</b>${b}</div>`); $("#toasts").appendChild(el); s2.toasts.push(el); });
+}
+const SLAMS = ["Two agents.", "Same issue.", "Merge conflicts.", "Nobody reviewed it.", "Main is broken.", "It's 3 AM."];
+function updateS2(t) {
+  for (const tm of s2.terms) {
+    const k = P(t, tm.at, tm.at + 0.28);
+    if (k <= 0) { tm.el.style.visibility = "hidden"; continue; }
+    const n = Math.min(tm.lines.length, Math.floor((t - tm.at) / 0.13) + 1);
+    if (n !== tm.shown) {
+      tm.shown = n;
+      tm.pre.innerHTML = tm.lines.slice(0, n).map((l) => l.startsWith("<e>") ? `<span class="err">${l.slice(3)}</span>` : l.startsWith("<w>") ? `<span class="warn">${l.slice(3)}</span>` : l.startsWith("<o>") ? `<span class="ok">${l.slice(3)}</span>` : l).join("\n");
+    }
+    const jit = 6 * P(t, 13.6, 14.4);
+    tf(tm.el, { x: tm.x + jit * nz(t * 40, tm.at * 9), y: tm.y + jit * nz(t * 37, tm.at * 5), r: tm.r, s: E.outBack(k) * (1 + 0.04 * P(t, 13.5, 14.5)), o: Math.min(1, k * 2) * 0.82 });
+  }
+  // Slam words.
+  let idx = -1; Q.slams.forEach((s, i) => { if (t >= s) idx = i; });
+  if (idx >= 0) {
+    const s = Q.slams[idx], k = E.outExpo(P(t, s, s + 0.22));
+    s2.slam.textContent = SLAMS[idx];
+    const split = 22 * (1 - P(t, s, s + 0.35)) + (t > 13.8 ? 14 * Math.abs(nz(t * 50)) : 0);
+    const red = idx >= 2;
+    s2.slam.style.color = idx === 5 ? rgb(C.fg) : red ? rgb(C.fail) : rgb(C.fg);
+    s2.slam.style.textShadow = `${split}px 0 rgba(255,40,80,.75), ${-split}px 0 rgba(40,230,255,.65), 0 10px 60px rgba(0,0,0,.9)`;
+    tf(s2.slam, { s: lerp(1.35, 1, k), o: k, blur: (1 - k) * 18, x: t > 13.8 ? 20 * nz(t * 60, 3) : 0 });
+  } else tf(s2.slam, { o: 0 });
+  tf(s2.band, { o: E.outCubic(P(t, 8, 8.3)) });
+  s2.toasts.forEach((el, i) => {
+    const at = Q.toasts[i], k = E.outExpo(P(t, at, at + 0.35));
+    tf(el, { x: lerp(1960, 1410, k), y: 140 + i * 112, o: k });
+  });
+  const nk = P(t, 12.4, 14.1);
+  s2.notif.textContent = nk >= 1 ? "99+" : String(Math.round(lerp(7, 99, E.inCubic(nk))));
+  tf(s2.notif, { o: E.outExpo(P(t, 12.4, 12.6)), s: 1 + 0.25 * hits(t, [12.4, 13.0, 13.5, 14.0], 9) });
+}
+const s2b = { q: words($("#question")) };
+function updateS2b(t) {
+  rise(s2b.q, t, Q.question, { stagger: 0.05, dur: 0.5, dy: 40 });
+  const k = E.inExpo(P(t, Q.implode, Q.drop));
+  $("#question").style.transform = `scale(${1 + 0.06 * P(t, Q.question, Q.implode) - 0.9 * k})`;
+  $("#question").style.opacity = 1 - k;
+  $("#question").style.filter = `blur(${k * 10}px)`;
+}
+
+/* ================= scene 3: reveal ================= */
+const s3 = { logo: $("#logo"), mark: $("#mark"), word: $("#word"), tagA: words($("#tagA")), tagB: words($("#tagB")), tag: $("#tag"), track: $("#track"), stations: [] };
+s3.word.textContent = "Nitely"; s3.letters = letters(s3.word);
+const STATIONS = [["Todo", "q"], ["Started", "a"], ["Working", "a"], ["Gate", "a"], ["Review", "a"], ["Needs you", "y"], ["Landing", "a"], ["Done", "d"]];
+const TX0 = 250, TX1 = 1670, TY = 760;
+STATIONS.forEach(([name], i) => {
+  const el = h(`<div class="abs st"><div class="dot"></div><div class="lab">${name}</div></div>`);
+  s3.track.appendChild(el); s3.stations.push(el);
+});
+s3.trackLine = h(`<div class="abs" style="height:4px;border-radius:2px;background:#363633;left:${TX0}px;top:${TY - 2}px;width:${TX1 - TX0}px;transform-origin:0 50%"></div>`);
+s3.trackLit = h(`<div class="abs" style="height:4px;border-radius:2px;left:${TX0}px;top:${TY - 2}px;width:${TX1 - TX0}px;transform-origin:0 50%"></div>`);
+s3.runner = h(`<div class="abs" id="runner"></div>`);
+s3.track.prepend(s3.trackLit); s3.track.prepend(s3.trackLine); s3.track.appendChild(s3.runner);
+const stX = (i) => lerp(TX0, TX1, i / 7);
+const stColor = (kind) => (kind === "y" ? C.amber : kind === "a" ? C.live : C.fg3);
+function updateS3(t) {
+  const d = Q.drop;
+  // The mark: burst in large, then settle beside the wordmark.
+  const big = 640, small = 300;
+  const wordW = s3.word.offsetWidth, gap = 46, groupW = small + gap + wordW;
+  const settle = E.inOut(P(t, Q.wordmark - 0.1, Q.wordmark + 0.6));
+  const mW = lerp(big, small, settle);
+  const mX = lerp(960 - big / 2, 960 - groupW / 2, settle), mY = 470 - (mW * 10) / 22 / 2;
+  const up = E.inOut(P(t, Q.trackIn - 0.1, Q.trackIn + 0.5));
+  const gS = lerp(1, 0.62, up), gY = lerp(0, -170, up);
+  s3.logo.style.transform = `translate(0px, ${gY}px) scale(${gS})`; s3.logo.style.transformOrigin = "960px 470px";
+  s3.logo.style.opacity = 1 - E.inCubic(P(t, 21.6, 22));
+  s3.mark.setAttribute("width", mW); s3.mark.setAttribute("height", (mW * 10) / 22);
+  tf(s3.mark, { x: mX, y: mY });
+  const line = $("#mLine"), lk = E.outExpo(P(t, d, d + 0.45));
+  line.setAttribute("d", `M${11 - 8 * lk} 5H${11 + 8 * lk}`);
+  [["#mC1", 0.1], ["#mC2", 0], ["#mC3", 0.16]].forEach(([id, dl]) => {
+    const k = E.outBack(P(t, d + dl, d + dl + 0.45));
+    $(id).style.transform = `scale(${k})`;
+  });
+  $("#mC2").style.transform += ` scale(${1 + 0.12 * hits(t, [18, 18.5, 19, 20, 21], 8)})`;
+  // Wordmark letters slide out from behind the mark.
+  const wx = 960 - groupW / 2 + small + gap;
+  tf(s3.word, { x: wx, y: 470 - 112 });
+  s3.letters.forEach((sp, i) => {
+    const k = E.outExpo(P(t, Q.wordmark + 0.12 + i * 0.05, Q.wordmark + 0.75 + i * 0.05));
+    tf(sp, { x: (1 - k) * -90, o: k, blur: (1 - k) * 16 });
+  });
+  rise(s3.tagA, t, Q.tagline[0], { stagger: 0.07 });
+  rise(s3.tagB, t, Q.tagline[1], { stagger: 0.07 });
+  $("#tagB").style.color = rgb(C.fg);
+  s3.tag.style.transform = `translate(0, ${lerp(0, -250, up)}px) scale(${lerp(1, 0.78, up)})`;
+  s3.tag.style.opacity = 1 - E.inCubic(P(t, 21.6, 22));
+  // The track.
+  const tk = E.outExpo(P(t, Q.trackIn, Q.trackIn + 0.6));
+  const out = E.inCubic(P(t, 21.65, 22));
+  s3.trackLine.style.transform = `scaleX(${tk})`;
+  s3.track.style.opacity = 1 - out; s3.track.style.transform = `translateY(${-out * 40}px)`;
+  s3.track.style.filter = out > 0.05 ? `blur(${out * 10}px)` : "none";
+  const S = Q.stations;
+  let pos = 0;
+  for (let i = 0; i < 8; i++) if (t >= S[i]) pos = i + (i < 7 ? E.inOut(P(t, S[i] + 0.06, S[i] + 0.25)) : 0);
+  const litW = t < S[0] ? 0 : pos / 7;
+  s3.trackLit.style.clipPath = `inset(0 ${(1 - litW) * 100}% 0 0)`;
+  s3.trackLit.style.background = `linear-gradient(90deg, ${rgb(C.fg3)} 0, ${rgb(C.live)} 14%, ${rgb(C.live)} 64%, ${rgb(C.amber)} 71.4%, ${rgb(C.live)} 78%, ${rgb(C.live)} 92%, ${rgb(C.fg3)} 100%)`;
+  s3.stations.forEach((el, i) => {
+    const [name, kind] = STATIONS[i], c = stColor(kind);
+    const ap = E.outBack(P(t, Q.trackIn + 0.1 + i * 0.04, Q.trackIn + 0.5 + i * 0.04));
+    const lit = t >= S[i], pop = hits(t, [S[i]], 6);
+    tf(el, { x: stX(i), y: TY, o: ap });
+    const dot = $(".dot", el), lab = $(".lab", el);
+    dot.style.transform = `scale(${ap * (1 + 0.55 * pop)})`;
+    dot.style.borderColor = lit ? rgb(c) : "#363633";
+    dot.style.background = lit ? (kind === "d" ? rgb(C.fg3) : rgb(c)) : "#141413";
+    dot.style.boxShadow = lit && kind !== "d" && kind !== "q" ? `0 0 ${30 + 40 * pop}px ${rgb(c, 0.55 + 0.4 * pop)}` : "none";
+    lab.style.color = lit ? rgb(kind === "y" ? C.amber : C.fg) : "#7c7b75";
+    lab.style.transform = `translateY(${(1 - ap) * 20}px)`;
+  });
+  const rx = lerp(TX0, TX1, pos / 7), rOn = P(t, S[0] - 0.05, S[0]) * (1 - P(t, S[7] + 0.15, S[7] + 0.35));
+  tf(s3.runner, { x: rx, y: TY, o: rOn, s: 1 + 0.4 * hits(t, S, 9) });
+  s3.runner.style.boxShadow = `0 0 40px 10px ${rgb(t >= S[5] && t < S[6] ? C.amber : C.live, 0.7)}`;
+}
+
+/* ================= scene 4: features ================= */
+const s4 = $("#s4"), F = [];
+function feature(i, title, sub, panelHtml) {
+  const text = h(`<div class="abs ftext"><div class="fnum">0${i + 1} / 06</div><div class="ftitle">${title}</div><div class="fsub">${sub}</div></div>`);
+  const panel = h(`<div class="abs panel">${panelHtml}</div>`);
+  s4.appendChild(text); s4.appendChild(panel);
+  const f = { i, at: Q.features[i], end: i < 5 ? Q.features[i + 1] : Q.night, text, panel, num: $(".fnum", text), title: words($(".ftitle", text)), sub: words($(".fsub", text)) };
+  F.push(f); return f;
+}
+function frame(f, t) {
+  const a = f.at, b = f.end;
+  const on = t >= a - 0.05 && t < b + 0.05;
+  f.text.style.display = f.panel.style.display = on ? "block" : "none";
+  if (!on) return false;
+  const exit = b - 0.38;
+  tf(f.num, { o: E.outExpo(P(t, a, a + 0.4)) * (1 - P(t, exit, exit + 0.25)), x: (1 - E.outExpo(P(t, a, a + 0.5))) * -30 });
+  rise(f.title, t, a + 0.05, { stagger: 0.06, out: exit });
+  rise(f.sub, t, a + 0.3, { stagger: 0.018, dur: 0.5, dy: 30, out: exit + 0.05, outDur: 0.3 });
+  const k = E.outExpo(P(t, a, a + 0.75)), e = E.inCubic(P(t, exit, b));
+  tf(f.panel, { x: (1 - k) * 260 - e * 120, ry: (1 - k) * -28 + e * 18, o: k * (1 - e), blur: (1 - k) * 14 + e * 12, s: lerp(0.92, 1, k) });
+  return true;
+}
+
+// 01 One backlog
+const BACKLOG = [["NIT-412", "Pulse shows what needs you first", 3], ["NIT-418", "Keyboard keys for the Inbox", 2], ["APP-207", "Checkout loses the coupon on back", 3],
+  ["ORB-93", "Sync settings across profiles", 2], ["NIT-421", "Export a backlog as JSON", 1], ["HAR-31", "Date picker skips a month", 2], ["APP-212", "Rate-limit the public API", 1]];
+const f1 = feature(0, "One backlog.", "Every agent takes the most urgent issue. Two never start the same one.",
+  `<div class="abs card" style="top:40px;width:940px;height:${76 * 7 + 70}px">
+     <div style="height:70px;display:flex;align-items:center;padding:0 30px;font-size:24px;font-weight:600;gap:14px">Backlog
+       <span class="mono" style="font-size:16px;color:#7c7b75;font-weight:500">NIT · APP · ORB · HAR</span></div>
+     ${BACKLOG.map(([k, ttl, p], i) => `<div class="row" style="top:${70 + i * 76}px"><div class="accent"></div>
+       <div class="prio">${[0, 1, 2].map((j) => `<i style="height:${6 + j * 6}px;${j < p ? "background:#a7a69f" : ""}"></i>`).join("")}</div>
+       <div class="rk">${k}</div><div class="ttl">${ttl}</div><div class="stat"><div class="sdot"></div><span>Todo</span></div></div>`).join("")}
+   </div>
+   <div class="abs mono" id="claimed" style="font-size:16px;color:#a7a69f;padding:6px 12px;border:1px solid #363633;border-radius:8px;background:#141413">claimed</div>`);
+f1.rows = $$(".row", f1.panel);
+f1.agents = [["Cl", 0, Q.claims[0]], ["Cx", 1, Q.claims[1]], ["Cu", 2, Q.claims[2]], ["Cx", 3, Q.claims[3]], ["Cl", 4, Q.claims[4]]].map(([v, row, at]) => {
+  const el = h(`<div class="abs tile" style="width:46px;height:46px;background:${rgb(VEND[v])}">${v}</div>`);
+  f1.panel.appendChild(el); return { el, v, row, at };
+});
+function updateF1(t) {
+  if (!frame(f1, t)) return;
+  const rowY = (r) => 40 + 70 + r * 76 + 15;
+  f1.agents.forEach((ag, i) => {
+    let x, y;
+    if (ag.row === 3) { // tries row 2, is refused, takes row 3
+      const k1 = E.outExpo(P(t, Q.bounce - 0.45, Q.bounce)), k2 = E.inOut(P(t, Q.bounce + 0.2, Q.claims[3]));
+      const shake = 14 * Math.sin((t - Q.bounce) * 60) * Math.exp(-(t - Q.bounce) * 9) * (t > Q.bounce ? 1 : 0);
+      x = lerp(1010, 770, k1) + shake; y = lerp(rowY(2), rowY(3), k2);
+      x = k2 > 0 ? lerp(770, 708, k2) : x;
+      if (k2 > 0 && k2 < 1) x += 46 * Math.sin(k2 * Math.PI);
+      tf(ag.el, { x, y, o: P(t, Q.bounce - 0.45, Q.bounce - 0.3), s: 1 + 0.25 * hits(t, [Q.claims[3]], 10) });
+    } else {
+      const k = E.outExpo(P(t, ag.at - 0.45, ag.at));
+      x = lerp(1010, 708, k); y = rowY(ag.row);
+      tf(ag.el, { x, y, o: P(t, ag.at - 0.45, ag.at - 0.3), s: 1 + 0.25 * hits(t, [ag.at], 10) });
+    }
+  });
+  const claimOf = { 0: Q.claims[0], 1: Q.claims[1], 2: Q.claims[2], 3: Q.claims[3], 4: Q.claims[4] };
+  f1.rows.forEach((row, i) => {
+    const at = claimOf[i], on = at != null && t >= at, fl = on ? hits(t, [at], 5) : 0;
+    row.style.background = on ? rgb(C.live, 0.07 + 0.18 * fl) : "transparent";
+    $(".accent", row).style.opacity = on ? 1 : 0;
+    $(".rk", row).style.color = on ? rgb(C.live) : "#7c7b75";
+    const st = $(".stat span", row), dot = $(".sdot", row);
+    st.textContent = on ? "Started" : "Todo"; st.style.color = on ? rgb(C.live) : "#7c7b75";
+    st.style.marginLeft = on ? "56px" : "0px"; dot.style.display = on ? "none" : "block";
+  });
+  const ck = P(t, Q.bounce, Q.bounce + 0.12) * (1 - P(t, Q.bounce + 0.5, Q.bounce + 0.7));
+  tf($("#claimed", f1.panel), { x: 596, y: 40 + 70 + 2 * 76 + 20, o: ck, s: lerp(0.8, 1, ck) });
+}
+
+// 02 One playbook
+const PLAYBOOK = [
+  [["c", "# .nitely/playbook.toml"]],
+  [["h", "[gate]"]],
+  [["k", "commands"], ["p", " = ["], ["s", "\"npm test\""], ["p", ", "], ["s", "\"npm run build\""], ["p", "]"]],
+  [],
+  [["h", "[review]"]],
+  [["k", "reviewer"], ["p", " = { "], ["k", "claude"], ["p", " = "], ["s", "\"codex\""], ["p", ", "], ["k", "codex"], ["p", " = "], ["s", "\"claude\""], ["p", " }"]],
+  [],
+  [["h", "[approval]"]],
+  [["k", "human_paths"], ["p", " = ["], ["s", "\"^billing/\""], ["p", ", "], ["s", "\"^release/\""], ["p", "]"]],
+  [],
+  [["h", "[crew]"]],
+  [["k", "workers"], ["p", " = "], ["s", "4"]],
+];
+const PB_TOTAL = PLAYBOOK.reduce((a, l) => a + l.reduce((b, [, s]) => b + s.length, 0) + 1, 0);
+const CHIPS = [["Worktree", "a", 0], ["Gate", "a", 172], ["Cross review", "a", 320], ["You, if it matters", "y", 548], ["Land", "a", 832]];
+const f2 = feature(1, "One playbook.", "Branches, the gate, who reviews whom and what waits for you. The same for every agent.",
+  `<div class="abs card" style="width:940px;height:510px"><div class="code" id="code"></div></div>
+   ${CHIPS.map(([n, , x]) => `<div class="chip" style="left:${x}px;top:590px">${n}</div>`).join("")}
+   <div class="abs" id="chipline" style="left:20px;top:618px;width:880px;height:2px;background:#363633;z-index:-1"></div>`);
+f2.code = $("#code", f2.panel); f2.chips = $$(".chip", f2.panel);
+function updateF2(t) {
+  if (!frame(f2, t)) return;
+  let n = Math.floor(lerp(0, PB_TOTAL, P(t, Q.typing[0], Q.typing[1])));
+  const out = [];
+  for (const line of PLAYBOOK) {
+    let s = "";
+    for (const [cls, txt] of line) {
+      if (n <= 0) break;
+      const part = txt.slice(0, n); n -= part.length;
+      s += `<span class="tk-${cls}">${part.replace(/</g, "&lt;")}</span>`;
+    }
+    out.push(s);
+    if (n <= 0) break;
+    n -= 1;
+  }
+  const blink = t > Q.typing[1] && Math.floor(t * 3) % 2 === 0;
+  f2.code.innerHTML = out.join("\n") + `<span id="cursor" style="opacity:${blink ? 0 : 1}"></span>`;
+  f2.chips.forEach((el, i) => {
+    const at = Q.strip[i], on = t >= at, kind = CHIPS[i][1], c = kind === "y" ? C.amber : C.live, pop = hits(t, [at], 7);
+    el.style.borderColor = on ? rgb(c) : "#363633";
+    el.style.color = on ? rgb(kind === "y" ? C.amber : C.fg) : "#7c7b75";
+    el.style.background = on ? rgb(c, 0.1 + 0.2 * pop) : "#141413";
+    el.style.transform = `scale(${1 + 0.12 * pop}) translateY(${(1 - E.outExpo(P(t, 28.2 + i * 0.05, 28.7 + i * 0.05))) * 30}px)`;
+    el.style.opacity = E.outExpo(P(t, 28.2 + i * 0.05, 28.6 + i * 0.05));
+  });
+  $("#chipline", f2.panel).style.opacity = P(t, 28.3, 28.6);
+}
+
+// 03 Cross-vendor review
+const f3 = feature(2, "Cross-vendor review.", "Codex reviews Claude. Claude reviews Codex. Serious findings go back to the agent, not to you.",
+  `<div class="abs tile" id="tCl" style="width:170px;height:170px;font-size:64px;border-radius:38px;background:${rgb(C.claude)}">Cl</div>
+   <div class="abs tile" id="tCx" style="width:170px;height:170px;font-size:64px;border-radius:38px;background:${rgb(C.codex)}">Cx</div>
+   <div class="abs" style="left:30px;top:520px;width:250px;text-align:center;font-size:26px;color:#a7a69f">Claude Code</div>
+   <div class="abs" style="left:660px;top:520px;width:250px;text-align:center;font-size:26px;color:#a7a69f">Codex</div>
+   <svg class="abs" width="940" height="700" style="overflow:visible"><path id="loop" d="M745 470 C 640 640, 300 640, 195 470" stroke="${rgb(C.live)}" stroke-width="3" stroke-dasharray="10 10" fill="none"/></svg>
+   <div class="abs mono" id="round" style="font-size:20px;color:${rgb(C.live)}">changes asked · round 1</div>
+   <div class="abs card diff" id="diffc"><div class="hd">claude/NIT-418-inbox-keys</div>
+     ${[["+", 0.8], ["+", 0.55], ["-", 0.7], ["+", 0.9], ["-", 0.4], ["+", 0.62]].map(([s, w]) => `<div class="ln" data-s="${s}" style="width:${w * 100}%"></div>`).join("")}
+     <div class="abs" id="scan" style="left:0;top:0;width:330px;height:3px;background:${rgb(C.live)};box-shadow:0 0 24px 6px ${rgb(C.live, 0.6)}"></div></div>
+   <div class="abs find" id="finding"><b>P1</b>Approve key fires twice on repeat</div>
+   <div class="abs" id="pass" style="display:flex;align-items:center;gap:18px;font-size:34px;font-weight:600">
+     <svg width="70" height="70" viewBox="0 0 70 70"><circle cx="35" cy="35" r="33" fill="${rgb(C.live)}"/><path d="M21 36 L31 46 L50 26" stroke="#141413" stroke-width="6" fill="none" stroke-linecap="round" stroke-linejoin="round"/></svg>
+     Review passed</div>`);
+function updateF3(t) {
+  if (!frame(f3, t)) return;
+  const R = Q.review, p = f3.panel;
+  const bump = (at) => hits(t, [at], 9);
+  tf($("#tCl", p), { x: 70, y: 330, s: 1 + 0.08 * bump(R.home) + 0.06 * bump(R.fix) });
+  tf($("#tCx", p), { x: 700, y: 330, s: 1 + 0.08 * bump(R.arrive1) + 0.08 * bump(R.arrive2) });
+  // Card path: Claude -> Codex (arc over), back (arc under), again over.
+  const cl = { x: 155 - 165, y: 120 }, cx = { x: 785 - 165, y: 120 };
+  let x = cl.x, y = cl.y, o = E.outExpo(P(t, R.send1 - 0.5, R.send1 - 0.2)), s = 1;
+  const over = (k) => ({ x: lerp(cl.x, cx.x, k), y: lerp(cl.y, cx.y, k) - Math.sin(k * Math.PI) * 70 });
+  if (t >= R.send1) { const k = E.inOut(P(t, R.send1, R.arrive1)); ({ x, y } = over(k)); }
+  if (t >= R.back) { const k = E.inOut(P(t, R.back, R.home)); x = lerp(cx.x, cl.x, k); y = cl.y + Math.sin(k * Math.PI) * 60; }
+  if (t >= R.send2) { const k = E.inOut(P(t, R.send2, R.arrive2)); ({ x, y } = over(k)); }
+  const passK = E.outBack(P(t, R.pass, R.pass + 0.4));
+  tf($("#diffc", p), { x, y: y - 20 * passK, o, s: s - 0.08 * passK });
+  const scanning = (t >= R.arrive1 && t < R.find) || (t >= R.arrive2 && t < R.pass);
+  const sk = t < R.find ? P(t, R.arrive1, R.find) : P(t, R.arrive2, R.pass);
+  $("#scan", p).style.opacity = scanning ? 1 : 0;
+  $("#scan", p).style.top = `${lerp(8, 220, (sk * 2) % 1)}px`;
+  const fixed = t >= R.fix;
+  $$(".ln", p).forEach((ln, i) => {
+    const bad = ln.dataset.s === "-" && i === 2 && !fixed && t >= R.find;
+    ln.style.background = bad ? rgb(C.fail, 0.75) : ln.dataset.s === "+" ? rgb(C.live, 0.32) : rgb(C.fail, 0.3);
+    if (fixed && i === 2) ln.style.background = rgb(C.live, 0.32 + 0.5 * bump(R.fix));
+  });
+  const fk = E.outBack(P(t, R.find, R.find + 0.3)) * (1 - E.inCubic(P(t, R.back, R.back + 0.3)));
+  tf($("#finding", p), { x: 480, y: 30, o: fk, s: lerp(0.7, 1, fk) });
+  const loop = $("#loop", p), lk = P(t, R.back, R.home);
+  loop.style.strokeDashoffset = `${-t * 60}`;
+  loop.style.opacity = E.outCubic(lk) * (1 - P(t, R.send2, R.send2 + 0.3));
+  loop.style.clipPath = `inset(0 0 0 ${(1 - E.outCubic(lk)) * 100}%)`;
+  tf($("#round", p), { x: 345, y: 620, o: P(t, R.back + 0.1, R.back + 0.3) * (1 - P(t, R.send2, R.send2 + 0.3)) });
+  tf($("#pass", p), { x: 300, y: 580, o: P(t, R.pass, R.pass + 0.1), s: passK });
+}
+
+// 04 One merge at a time
+const MERGES = [["claude/NIT-412", "NIT-412", 110], ["codex/APP-207", "APP-207", 200], ["cursor/ORB-93", "ORB-93", 290], ["claude/NIT-418", "NIT-418", 380]];
+const GX = 470, MY = 560;
+const f4 = feature(3, "One merge at a time.", "Rebase, check the review covers exactly this change, gate, fast-forward. Only land writes main.",
+  `<svg class="abs" width="940" height="700" style="overflow:visible">
+     <line x1="20" y1="${MY}" x2="930" y2="${MY}" stroke="#55544f" stroke-width="6" stroke-linecap="round"/>
+     ${MERGES.map(([b, , y], i) => `<path class="br" d="M40 ${y} C ${GX - 120} ${y}, ${GX - 30} ${y + 40}, ${GX} ${MY - 40}" stroke="#55544f" stroke-width="4" fill="none" stroke-dasharray="2 12" stroke-linecap="round"/>`).join("")}
+   </svg>
+   ${MERGES.map(([b, , y]) => `<div class="abs mono brl" style="left:40px;top:${y - 40}px;font-size:18px;color:#a7a69f">${b}</div>`).join("")}
+   ${MERGES.map(() => `<div class="abs bdot" style="width:22px;height:22px;margin:-11px 0 0 -11px;border-radius:50%"></div>`).join("")}
+   <div class="abs mono" style="left:20px;top:${MY + 26}px;font-size:20px;color:#7c7b75">main</div>
+   <div class="abs" id="lock" style="width:76px;height:76px;margin:-38px 0 0 -38px;border-radius:20px;background:#1b1b1a;border:2px solid #55544f;box-sizing:border-box;display:flex;align-items:center;justify-content:center">
+     <svg width="34" height="38" viewBox="0 0 34 38"><path id="shackle" d="M8 17 V11 a9 9 0 0 1 18 0 V17" stroke="#ecebe6" stroke-width="4" fill="none"/><rect x="3" y="16" width="28" height="20" rx="5" fill="#ecebe6"/></svg></div>
+   <div class="abs mono" id="steps" style="font-size:18px;color:${rgb(C.live)};width:600px;text-align:center;white-space:nowrap"></div>
+   ${MERGES.map(([, k]) => `<div class="abs commit"><div style="width:26px;height:26px;margin:-13px 0 0 -13px;border-radius:50%;background:${rgb(C.live)}"></div><div class="mono" style="position:absolute;left:-60px;width:120px;top:24px;text-align:center;font-size:17px;color:#a7a69f">${k}</div></div>`).join("")}
+   <div class="abs" id="landed" style="right:0;top:0;text-align:right"><div style="font-size:96px;font-weight:620;letter-spacing:-0.05em;line-height:1" id="landedN">0</div><div style="font-size:22px;color:#a7a69f">landed, one at a time</div></div>`);
+f4.paths = $$(".br", f4.panel); f4.dots = $$(".bdot", f4.panel); f4.commits = $$(".commit", f4.panel); f4.labels = $$(".brl", f4.panel);
+function updateF4(t) {
+  if (!frame(f4, t)) return;
+  const p = f4.panel, M = Q.merges;
+  let landed = 0; M.forEach((m) => { if (t >= m) landed++; });
+  const active = M.findIndex((m) => t >= m - 0.55 && t < m + 0.25);
+  f4.paths.forEach((path, i) => {
+    const m = M[i], len = path.getTotalLength();
+    const k = E.inOut(P(t, m - 0.55, m - 0.05));
+    const pt = path.getPointAtLength(len * k);
+    const done = t >= m;
+    path.setAttribute("stroke", done ? "#363633" : i === active ? rgb(C.live) : "#55544f");
+    path.setAttribute("stroke-dasharray", i === active || done ? "none" : "2 12");
+    path.style.opacity = 1 - 0.6 * P(t, m + 0.1, m + 0.4);
+    f4.labels[i].style.opacity = 1 - 0.6 * P(t, m + 0.1, m + 0.4);
+    f4.labels[i].style.color = i === active ? rgb(C.live) : "#a7a69f";
+    const q = !done && i !== active ? 1 + 0.25 * Math.sin(t * 8 + i) : 1;
+    tf(f4.dots[i], { x: pt.x, y: pt.y, o: done ? 0 : 1, s: q });
+    f4.dots[i].style.background = i === active ? rgb(C.live) : "#a7a69f";
+    f4.dots[i].style.boxShadow = i === active ? `0 0 26px 6px ${rgb(C.live, 0.6)}` : "none";
+  });
+  const lockOn = active >= 0, lp = hits(t, M, 8);
+  const lock = $("#lock", p);
+  tf(lock, { x: GX, y: MY, s: 1 + 0.18 * lp });
+  lock.style.borderColor = lockOn ? rgb(C.live) : "#55544f";
+  lock.style.boxShadow = lockOn ? `0 0 ${40 + 40 * lp}px ${rgb(C.live, 0.45)}` : "none";
+  $("#shackle", p).setAttribute("d", lockOn ? "M8 17 V11 a9 9 0 0 1 18 0 V17" : "M8 17 V11 a9 9 0 0 1 18 0 V8");
+  const stepNames = ["rebase", "review covers this", "gate", "fast-forward"];
+  let st = "";
+  if (active >= 0) { const k = P(t, M[active] - 0.55, M[active] + 0.1); st = stepNames.slice(0, 1 + Math.floor(k * 3.99)).join(" · "); }
+  $("#steps", p).textContent = st;
+  tf($("#steps", p), { x: GX - 300, y: MY - 120, o: active >= 0 ? 1 : 0 });
+  f4.commits.forEach((c, i) => {
+    const m = M[i];
+    if (t < m) { c.style.opacity = 0; return; }
+    let x = GX + 20;
+    for (let j = i + 1; j < M.length; j++) x += 110 * E.outExpo(P(t, M[j], M[j] + 0.4));
+    x += 110 * E.outExpo(P(t, m, m + 0.4));
+    tf(c, { x, y: MY, s: E.outBack(P(t, m, m + 0.35)) });
+  });
+  $("#landedN", p).textContent = String(landed);
+  $("#landedN", p).style.color = landed ? rgb(C.live) : "#7c7b75";
+  $("#landedN", p).style.transform = `scale(${1 + 0.2 * lp})`; $("#landedN", p).style.transformOrigin = "100% 50%";
+}
+
+// 05 Live view
+const OVROWS = [
+  ["Cl", "Claude · nitely", "NIT-431", "Inbox keys for approvals", 2, ["Editing src/Inbox.tsx", "Running npm test", "Submitted; review started", "Review passed"]],
+  ["Cx", "Codex · orbit", "ORB-102", "Sync settings across profiles", 3, ["Running cargo test sync", "Editing src/sync/merge.rs", "Gate passed", "Waiting for the review"]],
+  ["Cu", "Cursor · harbor", "HAR-36", "Date picker skips a month", 1, ["Reading src/DatePicker.tsx", "Editing src/DatePicker.tsx", "Running vitest date", "Filed HAR-37: time zones"]],
+  ["Cl", "Claude · acme", "APP-219", "Rate-limit the public API", 4, ["Rebasing on main", "Gate: npm test", "Landing", "Landed"]],
+  ["Cx", "Codex · nitely", "NIT-433", "Export a backlog as JSON", 2, ["Editing crates/export.rs", "Running cargo clippy", "Fixing 2 lints", "Submitted"]],
+  ["Cl", "Claude · orbit", "ORB-104", "Offline queue for edits", 5, ["Asked: keep the old flag?", "waiting for you", "waiting for you", "waiting for you"]],
+  ["Cu", "Cursor · acme", "APP-221", "Coupon lost on back", 3, ["Review: 1 finding (P2)", "Editing src/cart.ts", "Running npm test cart", "Submitted again"]],
+  ["Cx", "Codex · harbor", "HAR-38", "Booking emails in the guest's language", 1, ["Reading src/mail/*.ts", "Editing src/mail/booking.ts", "Running npm test mail", "Gate passed"]],
+];
+const f5 = feature(4, "Every agent, live.", "Who works on what, what it last did, and what is stuck. Across every repo, as it happens.",
+  `<div class="abs card ov" style="left:-40px;top:20px">
+     <div style="padding:20px 24px 14px;font-size:26px;font-weight:620;display:flex;gap:14px;align-items:baseline">Overview <span style="font-size:17px;color:#7c7b75;font-weight:400">Friday 11:52 PM</span></div>
+     <div class="ovstats"><div><div class="n" style="color:${rgb(C.amber)}" id="nNeed">3</div><div class="l">need you</div></div><div><div class="n" style="color:${rgb(C.live)}" id="nMove">6</div><div class="l">agents moving</div></div><div><div class="n" style="color:#7c7b75">0</div><div class="l">stuck</div></div><div style="border:0"><div class="n" id="nDone">12</div><div class="l">done today</div></div></div>
+     ${OVROWS.map(([v, who, k, ttl]) => `<div class="ovrow"><div class="tile" style="background:${rgb(VEND[v])}">${v}</div><div class="who">${who}</div><div class="k">${k}</div><div class="t">${ttl}</div><div class="trk">${"<i></i>".repeat(8)}</div><div class="act"></div></div>`).join("")}
+   </div>`);
+f5.rows = $$(".ovrow", f5.panel);
+function updateF5(t) {
+  if (!frame(f5, t)) return;
+  const a = f5.at, k = E.inOut(P(t, a, a + 3.6));
+  const ov = $(".ov", f5.panel);
+  ov.style.transform = `perspective(1600px) rotateY(${lerp(26, 6, k)}deg) rotateX(${lerp(10, 2, k)}deg) scale(${lerp(0.94, 1.0, k)})`;
+  ov.style.transformOrigin = "0% 50%";
+  f5.rows.forEach((row, i) => {
+    const [, , , , st, acts] = OVROWS[i];
+    const step = Math.floor(clamp((t - a - 0.4 - i * 0.11) / 0.85, 0, 3));
+    const changeAt = a + 0.4 + i * 0.11 + step * 0.85;
+    const fl = t >= a + 0.4 ? hits(t, [changeAt], 5) : 0;
+    const act = $(".act", row); act.textContent = acts[step];
+    const waiting = acts[step].startsWith("waiting") || acts[step].startsWith("Asked");
+    act.style.color = waiting ? rgb(C.amber) : acts[step] === "Landed" ? rgb(C.live) : rgb(C.fg2, 1);
+    row.style.background = rgb(waiting ? C.amber : C.live, 0.1 * fl);
+    const pos = Math.min(7, st + (acts[step] === "Landed" ? 2 : step >= 2 ? 1 : 0));
+    $$(".trk i", row).forEach((d, j) => {
+      d.style.background = j < pos ? "#7c7b75" : j === pos ? rgb(waiting ? C.amber : C.live) : "#363633";
+      d.style.transform = j === pos ? `scale(${1.5 + 0.3 * Math.sin(t * 6 + i)})` : "none";
+    });
+  });
+  const done = 12 + Math.floor(P(t, a + 0.6, a + 3.5) * 11);
+  $("#nDone", f5.panel).textContent = String(done);
+}
+
+// 06 Inbox
+const DECS = [
+  ["QUESTION · ORB-104", "Keep the old offline flag for one release?", "Claude · orbit · asked 2 min ago"],
+  ["APPROVAL · APP-219", "Rate limits touch billing/: approve to land", "Review passed · gate passed · Codex reviewed"],
+  ["FINDING · HAR-38", "P2: a trade-off, not a bug. Accept or send back?", "Codex on Cursor's change · round 1"],
+];
+const f6 = feature(5, "Only real decisions reach you.", "Questions, approvals and trade-offs, each with what you need to decide. The rest is handled.",
+  `<div class="abs inbox" style="left:20px;top:40px"><div class="ibhead">Inbox <div class="badge" id="badge">3</div></div></div>
+   ${DECS.map(([kind, q, meta], i) => `<div class="abs card dec"><div class="kind">${kind}</div><div class="q">${q}</div><div class="meta">${meta}</div>
+     <div class="act">${i === 0 ? `<div class="key">⏎</div>` : i === 1 ? `<div class="key">A</div>` : `<div class="key">A</div><div class="key">S</div>`}</div>
+     ${i === 0 ? `<div class="reply" style="display:none"></div>` : ""}</div>`).join("")}`);
+f6.cards = $$(".dec", f6.panel);
+function updateF6(t) {
+  if (!frame(f6, t)) return;
+  const p = f6.panel, ap = Q.approve, en = Q.enter;
+  // Card 1 (approval) is approved first, card 0 (question) is answered next; card 2 stays.
+  const gone1 = E.inOut(P(t, ap + 0.35, ap + 0.75)), gone0 = E.inOut(P(t, en + 0.35, en + 0.75));
+  const order = [0, 1, 2];
+  let yAcc = 120;
+  order.forEach((i) => {
+    const el = f6.cards[i], at = Q.inboxCards[i], k = E.outExpo(P(t, at, at + 0.5));
+    const gone = i === 1 ? gone1 : i === 0 ? gone0 : 0;
+    const resolved = i === 1 ? t >= ap : i === 0 ? t >= en : false;
+    const hgt = i === 0 && t >= Q.answerType[0] ? 210 : 150;
+    el.style.height = `${hgt}px`;
+    tf(el, { x: lerp(-700, 20, k) + gone * 160, y: yAcc + (1 - k) * 80, o: k * (1 - gone), blur: (1 - k) * 20 + gone * 8, s: lerp(0.8, 1, k) * (1 + 0.04 * hits(t, [resolved ? (i === 1 ? ap : en) : 999], 10)) });
+    el.style.borderLeftColor = resolved ? rgb(C.live) : rgb(C.amber);
+    $(".kind", el).style.color = resolved ? rgb(C.live) : rgb(C.amber);
+    if (resolved) $(".kind", el).textContent = i === 1 ? "APPROVED · APP-219" : "ANSWERED · ORB-104";
+    else $(".kind", el).textContent = DECS[i][0];
+    yAcc += (hgt + 22) * (1 - gone);
+  });
+  // Key presses.
+  const keys = $$(".key", f6.cards[1]); const kp1 = hits(t, [ap], 14);
+  keys[0].style.transform = `translateY(${3 * kp1}px)`; keys[0].style.borderBottomWidth = `${4 - 3 * kp1}px`;
+  keys[0].style.background = t >= ap ? rgb(C.live, 0.3) : "#222220";
+  const k0 = $(".key", f6.cards[0]), kp0 = hits(t, [en], 14);
+  k0.style.transform = `translateY(${3 * kp0}px)`; k0.style.background = t >= en ? rgb(C.live, 0.3) : "#222220";
+  const reply = $(".reply", f6.cards[0]);
+  reply.style.display = t >= Q.answerType[0] ? "block" : "none";
+  const msg = "Yes, keep it for one release.";
+  const n = Math.floor(msg.length * P(t, Q.answerType[0], Q.answerType[1]));
+  reply.textContent = msg.slice(0, n) + (t < en ? "|" : "");
+  const left = 3 - (t >= ap ? 1 : 0) - (t >= en ? 1 : 0);
+  $("#badge", p).textContent = String(left);
+  $("#badge", p).style.transform = `scale(${1 + 0.3 * hits(t, [ap, en], 9)})`;
+}
+
+/* ================= scene 5: night ================= */
+const s5 = { clock: $("#bigclock"), cap: $("#nightcap"), stats: $("#stats"), hist: $("#hist").getContext("2d"), wakeA: words($("#wakeA")), wakeB: words($("#wakeB")) };
+const NIGHT = [["23:42", "Agents take the work"], ["01:15", "They review each other"], ["02:30", "One merge at a time"], ["05:10", "Stuck work goes back to its agent"]];
+const HIST = (() => { const R = rng(5); return Array.from({ length: 30 }, (_, i) => 0.15 + 0.85 * Math.pow(R(), 1.4) * (0.6 + 0.4 * Math.sin(i / 4))); })();
+function updateS5(t) {
+  const [c0, c1] = Q.clock, k = E.inOut(P(t, c0, c1));
+  const mins = Math.round(lerp(23 * 60 + 40, 31 * 60, k)) % 1440;
+  s5.clock.textContent = `${String(Math.floor(mins / 60)).padStart(2, "0")}:${String(mins % 60).padStart(2, "0")}`;
+  const wake = E.inOut(P(t, c1, c1 + 0.8));
+  s5.clock.style.color = `rgb(${lerp(236, 255, wake)},${lerp(235, 214, wake)},${lerp(230, 160, wake)})`;
+  s5.clock.style.textShadow = `0 0 ${80 * wake}px rgba(255,190,110,${0.5 * wake})`;
+  const up = E.inOut(P(t, Q.wake - 0.3, Q.wake + 0.3));
+  tf(s5.clock, { o: E.outExpo(P(t, Q.night, Q.night + 0.6)), y: (1 - E.outExpo(P(t, Q.night, Q.night + 0.8))) * 40 - up * 90, s: lerp(1, 0.72, up), blur: (1 - P(t, Q.night, Q.night + 0.5)) * 12 });
+  let ci = -1; Q.nightSteps.forEach((s, i) => { if (t >= s) ci = i; });
+  if (ci >= 0) {
+    const s = Q.nightSteps[ci], kk = E.outExpo(P(t, s, s + 0.4));
+    s5.cap.innerHTML = `<b>${NIGHT[ci][0]}</b>${NIGHT[ci][1]}`;
+    tf(s5.cap, { o: kk * (1 - P(t, c1 + 0.1, c1 + 0.4)), y: (1 - kk) * 24, blur: (1 - kk) * 8 });
+  } else tf(s5.cap, { o: 0 });
+  // Landed per hour, filling in as the night passes.
+  const g = s5.hist; g.clearRect(0, 0, 800, 150);
+  const bw = 800 / 30;
+  HIST.forEach((v, i) => {
+    const grow = E.outCubic(P(k * 30 - i, 0, 1.5));
+    if (grow <= 0) return;
+    g.fillStyle = rgb(C.live, 0.85); g.fillRect(i * bw + 4, 150 - v * 140 * grow, bw - 8, v * 140 * grow);
+  });
+  g.fillStyle = "rgba(124,123,117,.5)"; g.fillRect(0, 149, 800, 1);
+  tf($("#hist"), { o: P(t, Q.night + 0.2, Q.night + 0.6) * (1 - P(t, c1 + 0.2, c1 + 0.6)) });
+  const n = (v) => Math.round(v * k);
+  s5.stats.innerHTML = `<span><b style="color:${rgb(C.live)}">${n(23)}</b> landed</span><span><b>${n(55)}</b> filed</span><span><b>${n(69)}</b> review rounds</span><span><b style="color:${rgb(C.amber)}">${n(2)}</b> questions for you</span>`;
+  tf(s5.stats, { o: P(t, Q.night + 0.3, Q.night + 0.7) * (1 - P(t, Q.wake - 0.3, Q.wake)) });
+  rise(s5.wakeA, t, Q.wake, { stagger: 0.07, out: 55.7 });
+  rise(s5.wakeB, t, Q.notNoise, { stagger: 0.1, out: 55.75 });
+  $("#wakeB").style.color = rgb(C.amber);
+}
+
+/* ================= scene 6: end ================= */
+const s6 = { eyebrow: $("#eyebrow"), logo: $("#logo2"), mark: $("#mark2"), word: $("#word2"), tag: words($("#endtag")), fine: $("#endfine"), url: $("#endurl") };
+s6.letters = letters(s6.word);
+function updateS6(t) {
+  const L = Q.endLines, e = Q.end;
+  const wordW = s6.word.offsetWidth, gap = 40, groupW = 230 + gap + wordW, x0 = 960 - groupW / 2, cy = 480;
+  const mk = E.outExpo(P(t, e, e + 0.6));
+  tf(s6.mark, { x: x0, y: cy - 52, s: lerp(1.6, 1, mk), o: mk });
+  tf(s6.word, { x: x0 + 230 + gap, y: cy - 88 });
+  s6.letters.forEach((sp, i) => { const k = E.outExpo(P(t, e + 0.15 + i * 0.045, e + 0.8 + i * 0.045)); tf(sp, { x: (1 - k) * -70, o: k, blur: (1 - k) * 14 }); });
+  const f = P(t, Q.fade, Q.fade + 1.1);
+  s6.logo.style.opacity = 1;
+  [...s6.mark.children].forEach((c) => { if (c.id !== "m2C2") c.style.opacity = 1 - f; });
+  s6.word.style.opacity = 1 - f;
+  const breath = 1 + 0.12 * Math.sin(((t - Q.fade) / 2.4) * Math.PI * 2) * P(t, Q.fade, Q.fade + 0.6);
+  $("#m2C2").style.transform = `scale(${breath * (1 - E.inCubic(P(t, 63.2, 63.9)))})`;
+  tf(s6.eyebrow, { o: E.outExpo(P(t, L[0], L[0] + 0.5)) * (1 - f), y: (1 - E.outExpo(P(t, L[0], L[0] + 0.6))) * 20 });
+  rise(s6.tag, t, L[1], { stagger: 0.05, out: Q.fade });
+  tf(s6.fine, { o: E.outExpo(P(t, L[3], L[3] + 0.5)) * (1 - f), y: (1 - E.outExpo(P(t, L[3], L[3] + 0.6))) * 20 });
+  tf(s6.url, { o: E.outExpo(P(t, L[4], L[4] + 0.5)) * (1 - f), s: lerp(0.85, 1, E.outBack(P(t, L[4], L[4] + 0.5))) });
+}
+
+/* ================= background & fx ================= */
+const STARS = (() => { const R = rng(3); return Array.from({ length: 260 }, () => ({ x: R() * W, y: R() * H * 0.8, r: 0.5 + R() * 1.6, p: R() * 6 })); })();
+const BURST = (() => { const R = rng(17); return Array.from({ length: 160 }, () => { const a = R() * Math.PI * 2, v = 300 + R() * 1300; return { vx: Math.cos(a) * v, vy: Math.sin(a) * v * 0.7, r: 1 + R() * 3, c: R() < 0.7 ? C.live : R() < 0.5 ? C.fg : C.amber }; }); })();
+const STREAM = (() => {
+  const R = rng(31), items = ["gate passed · npm test", "review passed", "landed", "filed", "claimed", "rebased on main", "submitted", "worktree ready", "review: 0 findings", "gate passed · cargo test", "handoff note", "build lane 2 · done"];
+  const keys = ["NIT-4", "APP-2", "ORB-1", "HAR-3"];
+  return Array.from({ length: 90 }, () => ({ x: 60 + R() * 1800, y: R() * 1400, v: 160 + R() * 260, txt: `${keys[Math.floor(R() * 4)]}${Math.floor(R() * 90 + 10)}  ${items[Math.floor(R() * items.length)]}`, a: 0.2 + R() * 0.5 }));
+})();
+function drawBg(t) {
+  bg.globalCompositeOperation = "source-over";
+  // Night blends the base toward deep blue, dawn warms the bottom.
+  const night = P(t, 47.6, 48.4) * (1 - P(t, 55.6, 56.2));
+  const dawn = E.inOut(P(t, 51.5, 54.5)) * (1 - P(t, 55.6, 56.2));
+  const base = [lerp(13, 9, night), lerp(13, 11, night), lerp(12, 20, night)];
+  bg.fillStyle = rgb(base); bg.fillRect(0, 0, W, H);
+  bg.save(); bg.globalCompositeOperation = "lighter";
+  // Ambient light per section.
+  const amb = (x, y, r, c, a) => a > 0.003 && glow(bg, x, y, r, c, a);
+  amb(960, 460, 900, C.live, 0.07 * P(t, 0.2, 2) * (1 - P(t, 7.5, 8.2)));
+  amb(960 + 200 * nz(t * 0.7), 540, 1100, C.fail, (0.09 + 0.06 * Math.abs(nz(t * 9))) * P(t, 8, 9) * (1 - P(t, 14.4, 14.55)));
+  const dropGlow = hits(t, [Q.drop], 1.6);
+  amb(960, 470, 1200, C.fg, 0.05 * dropGlow * (t < 22 ? 1 : 0));
+  amb(960, 470, 900, C.live, 0.08 * P(t, 16, 16.4) * (1 - P(t, 21.5, 22.2)));
+  const featC = t < 42 ? C.live : C.amber;
+  amb(1330 + 120 * nz(t * 0.4, 2), 540, 1000, featC, 0.075 * P(t, 21.8, 22.6) * (1 - P(t, 47.4, 48)));
+  amb(300, 300, 800, C.codex, 0.06 * P(t, 21.8, 22.6) * (1 - P(t, 47.4, 48)));
+  amb(960, 1300, 1300, [255, 160, 80], 0.5 * dawn);
+  amb(960, 1150, 700, [255, 200, 120], 0.35 * dawn);
+  amb(960, 520, 1100, C.fg, 0.035 * hits(t, [Q.end], 1.5) * (t >= Q.end ? 1 : 0));
+  amb(960, 480, 700, C.live, 0.05 * P(t, Q.end, Q.end + 1) * (1 - P(t, Q.fade, Q.fade + 1)));
+  bg.restore();
+  // Stars.
+  if (night > 0) for (const s of STARS) {
+    const tw = 0.5 + 0.5 * Math.sin(t * 2.2 + s.p * 3);
+    disc(bg, s.x, s.y - (t - 48) * 6 * s.r, s.r, [230, 230, 255], night * (1 - dawn * 0.85) * (0.25 + 0.6 * tw));
+  }
+  drawSwarm(t);
+  // Burst at the drop.
+  const bt = t - Q.drop;
+  if (bt > 0 && bt < 2.2) {
+    bg.save(); bg.globalCompositeOperation = "lighter";
+    for (const p of BURST) {
+      const drag = (1 - Math.exp(-bt * 3)) / 3;
+      const x = 960 + p.vx * drag, y = 470 + p.vy * drag, a = Math.max(0, 1 - bt / 2.2);
+      disc(bg, x, y, p.r, p.c, a);
+    }
+    for (let i = 0; i < 3; i++) {
+      const e = P(bt, i * 0.07, 0.9 + i * 0.07); if (e <= 0 || e >= 1) continue;
+      bg.beginPath(); bg.ellipse(960, 470, 40 + E.outCubic(e) * 1100, 40 + E.outCubic(e) * 700, 0, 0, Math.PI * 2);
+      bg.strokeStyle = rgb(i === 0 ? C.fg : C.live, (1 - e) * 0.5); bg.lineWidth = 3 - i; bg.stroke();
+    }
+    bg.restore();
+  }
+  // The event stream behind the Inbox: everything the agents settled themselves.
+  const sa = P(t, 42, 42.6) * (1 - P(t, 47.3, 47.9));
+  if (sa > 0) {
+    bg.font = "500 18px GM";
+    for (const s of STREAM) {
+      const y = ((s.y - (t - 42) * s.v) % 1400 + 1400) % 1400 - 160;
+      const fadeNearInbox = s.x > 840 ? 0.3 : 0.45;
+      bg.fillStyle = rgb(C.fg3, s.a * sa * fadeNearInbox * 0.55);
+      bg.fillText(s.txt, s.x, y);
+    }
+  }
+}
+const FLASHES = [[Q.drop, 0.9, 7], [Q.end, 0.3, 7], ...Q.slams.map((s) => [s, 0.12, 8])];
+function drawFx(t, frameNo) {
+  fx.clearRect(0, 0, W, H);
+  // Flash.
+  let fl = 0; for (const [at, a, r] of FLASHES) if (t >= at) fl += a * Math.exp(-(t - at) * r);
+  if (fl > 0.003) { fx.fillStyle = `rgba(255,255,255,${Math.min(1, fl)})`; fx.fillRect(0, 0, W, H); }
+  // Glitch slices in the chaos.
+  if (t > 8 && t < 14.5) {
+    const R = rng(Math.floor(t * 30)), n = t > 13.5 ? 7 : Q.slams.some((s) => t >= s && t < s + 0.12) ? 4 : R() < 0.15 ? 1 : 0;
+    for (let i = 0; i < n; i++) {
+      const y = R() * H, hh = 4 + R() * 40;
+      fx.fillStyle = R() < 0.5 ? rgb(C.fail, 0.18) : `rgba(80,230,255,0.12)`;
+      fx.fillRect(0, y, W, hh);
+    }
+  }
+  // Vignette.
+  const v = fx.createRadialGradient(W / 2, H / 2, H * 0.35, W / 2, H / 2, H * 1.05);
+  v.addColorStop(0, "rgba(0,0,0,0)"); v.addColorStop(1, "rgba(0,0,0,0.6)");
+  fx.fillStyle = v; fx.fillRect(0, 0, W, H);
+  // Film grain.
+  fx.globalAlpha = 0.045; fx.globalCompositeOperation = "overlay";
+  const gimg = grain[frameNo % grain.length], ox = (frameNo * 137) % 512, oy = (frameNo * 311) % 512;
+  for (let x = -ox; x < W; x += 512) for (let y = -oy; y < H; y += 512) fx.drawImage(gimg, x, y);
+  fx.globalAlpha = 1; fx.globalCompositeOperation = "source-over";
+  // Fade in from and out to black.
+  const black = 1 - P(t, 0, 0.6) + P(t, 63.3, 64);
+  if (black > 0) { fx.fillStyle = `rgba(0,0,0,${clamp(black)})`; fx.fillRect(0, 0, W, H); }
+}
+
+/* ================= camera ================= */
+function camera(t) {
+  const world = $("#world");
+  let sh = 22 * hits(t, Q.slams, 9) + (t > 13.6 && t < 14.5 ? 12 : 0) + 30 * hits(t, [Q.drop], 6) + 10 * hits(t, [Q.end], 6) + 5 * hits(t, Q.merges, 12);
+  if (t < 8 || (t >= 14.5 && t < 16)) sh = 0;
+  const kick = t >= 16 && t < 48 ? 0.006 * Math.exp(-((t - 16) % 0.5) * 12) : 0;
+  const drift = 1 + 0.015 * Math.sin(t * 0.21);
+  const push = 1 + 0.06 * P(t, 8, 14.5);
+  world.style.transform = `translate(${sh * nz(t * 47, 1)}px, ${sh * nz(t * 53, 2)}px) scale(${drift * push * (1 + kick)}) rotate(${0.2 * sh * nz(t * 31, 3) / 10}deg)`;
+}
+
+/* ================= driver ================= */
+const SCENES = [
+  ["#s1", 0, 8.1, updateS1], ["#s2", 8, 14.5, updateS2], ["#s2b", 14.5, 16.0, updateS2b], ["#s3", 16, 22.05, updateS3],
+  ["#s4", 21.9, 48.05, (t) => { updateF1(t); updateF2(t); updateF3(t); updateF4(t); updateF5(t); updateF6(t); }],
+  ["#s5", 47.9, 56.05, updateS5], ["#s6", 56, 64.1, updateS6],
+].map(([sel, a, b, fn]) => ({ el: $(sel), a, b, fn }));
+window.seek = function (t, frameNo = Math.round(t * 60)) {
+  for (const s of SCENES) {
+    const on = t >= s.a && t < s.b;
+    s.el.style.display = on ? "block" : "none";
+    if (on) s.fn(t);
+  }
+  camera(t); drawBg(t); drawFx(t, frameNo);
+  return true;
+};
+window.ready = document.fonts.ready.then(() => { seek(0); return true; });
+const q = new URLSearchParams(location.search);
+if (q.has("t")) window.ready.then(() => seek(parseFloat(q.get("t"))));
+if (q.has("play")) window.ready.then(() => { const t0 = performance.now(); const loop = () => { seek(((performance.now() - t0) / 1000) % Q.duration); requestAnimationFrame(loop); }; loop(); });
+</script>
+</body>
+</html>
