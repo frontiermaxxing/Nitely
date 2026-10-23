@@ -96,7 +96,7 @@ impl Db {
     pub fn ask_to_decide_findings(&mut self, key: &str, why: &str, actor: &Actor) -> Result<String> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         let review = self.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{} has no review", issue.key))?;
-        let open: Vec<Ask> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).collect();
+        let open: Vec<Ask> = self.all_open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).collect();
         let question = format!("The review rounds are not converging ({why}). Accept this finding as it is if it is a trade-off you decided; send it back and it stays a defect to fix.");
         for f in self.unaccepted_blockers(&issue.key, &review)? {
             // One request per finding; one already open for it stands.
@@ -302,7 +302,7 @@ impl Db {
 
     /// `key`'s open requests to accept a finding.
     fn open_finding_requests(&self, key: &str) -> Result<Vec<Ask>> {
-        Ok(self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key)) && a.finding.is_some()).collect())
+        Ok(self.all_open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key)) && a.finding.is_some()).collect())
     }
 
     /// The open request to accept `finding` of `key`, the newest when there are several.
@@ -352,7 +352,7 @@ impl Db {
         }
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         // Findings the person is still deciding stay with the agent, who goes on fixing (NIT-568).
-        let asked: Vec<String> = self.open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key))).filter_map(|a| a.finding.map(|f| f.text)).collect();
+        let asked: Vec<String> = self.all_open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(key))).filter_map(|a| a.finding.map(|f| f.text)).collect();
         // Only the app reads the keys acceptances are checked with (macOS): an agent's land could
         // not see this one, so the change waits for an approval, and the app lands it.
         let needs_approval = review.approver == "human" || !crate::approval::agents_can_verify();

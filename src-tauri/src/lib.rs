@@ -203,6 +203,16 @@ async fn projects() -> Result<Vec<Project>, String> {
 }
 
 #[tauri::command]
+async fn archived_projects() -> Result<Vec<Project>, String> {
+    Ok(db()?.all_projects().map_err(err)?.into_iter().filter(|p| p.archived).collect())
+}
+
+#[tauri::command]
+async fn set_project_archived(key: String, archived: bool) -> Result<Project, String> {
+    db()?.set_project_archived(&key, archived, &ME).map_err(err)
+}
+
+#[tauri::command]
 async fn create_project(key: String, name: String) -> Result<Project, String> {
     db()?.create_project(&key, &name).map_err(err)
 }
@@ -1106,6 +1116,8 @@ pub fn run() {
             activity,
             sync_now,
             projects,
+            archived_projects,
+            set_project_archived,
             create_project,
             rename_project,
             rekey_project,

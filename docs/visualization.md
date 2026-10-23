@@ -737,3 +737,13 @@ and an explicit confirmation. Admission settings link to Build lanes rather than
 editor. Preview states: `?performance=idle|pressure|restart|partial|stale|empty|error#performance`.
 
 Performance incident investigation uses explicit fixed windows: selecting an episode opens up to ten minutes from its start with thirty seconds of preceding context, and adjacent-window controls reach the rest of a long incident. Local datetime inputs can open older retained periods. Fixed windows select a recorded workload observation inside that range, never the current sample as a fallback; current machine totals stay live above. Attribution truncation exposes an earlier-observations action without raising backend caps. Rolling history refreshes at most once per sixty seconds after completion, Now every five seconds, and fixed history once unless explicitly refreshed. Board versions do not restart these polls; hidden views initiate no reads and visibility restoration preserves the remaining cadence.
+
+
+### Archived projects
+
+Project Settings offers Archive project separately from permanent removal. Archiving keeps
+issues, history, goals and repository connections, but hides the project from normal navigation,
+Inbox, Overview, Activity, goals, lanes and combined Leaderboard totals. Existing issue links
+and explicit project reads keep working. Settings > Archived projects lists preserved projects
+and restores them, including when no active project remains. New task selection stops while
+archived; work already running can finish. Physical machine usage still measures actual usage.

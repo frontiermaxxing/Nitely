@@ -3823,6 +3823,8 @@ pub struct Overview {
 /// read is left out; its own views say why. It writes nothing (no lock files, no playbook copies),
 /// so the read-only live preview can show it too: a lane is busy when a request runs in it.
 pub fn overview(config: &crate::Config, db: &Db) -> Result<Overview> {
+    let visible_config = db.active_project_config(config)?;
+    let config = &visible_config;
     let mut projects = Vec::new();
     for repo in &config.repos {
         let Some(project) = repo.project.as_deref() else { continue };

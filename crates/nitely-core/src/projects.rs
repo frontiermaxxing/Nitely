@@ -212,6 +212,36 @@ fn follow(mut config: crate::Config, from: &str, to: Option<&str>) -> (usize, us
 }
 
 impl Db {
+    /// Archive is reversible visibility and scheduling state, never removal of project data.
+    pub fn set_project_archived(&self, key: &str, archived: bool, actor: &crate::issues::Actor) -> Result<crate::issues::Project> {
+        if *actor != crate::issues::Actor::Human { bail!("only a human can archive or restore a project"); }
+        let project = self.project(key)?.with_context(|| format!("no project {key}"))?;
+        self.conn.execute("UPDATE project SET archived = ?2 WHERE key = ?1", params![project.key, archived])?;
+        self.project(&project.key)?.context("project vanished after archive change")
+    }
+
+    /// Includes earlier keys so cached config and session attribution follow an archived project.
+    pub fn archived_project_keys(&self) -> Result<std::collections::HashSet<String>> {
+        let mut stmt = self.conn.prepare("SELECT key FROM project WHERE archived = 1")?;
+        let mut keys: std::collections::HashSet<String> = stmt.query_map([], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<Vec<_>>>()?.into_iter().map(|k| k.to_uppercase()).collect();
+        for (old, current) in self.project_aliases()? {
+            if keys.contains(&current.to_uppercase()) { keys.insert(old.to_uppercase()); }
+        }
+        Ok(keys)
+    }
+
+    pub fn project_archived(&self, key: &str) -> Result<bool> {
+        Ok(self.archived_project_keys()?.contains(&key.trim().to_uppercase()))
+    }
+
+    /// For cross-project displays only; never save this filtered config over the real one.
+    pub fn active_project_config(&self, config: &crate::Config) -> Result<crate::Config> {
+        let archived = self.archived_project_keys()?;
+        let mut visible = config.clone();
+        visible.repos.retain(|r| !r.project.as_deref().is_some_and(|p| archived.contains(&p.to_uppercase())));
+        Ok(visible)
+    }
+
     /// Old project keys and the project each now belongs to.
     pub fn project_aliases(&self) -> Result<HashMap<String, String>> {
         let mut stmt = match self.conn.prepare("SELECT old_key, project FROM project_alias") {
@@ -435,6 +465,39 @@ mod tests {
             ..Default::default()
         };
         db.create_issue(&new, &Actor::Human).unwrap().key
+    }
+
+    #[test]
+    fn archive_hides_default_reads_and_new_work_but_preserves_links_and_restores() {
+        let mut db = db();
+        db.create_project("APP", "Example").unwrap();
+        db.create_project("KEEP", "Current").unwrap();
+        let first = issue(&mut db, "APP", "First", vec![]);
+        let second = issue(&mut db, "APP", "Second", vec![first.clone()]);
+        let other = issue(&mut db, "KEEP", "Current work", vec![]);
+        let ask = db.create_ask("Which behavior?", &[], Some(&first), None, &Actor::Agent("codex:a".into())).unwrap();
+        let event_count: i64 = db.conn.query_row("SELECT count(*) FROM event", [], |r| r.get(0)).unwrap();
+        assert!(db.set_project_archived("APP", true, &Actor::Agent("codex:a".into())).is_err());
+        db.set_project_archived("app", true, &Actor::Human).unwrap();
+        assert_eq!(db.projects().unwrap().iter().map(|p| p.key.as_str()).collect::<Vec<_>>(), ["KEEP"]);
+        assert_eq!(db.issues().unwrap().iter().map(|i| i.key.as_str()).collect::<Vec<_>>(), [other.as_str()]);
+        assert_eq!(db.list_issues(Some("APP"), true).unwrap().len(), 2);
+        assert!(db.open_asks().unwrap().is_empty());
+        assert_eq!(db.all_open_asks().unwrap().len(), 1, "hidden asks still guard in-flight review and acceptance");
+        assert_eq!(db.ask(ask.id).unwrap().unwrap().question, "Which behavior?");
+        assert_eq!(db.issue(&second).unwrap().unwrap().blocked_by, [first.clone()]);
+        assert!(db.next_task("APP", "codex:new").unwrap().is_none());
+        assert!(db.claim_for_start(&first, "codex:new", &[], false).is_err());
+        assert_eq!(db.conn.query_row("SELECT count(*) FROM event", [], |r| r.get::<_, i64>(0)).unwrap(), event_count);
+        db.rekey_project("APP", "OLD").unwrap();
+        assert!(db.project("APP").unwrap().unwrap().archived);
+        assert!(db.archived_project_keys().unwrap().contains("APP"));
+        assert_eq!(db.issue(&first).unwrap().unwrap().key, "OLD-1");
+        db.set_project_archived("APP", false, &Actor::Human).unwrap();
+        assert_eq!(db.projects().unwrap().len(), 2);
+        assert_eq!(db.issues().unwrap().len(), 3);
+        assert_eq!(db.open_asks().unwrap().len(), 1);
+        assert!(db.next_task("OLD", "codex:new").unwrap().is_some());
     }
 
     #[test]

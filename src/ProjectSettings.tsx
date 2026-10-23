@@ -145,6 +145,13 @@ export function ProjectSettings(props: {
 
       <MirrorSettings projectKey={project.key} />
 
+      <SettingsSection title="Archive project" description="Hide this project from navigation, daily views and combined totals. Its issues, history and repository connection stay intact. New tasks stop; work already underway can finish. Restore it from Settings → Archived projects.">
+        <Button disabled={busy} onClick={() => run(
+          () => invoke<Project>("set_project_archived", { key: project.key, archived: true }),
+          () => { props.onChanged(); props.onMoved(null); },
+        )}>Archive project</Button>
+      </SettingsSection>
+
       <SettingsSection
         title="Remove project"
         description={

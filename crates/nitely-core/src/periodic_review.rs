@@ -282,6 +282,7 @@ pub fn retry(db: &Db, project: &str, repo: &str, id: i64) -> Result<()> {
     Ok(())
 }
 fn tick(db: &mut Db, root: &Path, project: &str, branch: &str) -> Result<bool> {
+    if db.project_archived(project)? { return Ok(false); }
     let Some(policy) = rules(db, project)? else {
         return Ok(false);
     };
@@ -866,6 +867,22 @@ mod tests {
             // The database is outside the disposable Git checkout and may still be open here.
             std::fs::remove_dir_all(&self.root).ok();
         }
+    }
+
+    #[test]
+    fn archived_project_pauses_background_work_and_resumes_periodic_review() {
+        let mut f = Fixture::new(1);
+        let (_, head) = f.land("Ready for periodic review");
+        f.db.set_project_archived("APP", true, &Actor::Human).unwrap();
+        let config = Config { repos: vec![crate::RepoConfig { name: "Example".into(), root: f.root.to_string_lossy().into(), project: Some("APP".into()), integration_branch: "main".into() }], ..Default::default() };
+        tick_all(&mut f.db, &config).unwrap();
+        crate::quick_review::tick_all(&mut f.db, &config).unwrap();
+        crate::verification_backstop::tick_all(&mut f.db, &config).unwrap();
+        assert!(f.status().jobs.is_empty());
+        assert_eq!(f.status().pending_landings, 1);
+        f.db.set_project_archived("APP", false, &Actor::Human).unwrap();
+        assert!(tick(&mut f.db, &f.root, "APP", "main").unwrap());
+        assert_eq!(f.status().cursor.as_deref(), Some(head.as_str()));
     }
 
     #[test]

@@ -237,6 +237,7 @@ fn tick_all_inner(db:&mut Db,config:&Config,force:bool)->Result<()> {
     let mut errors=Vec::new();
     for repo in &config.repos {
         if let Some(project)=&repo.project {
+            if db.project_archived(project)? { continue; }
             if let Err(e)=tick_inner(db,config,Path::new(&repo.root),project,&repo.integration_branch,force) { errors.push(format!("{}: {e:#}",repo.name)); }
             if let Err(e)=run_audit(db,Path::new(&repo.root),project,&repo.integration_branch) { errors.push(format!("{} audit: {e:#}",repo.name)); }
         }
