@@ -1,5 +1,25 @@
 /* The Overview, the home view (src/Pulse.tsx). Tokens: src/styles/tokens.css. */
 
+.pulse.page { max-width: none; container-type: inline-size; }
+.pulse-layout > * { min-width: 0; }
+.lanes-project-title { display: none; }
+/* The activity stays first in reading order; only roomy views get the build sidebar. */
+@container (min-width: 1320px) {
+  .pulse-layout { display: grid; grid-template-columns: minmax(0, 1fr) minmax(320px, 25%); grid-template-areas: "now builds" "work builds" "goals goals"; column-gap: 28px; align-items: start; }
+  .pulse-now { grid-area: now; }
+  .pulse-builds { grid-area: builds; }
+  .pulse-work { grid-area: work; }
+  .pulse-goals { grid-area: goals; }
+  .pulse-builds .lanes-strip h2 { margin-top: 8px; flex-wrap: wrap; }
+  .pulse-builds .lanes-strip h2 .head-note { flex-basis: 100%; }
+  .pulse-builds .lanes-project { padding: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); }
+  .pulse-builds .lanes-project-title { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; width: 100%; margin: 0 0 4px; font-size: var(--text-md); overflow-wrap: anywhere; }
+  .pulse-builds .lane-chip { width: 100%; border-radius: 8px; display: grid; grid-template-columns: 8px minmax(0, 1fr) auto; }
+  .pulse-builds .lane-words { grid-row: 2; grid-column: 2 / -1; white-space: normal; overflow-wrap: anywhere; }
+  .pulse-builds .remote-run, .pulse-builds .remote-runs { width: 100%; }
+  .pulse-builds .remote-details-toggle { grid-row: 1; grid-column: 3; }
+}
+
 .pulse-since { margin-left: auto; font-size: var(--text-sm); }
 
 /* ----- the glance: four answers before any detail, in one strip ----- */
