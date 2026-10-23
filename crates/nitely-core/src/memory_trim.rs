@@ -25,9 +25,12 @@ pub const WAIT_BEFORE: i64 = 120;
 pub const EVERY: i64 = 600;
 /// No input for this long, and the person is away.
 pub const AWAY_AFTER: u64 = 600;
-/// A process is idle when it used under this share of one core over `IDLE_WINDOW`.
+/// A process is idle when it used under this share of one core over `IDLE_WINDOW`, or over the
+/// whole wait while that is shorter, but never less than `WAIT_BEFORE`.
 pub const IDLE_CPU: f64 = 0.01;
 pub const IDLE_WINDOW: i64 = 300;
+/// How often the processes are sampled while a run waits for memory.
+pub const SAMPLE_EVERY: i64 = 60;
 
 /// When the person lets Nitely trim (Settings, This machine).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -74,7 +77,14 @@ pub fn due(mode: Mode, available: bool, harness: bool, waited: i64, since_last: 
 /// Whether a process that used `cpu_100ns` more processor time over `elapsed` seconds is idle: the
 /// window is long enough and it stayed under `IDLE_CPU` of one core.
 pub fn idle(cpu_100ns: u64, elapsed: i64) -> bool {
-    elapsed >= IDLE_WINDOW && (cpu_100ns as f64) < IDLE_CPU * (elapsed as f64) * 10_000_000.0
+    elapsed >= WAIT_BEFORE && (cpu_100ns as f64) < IDLE_CPU * (elapsed as f64) * 10_000_000.0
+}
+
+/// Which sample, of those taken `ages` seconds ago (oldest first), measures idleness now: the
+/// newest at least `IDLE_WINDOW` old, so the window is the last five minutes and not much more, or
+/// while the wait is younger, the oldest, once it is `WAIT_BEFORE` old (NIT-657 review).
+pub fn baseline(ages: &[i64]) -> Option<usize> {
+    ages.iter().rposition(|a| *a >= IDLE_WINDOW).or_else(|| ages.first().filter(|a| **a >= WAIT_BEFORE).map(|_| 0))
 }
 
 /// A process as the last sample saw it: identity (pid and creation time) and processor time.
@@ -85,14 +95,15 @@ pub struct Sample {
     pub cpu_100ns: u64,
 }
 
-/// The processes to trim: in both samples with the same identity, idle between them, and neither
-/// the foreground window's process nor one of `own`.
-pub fn candidates(before: &[Sample], now: &[Sample], elapsed: i64, foreground: Option<u32>, own: &[u32]) -> Vec<u32> {
+/// The processes to trim, by identity (pid and creation time, which `os::trim` checks again before
+/// it touches one): in both samples, idle between them, and neither the foreground window's
+/// process nor one of `own`.
+pub fn candidates(before: &[Sample], now: &[Sample], elapsed: i64, foreground: Option<u32>, own: &[u32]) -> Vec<(u32, String)> {
     let earlier: HashMap<(u32, &str), u64> = before.iter().map(|s| ((s.pid, s.started.as_str()), s.cpu_100ns)).collect();
     now.iter()
         .filter(|s| Some(s.pid) != foreground && !own.contains(&s.pid) && s.pid > 4)
         .filter(|s| earlier.get(&(s.pid, s.started.as_str())).is_some_and(|b| idle(s.cpu_100ns.saturating_sub(*b), elapsed)))
-        .map(|s| s.pid)
+        .map(|s| (s.pid, s.started.clone()))
         .collect()
 }
 
@@ -116,8 +127,8 @@ pub fn note(t: &Trim) -> Option<String> {
 struct State {
     /// When each run began waiting for memory, as this process saw it.
     waiting_since: HashMap<i64, i64>,
-    /// The processes at the start of the idle window, and when.
-    sample: Option<(i64, Vec<Sample>)>,
+    /// The processes as sampled every `SAMPLE_EVERY` while a run waits, and when, oldest first.
+    samples: Vec<(i64, Vec<Sample>)>,
 }
 
 /// This process's bookkeeping only. The time between trims is the machine's, in `LAST` (`claim`),
@@ -182,15 +193,19 @@ pub fn while_waiting(db: &Db, id: i64, why: String) -> String {
     let since = *state.waiting_since.entry(id).or_insert(now);
     // Sampling opens every process, so only where a trim could follow.
     if setting.available && !harness() && setting.mode != Mode::Off {
-        let fresh = state.sample.as_ref().is_none_or(|(at, _)| now - at >= 2 * IDLE_WINDOW);
-        if fresh {
-            state.sample = Some((now, os::samples()));
+        // Samples of a wait that ended (none taken lately) say nothing about this one.
+        if state.samples.last().is_some_and(|(at, _)| now - at > 3 * SAMPLE_EVERY) {
+            state.samples.clear();
         }
-        let elapsed = state.sample.as_ref().map_or(0, |(at, _)| now - at);
+        if state.samples.last().is_none_or(|(at, _)| now - at >= SAMPLE_EVERY) {
+            state.samples.push((now, os::samples()));
+        }
+        state.samples.retain(|(at, _)| now - at <= IDLE_WINDOW + SAMPLE_EVERY);
+        let ages: Vec<i64> = state.samples.iter().map(|(at, _)| now - at).collect();
         let since_last = last_trim(&dir).map(|(at, _)| now - at);
-        if elapsed >= IDLE_WINDOW && due(setting.mode, true, false, now - since, since_last, os::away()) && claim(&dir, now) {
-            let before = state.sample.take().map(|(_, s)| s).unwrap_or_default();
-            let pids = candidates(&before, &os::samples(), elapsed, os::foreground(), &[std::process::id()]);
+        // The claim last: it takes the machine's turn, so only once this process will trim.
+        if let Some(i) = baseline(&ages).filter(|_| due(setting.mode, true, false, now - since, since_last, os::away()) && claim(&dir, now)) {
+            let pids = candidates(&state.samples[i].1, &os::samples(), ages[i], os::foreground(), &[std::process::id()]);
             if let Some(trim) = os::trim(&pids) {
                 crate::performance_events::lane_trim(db, id, trim);
                 if let Some(said) = note(&trim) {
@@ -227,6 +242,7 @@ mod os {
         fn K32EmptyWorkingSet(process: Handle) -> i32;
         fn ProcessIdToSessionId(process_id: u32, session: *mut u32) -> i32;
         fn GetTickCount() -> u32;
+        fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
     }
     #[link(name = "user32")]
     extern "system" {
@@ -269,7 +285,7 @@ mod os {
 
     /// Empties the working sets of `pids` in this session that let this user do so, and says how
     /// many and what memory was available before and after. None when it could trim none.
-    pub fn trim(pids: &[u32]) -> Option<Trim> {
+    pub fn trim(pids: &[(u32, String)]) -> Option<Trim> {
         let mut session = 0;
         // SAFETY: writes this process's session id.
         if unsafe { ProcessIdToSessionId(std::process::id(), &mut session) } == 0 {
@@ -277,7 +293,8 @@ mod os {
         }
         let before = crate::machine::memory()?.available;
         let mut trimmed = 0;
-        for &pid in pids {
+        for (pid, started) in pids {
+            let pid = *pid;
             let mut theirs = u32::MAX;
             if unsafe { ProcessIdToSessionId(pid, &mut theirs) } == 0 || theirs != session {
                 continue;
@@ -285,6 +302,14 @@ mod os {
             // An elevated, protected or other user's process refuses this access: it is skipped.
             let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SET_QUOTA, 0, pid) };
             if handle.is_null() {
+                continue;
+            }
+            // The same process the samples saw: a pid reused since is another program (NIT-657 review).
+            let (mut creation, mut exit, mut kernel, mut user) = (0, 0, 0, 0);
+            // SAFETY: an open process handle and four out parameters.
+            let same = unsafe { GetProcessTimes(handle, &mut creation, &mut exit, &mut kernel, &mut user) } != 0 && exit == 0 && creation.to_string() == *started;
+            if !same {
+                unsafe { CloseHandle(handle) };
                 continue;
             }
             // SAFETY: a handle opened with the access EmptyWorkingSet needs, closed right after.
@@ -310,7 +335,7 @@ mod os {
     pub fn away() -> bool {
         false
     }
-    pub fn trim(_: &[u32]) -> Option<Trim> {
+    pub fn trim(_: &[(u32, String)]) -> Option<Trim> {
         None
     }
 }
@@ -336,8 +361,13 @@ mod tests {
         // Over five minutes: 10 used 1 s (0.3%), 11 used 10 s (3%), 12 is the foreground, 13 is
         // Nitely, 14 was restarted under the same pid, 15 is new.
         let now = [s(10, 10_000_000), s(11, 100_000_000), s(12, 0), s(13, 0), Sample { pid: 14, started: "2".into(), cpu_100ns: 0 }, s(15, 0)];
-        assert_eq!(candidates(&before, &now, IDLE_WINDOW, Some(12), &[13]), [10]);
-        assert!(candidates(&before, &now, IDLE_WINDOW - 1, None, &[]).is_empty(), "the window is too short to tell");
+        assert_eq!(candidates(&before, &now, IDLE_WINDOW, Some(12), &[13]), [(10, "1".to_string())]);
+        assert!(candidates(&before, &now, WAIT_BEFORE - 1, None, &[]).is_empty(), "the window is too short to tell");
+        // Which sample measures: the newest at least five minutes old, else the whole wait once it
+        // is two minutes long, so a fresh run is helped after two minutes and the window stays short.
+        assert_eq!(baseline(&[60]), None);
+        assert_eq!(baseline(&[WAIT_BEFORE, 60]), Some(0), "two minutes into the wait");
+        assert_eq!(baseline(&[360, 300, 240, 180]), Some(1), "the last five minutes, not six");
 
         let gb = crate::machine::GIB;
         assert_eq!(note(&Trim { processes: 12, available_before: 18 * gb, available_after: 21 * gb }).as_deref(), Some("Nitely emptied the working memory of 12 idle programs, 3.0 GB freed"));
