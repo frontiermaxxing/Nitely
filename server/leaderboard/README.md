@@ -7,8 +7,10 @@ after their owners opt in, and serves the public board. It is one binary and one
   only id. Every report and delete is signed with that key. There are no accounts, emails or
   GitHub sign-ins.
 - **Counts and rates only.** It accepts a report only in the exact schema Nitely builds
-  (`crates/nitely-crew/src/leaderboard_report.rs`). Unknown fields and out-of-range numbers are
-  refused, so a report can't carry anything else.
+  (`crates/nitely-crew/src/leaderboard_report.rs`). Out-of-range numbers are refused. A field it
+  does not know is dropped, so a newer app keeps its place on an older service, and it is never
+  stored: a row is kept as the service's own schema writes it, so a report can't carry anything
+  else.
 - **No addresses.** It never reads, logs or stores the address a request came from, or any
   header a proxy adds with one (`CF-Connecting-IP`, `X-Forwarded-For`, `X-Real-IP`). The one line
   it prints is where it listens. Turn off your proxy's access logs too (below). Your proxy and any

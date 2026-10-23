@@ -457,7 +457,7 @@ async fn leaderboard_board(period: String) -> Result<serde_json::Value, String> 
 #[tauri::command]
 async fn leaderboard_delete(leave: bool) -> Result<u64, String> {
     let sharing = nitely_crew::leaderboard_send::Sharing::default_dir();
-    if leave { sharing.leave() } else { sharing.delete() }.map_err(err)
+    if leave { sharing.leave("app") } else { sharing.delete("app") }.map_err(err)
 }
 
 /// A project's tokens per day and by agent and model, and what landed, over `days` days.
@@ -588,6 +588,12 @@ async fn decline_finding(id: i64, why: String) -> Result<nitely_core::accept::De
 async fn connect_plan(path: String, key: Option<String>, name: Option<String>) -> Result<nitely_core::connect::ConnectPlan, String> {
     let config = Config::load().map_err(err)?;
     nitely_core::connect::plan(&db()?, &config, &path, key.as_deref(), name.as_deref()).map_err(err)
+}
+
+/// Makes a folder that is in no repo a git repo on main, so Add a project can go on (NIT-652).
+#[tauri::command]
+async fn connect_init(path: String) -> Result<String, String> {
+    nitely_core::connect::init_repo(&path).map_err(err)
 }
 
 /// Adds the repo. The plan is recomputed here rather than taken from the page, so what is written
@@ -1159,6 +1165,7 @@ pub fn run() {
             accept_finding,
             decline_finding,
             connect_plan,
+            connect_init,
             connect_apply,
             agent_setup,
             agent_setup_apply,
