@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 const SEMVER = /^\d+\.\d+\.\d+(-[0-9A-Za-z.-]+)?$/;
-const CRATES = ["nitely-app", "nitely-cli", "nitely-core"];
+const CRATES = ["nitely-app", "nitely-cli", "nitely-core", "nitely-crew", "nitely-leaderboard"];
 
 /** Each file's version, read with the same patterns `set` writes. */
 export function read(root = ".") {

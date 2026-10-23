@@ -207,10 +207,9 @@ export function Inbox(props: {
       <div className="page inbox">
         <div className="page-head">
           <h1>Inbox</h1>
-          <NotifyLink onOpen={props.onNotifySettings} />
+          <NotifyLink onOpen={props.onNotifySettings} notices={board.notices ?? []} now={now} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
         </div>
         <EmptyState title="Nothing needs you.">Agents show up here when they ask something, wait on your approval, or get stuck.</EmptyState>
-        <Notices notices={board.notices ?? []} now={now} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
         <AtWork board={board} now={now} onOpenIssue={props.onOpenIssue} />
       </div>
     );
@@ -251,13 +250,12 @@ export function Inbox(props: {
                 <Ticker value={waiting.length} /> need{waiting.length === 1 ? "s" : ""} you
               </span>
             )}
-            <NotifyLink onOpen={props.onNotifySettings} />
+            <NotifyLink onOpen={props.onNotifySettings} notices={board.notices ?? []} now={now} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
           </div>
           <p className="inbox-sub">Only decisions an agent cannot make.{oldest !== null && ` Oldest ${ago(now, oldest).replace(" ago", "")}.`}</p>
           {(counts.length > 1 || filter) && (
             <ProjectFilter counts={counts} total={allWaiting.length} project={filter} projects={props.projects} onProject={props.onProject} />
           )}
-          <Notices notices={board.notices ?? []} now={now} onOpenIssue={props.onOpenIssue} onChanged={props.onChanged} />
         </div>
         {groups.map((g) => (
           <div key={g.kind} className="inbox-group">
@@ -423,12 +421,31 @@ function without<V>(m: Map<string, V>, id: string): Map<string, V> {
   return n;
 }
 
-/** Opens the notification settings (Settings, Notifications), from the Inbox's head. */
-function NotifyLink(props: { onOpen: () => void }) {
+/** Informational updates are available on demand, separate from the decision queue. */
+function NotifyLink(props: { onOpen: () => void; notices: Notice[]; now: number; onOpenIssue: (key: string) => void; onChanged: () => void }) {
+  const panel = useRef<HTMLDetailsElement>(null);
+  useEffect(() => {
+    const outside = (e: PointerEvent) => {
+      if (panel.current?.open && e.target instanceof Node && !panel.current.contains(e.target)) panel.current.open = false;
+    };
+    document.addEventListener("pointerdown", outside);
+    return () => document.removeEventListener("pointerdown", outside);
+  }, []);
   return (
-    <button className="link inbox-notify-link" onClick={props.onOpen}>
-      Notifications
-    </button>
+    <details ref={panel} className="inbox-notifications" onKeyDown={(e) => {
+      if (e.key === "Escape" && panel.current?.open) {
+        e.stopPropagation();
+        panel.current.open = false;
+        panel.current.querySelector("summary")?.focus();
+      }
+    }}>
+      <summary className="inbox-notify-link">Notifications</summary>
+      <div className="inbox-notifications-panel">
+        {props.notices.length === 0 && <p className="muted small">No informational updates.</p>}
+        <Notices {...props} />
+        <button className="link small" onClick={props.onOpen}>Notification settings</button>
+      </div>
+    </details>
   );
 }
 
