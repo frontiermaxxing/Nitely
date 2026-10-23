@@ -1690,7 +1690,8 @@ fn read_memory() -> Option<machine::Memory> {
 #[cfg(test)]
 fn memory_limits() -> Option<machine::Limits> {
     let floor = tests::FAKE_FLOOR.with(|f| f.get()).map(|gb| (gb, "settings"));
-    tests::FAKE_MEMORY.with(|f| f.borrow().is_some()).then(|| machine::limits_for(64 * machine::GIB, floor, None))
+    // The tests' numbers were set with the 12.8 GB floor 64 GB had before NIT-656.
+    tests::FAKE_MEMORY.with(|f| f.borrow().is_some()).then(|| machine::limits_for(64 * machine::GIB, floor.or(Some((12.8, "settings"))), None))
 }
 
 /// A machine slot's lock: an OS file lock beside the database, so a process that dies frees it.
@@ -1733,17 +1734,51 @@ fn run_cap() -> Option<u64> {
 fn caps_fit(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32) -> Result<Option<String>> {
     let Some(limits) = limits.filter(|l| l.floor > 0) else { return Ok(None) };
     let mine = sizing_of(db, id, cap_for(limits, slots))?.reserve;
-    // The running runs, and the queued ones that reserved (admitted, about to start).
+    Ok(reservations_fit(limits, &set_aside(db, id)?, mine))
+}
+
+/// What the machine's other runs have set aside (None: unrecorded): the running runs, and the
+/// queued ones that reserved (admitted, about to start), whose requesters still run.
+fn set_aside(db: &Db, id: i64) -> Result<Vec<Option<u64>>> {
     let mut stmt = db.conn.prepare(
         "SELECT COALESCE(memory_reserved, memory_cap), pid, pid_started FROM lane_run WHERE id != ?1 AND executor IN ('local', 'worktree') AND (state = 'running' OR (state = 'queued' AND memory_cap IS NOT NULL))",
     )?;
     let rows: Vec<(Option<i64>, Option<i64>, Option<String>)> = stmt.query_map([id], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
-    let set_aside: Vec<Option<u64>> = rows
+    Ok(rows
         .into_iter()
         .filter(|(_, pid, started)| pid.is_none_or(|p| p as u32 == std::process::id() || requester_alive(p as u32, started.as_deref())))
         .map(|(cap, _, _)| cap.map(|c| c.max(0) as u64))
-        .collect();
-    Ok(reservations_fit(limits, &set_aside, mine))
+        .collect())
+}
+
+/// Tells the updates feed about request `id`'s long wait for memory (NIT-656), so it is never
+/// silent: once while it still waits, with what it needs and what is free, and once when it starts
+/// on what is free. Its issue's agent and the person's feed hear it.
+fn tell_long_wait(db: &Db, id: i64, held: machine::Held, why: Option<&str>, free: Option<machine::Memory>) -> Result<()> {
+    let Some(run) = db.lane_run(id)? else { return Ok(()) };
+    let label = match &run.issue {
+        Some(k) => format!("run {id} ({k} {})", run.kind),
+        None => format!("run {id} ({})", run.kind),
+    };
+    let summary = match why {
+        Some(why) => {
+            let told: bool = db.conn.query_row("SELECT EXISTS(SELECT 1 FROM event WHERE type = 'memory_wait' AND summary LIKE ?1)", [format!("{label} is %")], |r| r.get(0))?;
+            if told {
+                return Ok(());
+            }
+            format!("{label} is {why}")
+        }
+        None => format!(
+            "{label} started after {} min waiting for memory with nothing of Nitely's running, on the {} free",
+            held.waited.as_secs() / 60,
+            free.map(|m| machine::gb(m.available)).unwrap_or_else(|| "memory".into())
+        ),
+    };
+    db.conn.execute(
+        "INSERT INTO event (ts, actor, issue_key, type, summary, payload) VALUES (?1, 'nitely', ?2, 'memory_wait', ?3, json_object('project', ?4))",
+        params![crate::db::now(), run.issue, summary, run.project],
+    )?;
+    Ok(())
 }
 
 /// Why a run that needs `mine` set aside must wait for what the live runs have set aside
@@ -1792,6 +1827,15 @@ fn admit_run(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32, qui
         Some(l) => sizing_of(db, id, cap_for(l, slots))?,
         None => Sizing { light: false, reserve: 0, need: 0 },
     };
+    // How long it has waited, and whether anything of Nitely's holds memory now: past ten minutes
+    // with nothing, its own need decides (`machine::decide`, NIT-656).
+    let queued_at: i64 = db.conn.query_row("SELECT queued_at FROM lane_run WHERE id = ?1", [id], |r| r.get(0))?;
+    let held = machine::Held { waited: Duration::from_secs((crate::db::now() - queued_at).max(0) as u64), nitely_running: !set_aside(db, id)?.is_empty() };
+    let mut seen = None;
+    let mut read = || {
+        seen = memory();
+        seen
+    };
     // A light job (NIT-454) goes by the memory free now alone, like the quick slot, and skips the
     // ramp wait: what it takes is small and known. Heavy builds keep every rule.
     let why = machine::admit_once_with(
@@ -1799,10 +1843,15 @@ fn admit_run(db: &Db, id: i64, limits: Option<&machine::Limits>, slots: u32, qui
         limits,
         sizing.need,
         !sizing.light,
-        memory,
+        held,
+        &mut read,
         &mut || if quick_slot || sizing.light { Ok(None) } else { caps_fit(db, id, limits, slots) },
         &mut || reserve_cap(db, id, limits, slots),
     )?;
+    let was_waiting: bool = db.conn.query_row("SELECT waiting_memory IS NOT NULL FROM lane_run WHERE id = ?1", [id], |r| r.get(0))?;
+    if held.long() && (why.is_some() || was_waiting) {
+        tell_long_wait(db, id, held, why.as_deref(), seen)?;
+    }
     Ok(why.map(|why| format!("{why} ({})", if sizing.light { "light job" } else { "heavy build" })))
 }
 
@@ -4032,7 +4081,7 @@ mod tests {
     fn a_run_waits_only_when_what_is_set_aside_and_its_own_need_pass_the_floor() {
         let gb = machine::GIB;
         // 64 GB, a 12.8 GB floor: 51.2 GB of room, a 16 GB cap.
-        let l = machine::limits_for(64 * gb, None, None);
+        let l = machine::limits_for(64 * gb, Some((12.8, "settings")), None);
         assert_eq!(reservations_fit(&l, &[], 40 * gb), None);
         assert_eq!(reservations_fit(&l, &[Some(10 * gb), Some(20 * gb)], 21 * gb), None, "51 of 51.2 fits");
         let why = reservations_fit(&l, &[Some(10 * gb), Some(20 * gb)], 22 * gb).unwrap();
@@ -4712,7 +4761,8 @@ let id = db.conn.last_insert_rowid();
 
     #[test]
     fn the_budget_comes_from_cores_and_memory_unless_set() {
-        let gb = |n: u64| machine::limits_for(n * machine::GIB, None, None);
+        // The floor 20% of memory or 8 GB, at most half, as before NIT-656, which these numbers use.
+        let gb = |n: u64| machine::limits_for(n * machine::GIB, Some(((n as f64 / 5.0).max(8.0).min(n as f64 / 2.0), "settings")), None);
         // 32 threads and 64 GB: 5 slots of 6 jobs (30 of 32 cores), 6 by the memory above the floor.
         let b = budget_for(32, Some(&gb(64)), None);
         assert_eq!((b.slots, b.jobs, b.from.as_str(), b.memory_gb), (5, 6, "machine", Some(64)));
@@ -4737,7 +4787,7 @@ let id = db.conn.last_insert_rowid();
     /// get 10.2 GB each rather than 16.
     #[test]
     fn a_runs_cap_fits_the_slots_above_the_floor() {
-        let l = machine::limits_for(64 * machine::GIB, None, None);
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None);
         assert_eq!(cap_for(&l, 5), (64 * machine::GIB - l.floor) / 5);
         assert_eq!(cap_for(&l, 3), 16 * machine::GIB, "the set cap when the slots fit");
         assert!(cap_for(&l, 1000) >= machine::GIB / 4, "never below a quarter GB");
@@ -4763,7 +4813,7 @@ let id = db.conn.last_insert_rowid();
                 .unwrap();
             db.conn.last_insert_rowid()
         };
-        let l = machine::limits_for(64 * machine::GIB, None, None); // 51.2 GB above the floor
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None); // 51.2 GB above the floor
         let waiting = add("queued", None);
         assert_eq!(caps_fit(&db, waiting, Some(&l), 3).unwrap(), None, "nothing running");
         for _ in 0..3 {
@@ -4833,7 +4883,7 @@ let id = db.conn.last_insert_rowid();
         for _ in 0..5 {
             add("done", "cargo test --workspace", Some(4 * gib));
         }
-        let l = machine::limits_for(64 * machine::GIB, None, None); // 51.2 GB above the floor, 10.2 GB a slot
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None); // 51.2 GB above the floor, 10.2 GB a slot
         for _ in 0..5 {
             let id = add("queued", "cargo test --workspace", None);
             reserve_cap(&db, id, Some(&l), 5).unwrap();
@@ -4874,7 +4924,7 @@ let id = db.conn.last_insert_rowid();
                 .unwrap();
             db.conn.last_insert_rowid()
         };
-        let l = machine::limits_for(64 * machine::GIB, None, None); // 12.8 GB floor, 10.2 GB a slot
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None); // 12.8 GB floor, 10.2 GB a slot
         for n in 0..5 {
             let id = add("queued", &format!("cargo build -p new-{n}"), None);
             reserve_cap(&db, id, Some(&l), 5).unwrap();
@@ -4921,7 +4971,7 @@ let id = db.conn.last_insert_rowid();
                 .unwrap();
             db.conn.last_insert_rowid()
         };
-        let l = machine::limits_for(64 * machine::GIB, None, None); // 51.2 GB above the floor, 10.2 GB a slot
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None); // 51.2 GB above the floor, 10.2 GB a slot
         let mut running = Vec::new();
         for n in 0..5 {
             let id = add("queued", &format!("cargo test -p crate-{n}"));
@@ -5038,7 +5088,7 @@ let id = db.conn.last_insert_rowid();
                 .unwrap();
             db.conn.last_insert_rowid()
         };
-        let l = machine::limits_for(64 * machine::GIB, None, None); // 12.8 GB floor
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None); // 12.8 GB floor
         for _ in 0..3 {
             add("done", "npm test", Some(gib * 3 / 4));
             add("done", "cargo test --workspace", Some(5 * gib));
@@ -5068,6 +5118,48 @@ let id = db.conn.last_insert_rowid();
         std::fs::remove_dir_all(base).ok();
     }
 
+    /// NIT-656: a build that has waited past ten minutes with nothing of Nitely's running starts on
+    /// what is free once its own need fits, floor or not, and the updates feed hears of the wait
+    /// once while it lasts and once when it ends; a run of Nitely's that holds memory keeps it held.
+    #[test]
+    fn a_long_wait_with_nothing_running_starts_on_what_is_free_and_is_told() {
+        let base = crate::paths::unique_temp("nitely-lane-long-wait", "");
+        std::fs::create_dir_all(&base).unwrap();
+        let db = Db::open(&base.join("t.db")).unwrap();
+        let add = |state: &str, queued_at: i64| -> i64 {
+            db.conn
+                .execute(
+                    "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count)
+                     VALUES ('APP', 'C:/Code/app', 'APP-7', 'x', 'gate', 's', 't', 'b', 'cargo test -p app', ?1, 'local', ?2, ?3, 3, 3)",
+                    params![state, queued_at, std::process::id() as i64],
+                )
+                .unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None);
+        let free = |gb: u64| move || Some(machine::Memory { total: 64 * machine::GIB, available: gb * machine::GIB });
+        let told = || -> Vec<String> { db.conn.prepare("SELECT summary FROM event WHERE type = 'memory_wait' ORDER BY id").unwrap().query_map([], |r| r.get(0)).unwrap().map(Result::unwrap).collect() };
+        let id = add("queued", crate::db::now() - 11 * 60);
+        // A running build of Nitely's: the floor holds, and nothing is told.
+        let other = add("running", crate::db::now());
+        assert!(admit_run(&db, id, Some(&l), 5, false, &mut free(12)).unwrap().is_some());
+        assert!(told().is_empty());
+        db.conn.execute("UPDATE lane_run SET state = 'done' WHERE id = ?1", [other]).unwrap();
+        // Nothing running, 1 GB free: under its 2 GB need (the least a run sets aside). Said once.
+        for _ in 0..2 {
+            let why = admit_run(&db, id, Some(&l), 5, false, &mut free(1)).unwrap().unwrap();
+            assert!(why.starts_with("waiting for memory for 11 min with nothing of Nitely's running: needs 2.0 GB free, 1.0 GB free"), "{why}");
+            db.conn.execute("UPDATE lane_run SET waiting_memory = ?2 WHERE id = ?1", params![id, why]).unwrap();
+        }
+        assert_eq!(told().len(), 1, "{:?}", told());
+        // 12 GB free, under the 12.8 GB floor: it starts, and that is told too.
+        assert_eq!(admit_run(&db, id, Some(&l), 5, false, &mut free(12)).unwrap(), None);
+        let told = told();
+        assert_eq!(told.len(), 2, "{told:?}");
+        assert!(told[1].starts_with("run ") && told[1].contains("(APP-7 gate) started after 11 min") && told[1].ends_with("on the 12.0 GB free"), "{told:?}");
+        std::fs::remove_dir_all(base).ok();
+    }
+
     #[test]
     fn a_new_command_starts_on_a_machine_short_of_a_whole_cap() {
         let base = crate::paths::unique_temp("nitely-lane-new-command", "");
@@ -5076,12 +5168,12 @@ let id = db.conn.last_insert_rowid();
         db.conn
             .execute(
                 "INSERT INTO lane_run (project, repo, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count)
-                 VALUES ('APP', 'C:/Code/app', 'x', 'run', 's', 't', 'b', 'cargo test -p app new', 'queued', 'local', 1, ?1, 3, 3)",
-                [std::process::id() as i64],
+                 VALUES ('APP', 'C:/Code/app', 'x', 'run', 's', 't', 'b', 'cargo test -p app new', 'queued', 'local', ?2, ?1, 3, 3)",
+                [std::process::id() as i64, crate::db::now()],
             )
             .unwrap();
         let id = db.conn.last_insert_rowid();
-        let l = machine::limits_for(64 * machine::GIB, None, None); // 12.8 GB floor, 10.2 GB a slot
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None); // 12.8 GB floor, 10.2 GB a slot
         let free = |gb: u64| move || Some(machine::Memory { total: 64 * machine::GIB, available: gb * machine::GIB });
         assert_eq!(admit_run(&db, id, Some(&l), 5, false, &mut free(22)).unwrap(), None, "22 GB free, under 12.8 + 10.2, nothing running");
         let run = db.lane_run(id).unwrap().unwrap();
@@ -5103,7 +5195,7 @@ let id = db.conn.last_insert_rowid();
     #[test]
     fn admission_checks_and_reserves_under_one_lock() {
         let dir = crate::paths::unique_temp("nitely-admit-with", "");
-        let l = machine::limits_for(64 * machine::GIB, None, None);
+        let l = machine::limits_for(64 * machine::GIB, Some((12.8, "settings")), None);
         let plenty = || Some(machine::Memory { total: 64 * machine::GIB, available: 50 * machine::GIB });
         let reserved = std::cell::Cell::new(0u64);
         let ask = || {
@@ -5112,6 +5204,7 @@ let id = db.conn.last_insert_rowid();
                 Some(&l),
                 0,
                 true,
+                machine::Held::default(),
                 &mut || plenty(),
                 &mut || Ok((reserved.get() + 30 * machine::GIB > 51 * machine::GIB).then(|| "no room".to_string())),
                 &mut || {
@@ -6128,7 +6221,7 @@ wanted {shown}", ran.output);
         for (executor,state,cap) in [("local","queued",None),("machine:builder","running",Some(100*machine::GIB as i64)),("ci","running",None)] {
             db.conn.execute("INSERT INTO lane_run(project,repo,requested_by,kind,snapshot,tree,base,command,state,executor,queued_at,pid,priority,lane_count,memory_cap) VALUES ('APP','C:/Code/app','x','gate','s','t','b','c',?1,?2,1,?3,2,1,?4)",params![state,executor,std::process::id(),cap]).unwrap();
         }
-        let limits=machine::limits_for(64*machine::GIB,None,None);
+        let limits=machine::limits_for(64*machine::GIB,Some((12.8,"settings")),None);
         assert_eq!(caps_fit(&db,1,Some(&limits),1).unwrap(),None);
         let (rows,_)=queue_rows(&db,Some(1),&mut |_|true).unwrap();
         assert_eq!(rows.len(),1);
