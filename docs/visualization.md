@@ -17,9 +17,9 @@ product.
 
 ## Principles
 
-Issue opens use the full reading surface, including in a separate window. The title and track
-lead into compact expandable facts, the Markdown body and evidence, then the actions. History
-stays expanded in a right column with its own scroll; below 900px it follows the content in one
+Issue opens use a centered, inset modal surface with a top-right close control, including in a
+separate window. The title and track lead into the Markdown body and evidence, then the actions.
+Expanded details sit above history in a right column with its own scroll; below 900px it follows the content in one
 scrolling column. The shared Markdown renderer escapes raw HTML and only opens safe web links
 or known issue links. Existing hash routes keep issue opens shareable and preserve navigation.
 

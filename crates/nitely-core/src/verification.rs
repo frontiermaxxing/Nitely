@@ -682,12 +682,12 @@ mod tests {
     fn revision_policy_and_declaration_bound_advice_never_grants_a_gate_exemption() {
         use crate::test_repo::git as g;
         let repo = crate::test_repo::copy("verification-policy", |dir| {
-            g(dir, &["init", "-b", "main"]);
-            std::fs::create_dir_all(dir.join(".nitely")).unwrap();
-            std::fs::create_dir_all(dir.join("src")).unwrap();
-            std::fs::write(dir.join(PLAYBOOK_PATH), "[verification]\nversion=1\nmode='shadow'\ndisplay_copy=['src/Page[.]tsx']\n").unwrap();
-            std::fs::write(dir.join("src/Page.tsx"), "const x=<button>Save</button>").unwrap();
-            g(dir, &["add", "."]); g(dir, &["commit", "-m", "base"]);
+            // Cached templates must stay still while copied: the shared initializer disables
+            // background Git maintenance and inherited template hooks before the first commit.
+            crate::test_repo::init(dir, &[
+                (PLAYBOOK_PATH, "[verification]\nversion=1\nmode='shadow'\ndisplay_copy=['src/Page[.]tsx']\n"),
+                ("src/Page.tsx", "const x=<button>Save</button>"),
+            ]);
         });
         let mut db = Db::open(&repo.join("state.sqlite")).unwrap();
         db.create_project("APP", "Example").unwrap();
