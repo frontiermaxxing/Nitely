@@ -132,7 +132,7 @@ function ProfileRow(props: { profile: Profile | null; onJoin?: () => void; onEdi
         <span className="lb-profile-name">
           {p.display_name}
           <span className="lb-sub">
-            {p.last_sent_week ? `last report sent for ${p.last_sent_week}` : "joined · nothing sent yet"}
+            {p.last_sent_week ? `last report sent for ${p.last_sent_week}` : p.deleted ? "not on the board: you deleted what you sent" : "joined · nothing sent yet"}
             {p.last_sent_week && p.next_send_at !== null && ` · next send ${when(nowSecs(), p.next_send_at)}`}
             {p.last_sent_week && p.week_closes_at !== null && ` · the week closes ${when(nowSecs(), p.week_closes_at)}`}
           </span>

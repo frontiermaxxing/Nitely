@@ -73,7 +73,7 @@ fn join_send_view_and_leave_against_a_local_instance() {
     }
 
     // Leaving deletes what this install sent, and only that, and forgets the key.
-    assert_eq!(me.leave().unwrap(), 1);
+    assert_eq!(me.leave("test").unwrap(), 1);
     let board = other.board("week").unwrap();
     let names: Vec<&str> = board["entries"].as_array().unwrap().iter().map(|e| e["display_name"].as_str().unwrap()).collect();
     assert_eq!(names, ["Early Bird"]);
@@ -133,7 +133,7 @@ fn a_sharers_page_and_card_come_and_go_with_their_reports() {
 
     assert_eq!(get("/u/not-an-id").0, 404);
     assert!(handle_page(&store, &Request { method: "GET".into(), path: "/v1/leaderboard/health".into(), key: None, time: None, signature: None, body: vec![] }, "").is_none());
-    me.leave().unwrap();
+    me.leave("test").unwrap();
     assert_eq!(get(&format!("/u/{id}")).0, 404, "leaving takes the page away");
     assert_eq!(get(&format!("/u/{id}/card.png")).0, 404, "and its card");
     std::fs::remove_dir_all(dir).ok();
@@ -203,11 +203,13 @@ fn unsigned_replayed_tampered_or_stale_requests_are_refused() {
     let replay = signed(&secret, "POST", "/v1/leaderboard/reports", &body, ms);
     assert_eq!(handle(&store, &replay, t + 1).0, 409, "the same request again");
 
-    // A report with a field the schema lacks, or one out of range, never gets stored.
+    // A field the schema lacks never gets stored (it is dropped, NIT-653), and a number out of
+    // range is refused.
     let mut extra: serde_json::Value = serde_json::from_slice(&body).unwrap();
     extra["path"] = "C:/Code/my-app".into();
     let extra = serde_json::to_vec(&extra).unwrap();
-    assert_eq!(handle(&store, &signed(&secret, "POST", "/v1/leaderboard/reports", &extra, ms + 2), t).0, 400);
+    assert_eq!(handle(&store, &signed(&secret, "POST", "/v1/leaderboard/reports", &extra, ms + 2), t).0, 200);
+    assert!(!store.board("week").unwrap().unwrap().contains("my-app"), "the unknown field went nowhere");
     let mut bad: serde_json::Value = serde_json::from_slice(&body).unwrap();
     bad["periods"][0]["first_pass_rate"] = 3.0.into();
     let bad = serde_json::to_vec(&bad).unwrap();
@@ -255,6 +257,32 @@ fn no_address_is_kept() {
     for ip in ["203.0.113.77", "198.51.100.23", "127.0.0.1"] {
         assert!(!stored.contains(ip), "{ip} was stored");
     }
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// NIT-653: a newer app's report, with fields this service does not know, is taken rather than
+/// refused, and those fields are kept nowhere: not on the board, not in the database.
+#[test]
+fn a_newer_clients_report_is_taken_and_its_unknown_fields_are_kept_nowhere() {
+    let dir = nitely_core::paths::unique_temp("nitely-lb-newer", "");
+    let store = store(&dir);
+    let mut body = serde_json::to_value(report("Night Owl")).unwrap();
+    body["future_field"] = serde_json::json!("never-stored-1");
+    body["links"]["mastodon"] = serde_json::json!("never-stored-2");
+    body["periods"][0]["future_rate"] = serde_json::json!(0.5);
+    let body = serde_json::to_vec(&body).unwrap();
+    let t = now();
+    let answer = handle(&store, &signed(&[7u8; 32], "POST", "/v1/leaderboard/reports", &body, t * 1000), t);
+    assert_eq!(answer.0, 200, "{}", answer.2);
+    let board = store.board("week").unwrap().unwrap();
+    assert!(board.contains("Night Owl") && !board.contains("never-stored") && !board.contains("future_rate"), "{board}");
+    drop(store);
+    let mut stored = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap().flatten() {
+        stored.extend(std::fs::read(entry.path()).unwrap_or_default());
+    }
+    let stored = String::from_utf8_lossy(&stored);
+    assert!(stored.contains("Night Owl") && !stored.contains("never-stored") && !stored.contains("future_rate"));
     std::fs::remove_dir_all(dir).ok();
 }
 

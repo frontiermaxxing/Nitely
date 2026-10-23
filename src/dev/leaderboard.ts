@@ -158,7 +158,7 @@ export function leaderboardReportFixture(args: Record<string, unknown>) {
  * the report does and saves it; leaving forgets it. Nothing is sent, so leaving deletes nothing.
  * `?leaderboard=joined` starts joined.
  */
-let sharing: { joined: boolean; profile: Record<string, unknown>; projects: string[]; last_sent_week: string | null } | null = null;
+let sharing: { joined: boolean; profile: Record<string, unknown>; projects: string[]; last_sent_week: string | null; last_deleted_at?: number; last_deleted?: number; last_deleted_by?: string } | null = null;
 
 function sharingState() {
   const start = new URLSearchParams(location.search).get("leaderboard");
@@ -187,7 +187,7 @@ export function leaderboardJoinFixture(args: Record<string, unknown>) {
 export function leaderboardDeleteFixture(args: Record<string, unknown>) {
   const sent = sharingState().last_sent_week ? 1 : 0;
   if (args.leave) sharing = { joined: false, profile: { display_name: "" }, projects: [], last_sent_week: null };
-  else sharing = { ...sharingState(), last_sent_week: null };
+  else sharing = { ...sharingState(), last_sent_week: null, last_deleted_at: Math.floor(Date.now() / 1000), last_deleted: sent, last_deleted_by: "app" };
   return sent;
 }
 

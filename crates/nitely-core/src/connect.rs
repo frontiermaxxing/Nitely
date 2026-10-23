@@ -118,12 +118,51 @@ pub fn agent_home() -> PathBuf {
     std::env::var_os("NITELY_AGENT_HOME").map(PathBuf::from).or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// How `plan` says a folder is in no git repo: the app offers `init_repo` when it reads this.
+pub const NOT_A_REPO: &str = "is not in a git repo";
+
+/// Why `init_repo` will not make `dir` a repo, if it will not: it is inside a repo already (at
+/// `enclosing`), or it is a drive or file-system root, or the person's home folder (`home`).
+pub fn init_refusal(dir: &Path, enclosing: Option<&str>, home: Option<&Path>) -> Option<String> {
+    if let Some(root) = enclosing {
+        return Some(format!("{} is inside the repo at {root}: add that repo instead", dir.display()));
+    }
+    if dir.parent().is_none() {
+        return Some(format!("{} is a drive or file-system root: choose a project folder inside it", dir.display()));
+    }
+    if home.is_some_and(|h| crate::paths::normalize(&h.to_string_lossy()) == crate::paths::normalize(&dir.to_string_lossy())) {
+        return Some(format!("{} is your home folder: choose a project folder inside it", dir.display()));
+    }
+    None
+}
+
+/// Makes the folder at `path` a git repo whose first branch is `main` (the playbook's default
+/// integration branch), and says what it did. Nothing else is written: no commit, no .gitignore and
+/// no remote, so the first commit stays the person's (NIT-652).
+pub fn init_repo(path: &str) -> Result<String> {
+    let dir = Path::new(path.trim());
+    if !dir.is_dir() {
+        bail!("{} is not a folder", dir.display());
+    }
+    let enclosing = crate::git::main_root(&dir.to_string_lossy());
+    // The home folder as agent_home reads it (the harness's own under NITELY_AGENT_HOME).
+    if let Some(why) = init_refusal(dir, enclosing.as_deref(), Some(&agent_home())) {
+        bail!("{why}");
+    }
+    // `--initial-branch` needs git 2.28; an older git names the unborn branch by hand.
+    if git(dir, &["init", "--quiet", "--initial-branch=main"]).is_err() {
+        git(dir, &["init", "--quiet"])?;
+        git(dir, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
+    }
+    Ok(format!("Made {} a git repo, with main as its first branch. No commit, .gitignore or remote was added: the first commit is yours.", dir.display()))
+}
+
 pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Option<&str>) -> Result<ConnectPlan> {
     let dir = Path::new(path.trim());
     if !dir.is_dir() {
         bail!("{} is not a folder", dir.display());
     }
-    let root = crate::git::main_root(&dir.to_string_lossy()).with_context(|| format!("{} is not in a git repo", dir.display()))?;
+    let root = crate::git::main_root(&dir.to_string_lossy()).with_context(|| format!("{} {NOT_A_REPO}", dir.display()))?;
     let root = root.strip_prefix(r"\\?\").unwrap_or(&root).to_string();
     let root_path = PathBuf::from(&root);
     let existing = config.repos.iter().find(|r| crate::paths::normalize(&r.root) == crate::paths::normalize(&root));
@@ -150,7 +189,13 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
         _ => Playbook::parse(&playbook.text)?.integration_branch().to_string(),
     };
     if git(&root_path, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{integration_branch}")]).is_err() {
-        warnings.push(format!("there is no local branch {integration_branch}; edit the playbook's integration branch before starting tasks"));
+        // A repo just made (init_repo) is on that branch with no commit yet: its first commit makes it.
+        let unborn = git(&root_path, &["symbolic-ref", "--quiet", "HEAD"]).is_ok_and(|h| h.trim() == format!("refs/heads/{integration_branch}"));
+        warnings.push(if unborn {
+            format!("{integration_branch} has no commits yet; make the first commit before starting tasks")
+        } else {
+            format!("there is no local branch {integration_branch}; edit the playbook's integration branch before starting tasks")
+        });
     }
 
     let resolved = nitely_command();
@@ -837,6 +882,31 @@ fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder is made a repo only where that is safe: not inside another repo, not a drive root,
+    /// not the home folder (NIT-652). Making one leaves it on main with nothing committed.
+    #[test]
+    fn a_folder_becomes_a_repo_only_where_it_is_safe() {
+        let home = Path::new(if cfg!(windows) { r"C:\Users\you" } else { "/home/you" });
+        let inside = Path::new(if cfg!(windows) { r"C:\Code\my-app\docs" } else { "/home/you/code/my-app/docs" });
+        assert!(init_refusal(inside, Some("C:/Code/my-app"), Some(home)).unwrap().contains("inside the repo at C:/Code/my-app"));
+        let root = Path::new(if cfg!(windows) { r"C:\" } else { "/" });
+        assert!(init_refusal(root, None, Some(home)).unwrap().contains("root"));
+        assert!(init_refusal(home, None, Some(home)).unwrap().contains("home folder"));
+        let project = Path::new(if cfg!(windows) { r"C:\Code\manager" } else { "/home/you/code/manager" });
+        assert_eq!(init_refusal(project, None, Some(home)), None);
+
+        let dir = crate::paths::unique_temp("nitely-init", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        let said = init_repo(&dir.to_string_lossy()).unwrap();
+        assert!(said.contains("main as its first branch"), "{said}");
+        assert_eq!(git(&dir, &["symbolic-ref", "HEAD"]).unwrap().trim(), "refs/heads/main");
+        assert!(git(&dir, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_err(), "nothing committed");
+        assert!(init_repo(&dir.join("sub").to_string_lossy()).is_err(), "not a folder");
+        std::fs::create_dir_all(dir.join("sub")).unwrap();
+        assert!(init_repo(&dir.join("sub").to_string_lossy()).unwrap_err().to_string().contains("inside the repo"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn agents_get_the_installed_nitely_not_a_debug_builds_copy() {
