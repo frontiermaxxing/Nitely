@@ -17,6 +17,7 @@ import { PlaybookChangeDecision } from "./PlaybookChangeDecision";
 import { MirrorFact } from "./Mirror";
 import { typing } from "./Palette";
 import { AgentMark, IssueToken, Labels, Loading, PrMark, PriorityMark, Select, StationGlyph, StationTrack, VENDOR_LABEL, trackOf, vendorOf } from "./ui";
+import { Markdown } from "./ui/Markdown";
 import "./issue.css";
 
 const KIND_LABEL: Record<string, string> = {
@@ -54,7 +55,7 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 /** One event of the issue's timeline. */
-function EventLine({ event: t, now, askId, onOpenAsk }: { event: IssueDetail["timeline"][number]; now: number; askId?: number | null; onOpenAsk?: (id: number) => void }) {
+function EventLine({ event: t, now, askId, onOpenAsk, onOpenIssue }: { event: IssueDetail["timeline"][number]; now: number; askId?: number | null; onOpenAsk?: (id: number) => void; onOpenIssue?: (key: string) => void }) {
   return (
     <li className={`tl-${t.kind}`}>
       <span className="tl-mark">
@@ -63,7 +64,7 @@ function EventLine({ event: t, now, askId, onOpenAsk }: { event: IssueDetail["ti
       <div className="tl-meta">
         <span className="tl-kind">{KIND_LABEL[t.kind] ?? t.kind}</span> <span title={agentTitle(t.actor, t.place)}>{agentLabel(t.actor)}</span> · {ago(now, t.ts)}
       </div>
-      {t.summary && <div className="tl-text">{t.summary}</div>}
+      {t.summary && <div className="tl-text"><Markdown src={t.summary} onOpenIssue={onOpenIssue} /></div>}
       {askId != null && onOpenAsk && (
         <div className="tl-text">
           <button className="link small" onClick={() => onOpenAsk(askId)}>
@@ -297,7 +298,7 @@ export function IssuePanel(props: {
   return (
     <>
       <div className="panel-veil" onMouseDown={props.onClose} aria-hidden="true" />
-      <aside className="panel" aria-label={`Issue ${props.issueKey}`} ref={sheet} tabIndex={-1} onKeyDown={onKeyDown} onBlur={() => setMoving(false)}>
+      <aside className="panel issue-reading" aria-label={`Issue ${props.issueKey}`} ref={sheet} tabIndex={-1} onKeyDown={onKeyDown} onBlur={() => setMoving(false)}>
         <div className="panel-main">
           <div className="panel-head">
             <span className="panel-crumb">
@@ -345,64 +346,9 @@ export function IssuePanel(props: {
                   {behindSummary(waitOf(issue.key, waits)!, props.now) && <span className="muted">, {behindSummary(waitOf(issue.key, waits)!, props.now)}</span>}
                 </p>
               )}
-              <WhoHadIt detail={detail} now={props.now} />
-              <IssueJourney key={issue.key} detail={detail} now={props.now} />
-              <SpendLine key={`spend-${issue.key}`} detail={detail} now={props.now} />
-              <details className="panel-timeline">
-                <summary>
-                  Timeline <span className="muted">· {timelineItems(detail).length} event{timelineItems(detail).length === 1 ? "" : "s"}</span>
-                </summary>
-                <ol className="timeline">
-                  {timelineItems(detail).map((item, n) =>
-                    item.batch ? <BatchLine key={n} line={item.batch} now={props.now} /> : <EventLine key={n} event={item.event!} now={props.now} askId={askOfEntry(item.event!, detail?.asks)} onOpenAsk={props.onOpenIssue && ((id) => props.onOpenIssue!(`ask:${id}`))} />,
-                  )}
-                  {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}
-                </ol>
-              </details>
-            </>
-          )}
-        </div>
-        {issue && detail && (
-          <div className="panel-rail">
-            {decision === "playbook" && detail.proposal && (
-              <div className="panel-waiting panel-decision">
-                <p className="panel-waiting-head">Playbook change{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
-                <PlaybookChangeDecision key={`pb-${issue.key}-${detail.proposal.id}`} proposal={detail.proposal} issueKey={issue.key} resolved={false} busy={acting} onAct={act} />
-              </div>
-            )}
-            {decision === "goal-plan" && detail.goal_plan && (
-              <div className="panel-waiting panel-decision">
-                <p className="panel-waiting-head">Goal plan</p>
-                <GoalPlanDecision key={`plan-${issue.key}`} plan={detail.goal_plan} issueKey={issue.key} resolved={acting} onAct={act} />
-              </div>
-            )}
-            {own && (
-              <div className="panel-waiting">
-                <p className="panel-waiting-head">Your own work</p>
-                <p className="panel-waiting-why">Only you can do this, so no agent will take it.</p>
-                <div className="actions">
-                  <button className="btn primary" onClick={() => move("Done", "Done by the human, outside Nitely.")}>Mark done</button>
-                  <button className="btn" onClick={handBack}>Hand back to agents</button>
-                </div>
-              </div>
-            )}
-            {waiting && issue.origin === "nitely" && (
-              <div className="panel-waiting">
-                <p className="panel-waiting-head">Waiting on you{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
-                <p className="panel-waiting-why">
-                  {review?.reasons.length ? `${capital(review.reasons.slice(0, 2).join("; "))}.` : "The playbook wants a person to approve before it lands."}
-                  {review?.reviewer && review.verdict === "pass" && ` ${VENDOR_LABEL[vendorOf(review.reviewer)]} passed it.`}
-                </p>
-                <div className="actions">
-                  <button className="btn primary" onClick={() => move("Approved")} title="Approve (a)">
-                    Approve <kbd>a</kbd>
-                  </button>
-                  <button className="btn" onClick={() => move("Todo")} title="Back to Todo (t)">
-                    Back to Todo <kbd>t</kbd>
-                  </button>
-                </div>
-              </div>
-            )}
+
+              <details className="panel-properties">
+                <summary>Details <span className="muted">· {issue.state}{issue.kind && ` · ${issue.kind}`}</span></summary>
             <dl className="panel-facts">
               <dt>State</dt>
               <dd>{issue.state}</dd>
@@ -491,13 +437,50 @@ export function IssuePanel(props: {
                 )}
               </div>
             ) : null}
-            {(issue.body || issue.evidence) && <div className="panel-rule" />}
-            {issue.body && <p className="body">{issue.body}</p>}
-            {issue.evidence && (
-              <p className="small">
-                <span className="muted">Evidence: </span>
-                {issue.evidence}
-              </p>
+
+              </details>
+              <div className="panel-document">
+                {issue.body && <Markdown src={issue.body} onOpenIssue={props.onOpenIssue} />}
+                {issue.evidence && <section className="panel-evidence"><h3>Evidence</h3><Markdown src={issue.evidence} onOpenIssue={props.onOpenIssue} /></section>}
+                <div className="panel-document-actions">
+            {decision === "playbook" && detail.proposal && (
+              <div className="panel-waiting panel-decision">
+                <p className="panel-waiting-head">Playbook change{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
+                <PlaybookChangeDecision key={`pb-${issue.key}-${detail.proposal.id}`} proposal={detail.proposal} issueKey={issue.key} resolved={false} busy={acting} onAct={act} />
+              </div>
+            )}
+            {decision === "goal-plan" && detail.goal_plan && (
+              <div className="panel-waiting panel-decision">
+                <p className="panel-waiting-head">Goal plan</p>
+                <GoalPlanDecision key={`plan-${issue.key}`} plan={detail.goal_plan} issueKey={issue.key} resolved={acting} onAct={act} />
+              </div>
+            )}
+            {own && (
+              <div className="panel-waiting">
+                <p className="panel-waiting-head">Your own work</p>
+                <p className="panel-waiting-why">Only you can do this, so no agent will take it.</p>
+                <div className="actions">
+                  <button className="btn primary" onClick={() => move("Done", "Done by the human, outside Nitely.")}>Mark done</button>
+                  <button className="btn" onClick={handBack}>Hand back to agents</button>
+                </div>
+              </div>
+            )}
+            {waiting && issue.origin === "nitely" && (
+              <div className="panel-waiting">
+                <p className="panel-waiting-head">Waiting on you{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
+                <p className="panel-waiting-why">
+                  {review?.reasons.length ? `${capital(review.reasons.slice(0, 2).join("; "))}.` : "The playbook wants a person to approve before it lands."}
+                  {review?.reviewer && review.verdict === "pass" && ` ${VENDOR_LABEL[vendorOf(review.reviewer)]} passed it.`}
+                </p>
+                <div className="actions">
+                  <button className="btn primary" onClick={() => move("Approved")} title="Approve (a)">
+                    Approve <kbd>a</kbd>
+                  </button>
+                  <button className="btn" onClick={() => move("Todo")} title="Back to Todo (t)">
+                    Back to Todo <kbd>t</kbd>
+                  </button>
+                </div>
+              </div>
             )}
             {moving && (
               <p className="panel-moving" role="status">
@@ -529,6 +512,29 @@ export function IssuePanel(props: {
               <button type="button" className="btn ghost" onClick={() => setPending(null)}>Back</button>
             </form>
             )}
+
+                </div>
+              </div>
+              <WhoHadIt detail={detail} now={props.now} />
+              <IssueJourney key={issue.key} detail={detail} now={props.now} />
+              <SpendLine key={`spend-${issue.key}`} detail={detail} now={props.now} />
+
+            </>
+          )}
+        </div>
+        {issue && detail && (
+          <div className="panel-rail">
+              <details className="panel-timeline" open>
+                <summary>
+                  Timeline <span className="muted">· {timelineItems(detail).length} event{timelineItems(detail).length === 1 ? "" : "s"}</span>
+                </summary>
+                <ol className="timeline">
+                  {timelineItems(detail).map((item, n) =>
+                    item.batch ? <BatchLine key={n} line={item.batch} now={props.now} /> : <EventLine key={n} onOpenIssue={props.onOpenIssue} event={item.event!} now={props.now} askId={askOfEntry(item.event!, detail?.asks)} onOpenAsk={props.onOpenIssue && ((id) => props.onOpenIssue!(`ask:${id}`))} />,
+                  )}
+                  {detail.timeline.length === 0 && <li className="muted small">Nothing recorded yet.</li>}
+                </ol>
+              </details>
           </div>
         )}
       </aside>
