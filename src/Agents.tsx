@@ -28,7 +28,7 @@ export function AgentChanges(props: { agents: AgentPlan[] }) {
   return (
     <>
       {props.agents.map((agent) => {
-        const vendor = vendorOf(agent.agent);
+        const vendor = vendorOf(agent.agent === "Claude Code" ? "claude" : agent.agent);
         const name = vendor === "other" ? agent.agent : (vendorInfo(vendor)?.product ?? agent.agent);
         const open = agent.changes.filter((c) => c.action !== "unchanged");
         const manual = open.filter((c) => c.action === "manual").length;
@@ -43,7 +43,7 @@ export function AgentChanges(props: { agents: AgentPlan[] }) {
         return (
           <section key={agent.agent} className={`vendor-card${agent.found ? "" : " vendor-missing"}`}>
             <div className="vendor-head">
-              <AgentMark vendor={agent.agent} size={22} />
+              <AgentMark vendor={vendor} size={22} />
               <span className="vendor-name">{name}</span>
               <span className="vendor-meta">{agent.found ? `${agent.changes.length} thing${agent.changes.length === 1 ? "" : "s"} Nitely sets up` : "not installed, skipped"}</span>
               {agent.found && <span className={`vendor-pill vendor-pill-${tone}`}>{status}</span>}
