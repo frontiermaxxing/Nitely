@@ -190,7 +190,8 @@ export function paceHeadline(p: MachinePace | null | undefined): string | null {
 
 /** Settings' words for the machine's memory: free now, and each limit with where it comes from. */
 export function memoryWords(m: MachineNow | undefined): { free: string | null; floor: string | null; cap: string | null } {
-  const from = (f: string) => (f === "default" ? "default" : f === "settings" ? "set here" : `set by ${f}`);
+  // "away": the default floor, lowered while you are away from the keyboard (NIT-656).
+  const from = (f: string) => (f === "default" ? "default" : f === "away" ? "lowered while you are away" : f === "settings" ? "set here" : `set by ${f}`);
   const l = m?.limits;
   return {
     free: m?.memory ? `${bytesWords(m.memory.available)} of ${bytesWords(m.memory.total)} free now` : null,
