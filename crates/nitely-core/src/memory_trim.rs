@@ -14,6 +14,7 @@
 //! reclaimable cache, so there it is not available.
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::Mutex;
 
 use crate::Db;
@@ -117,9 +118,6 @@ struct State {
     waiting_since: HashMap<i64, i64>,
     /// The processes at the start of the idle window, and when.
     sample: Option<(i64, Vec<Sample>)>,
-    last_trim: Option<i64>,
-    /// What the last trim said, per run that waited through it.
-    notes: HashMap<i64, String>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -128,10 +126,47 @@ fn harness() -> bool {
     cfg!(test) || std::env::var_os("NITELY_HARNESS").is_some()
 }
 
+/// The machine's last trim, shared by every Nitely process (each waiting run may be in its own):
+/// when, and what it said, in `memory-trim` beside the database (NIT-657 review).
+const LAST: &str = "memory-trim";
+
+pub(crate) fn last_trim(dir: &Path) -> Option<(i64, String)> {
+    let text = std::fs::read_to_string(dir.join(LAST)).ok()?;
+    let (at, said) = text.split_once('\t').unwrap_or((text.trim(), ""));
+    Some((at.trim().parse().ok()?, said.trim().to_string()))
+}
+
+/// Takes the machine's next trim for this process when none was made in the last `EVERY`: true
+/// when it is this one's to make. The claim file makes the check and the write one step between
+/// processes; one left by a process that died is taken over after a minute.
+pub(crate) fn claim(dir: &Path, now: i64) -> bool {
+    let lock = dir.join(format!("{LAST}.claim"));
+    let stale = std::fs::metadata(&lock).and_then(|m| m.modified()).is_ok_and(|t| t.elapsed().is_ok_and(|e| e.as_secs() > 60));
+    if stale {
+        std::fs::remove_file(&lock).ok();
+    }
+    if std::fs::OpenOptions::new().write(true).create_new(true).open(&lock).is_err() {
+        return false;
+    }
+    let mine = last_trim(dir).is_none_or(|(at, _)| now - at >= EVERY);
+    if mine {
+        std::fs::write(dir.join(LAST), format!("{now}\t")).ok();
+    }
+    std::fs::remove_file(&lock).ok();
+    mine
+}
+
+/// What a run that began waiting at `since` is told about the machine's last trim: its note, when
+/// the trim came while it waited.
+pub(crate) fn told(last: Option<&(i64, String)>, since: i64) -> Option<&str> {
+    last.filter(|(at, said)| *at >= since && !said.is_empty()).map(|(_, said)| said.as_str())
+}
+
 /// Called on each look of run `id` that memory alone holds back, with why it waits; returns that
 /// line, saying so when a trim helped it. Trims when `due`, and records each trim.
 pub fn while_waiting(db: &Db, id: i64, why: String) -> String {
     let now = crate::db::now();
+    let Some(dir) = db.conn.path().filter(|p| !p.is_empty()).and_then(|p| Path::new(p).parent()).map(Path::to_path_buf) else { return why };
     let setting = setting();
     let mut guard = STATE.lock().unwrap_or_else(|e| e.into_inner());
     let state = guard.get_or_insert_with(State::default);
@@ -144,21 +179,19 @@ pub fn while_waiting(db: &Db, id: i64, why: String) -> String {
             state.sample = Some((now, os::samples()));
         }
         let elapsed = state.sample.as_ref().map_or(0, |(at, _)| now - at);
-        if elapsed >= IDLE_WINDOW && due(setting.mode, true, false, now - since, state.last_trim.map(|t| now - t), os::away()) {
+        let since_last = last_trim(&dir).map(|(at, _)| now - at);
+        if elapsed >= IDLE_WINDOW && due(setting.mode, true, false, now - since, since_last, os::away()) && claim(&dir, now) {
             let before = state.sample.take().map(|(_, s)| s).unwrap_or_default();
             let pids = candidates(&before, &os::samples(), elapsed, os::foreground(), &[std::process::id()]);
-            state.last_trim = Some(now);
             if let Some(trim) = os::trim(&pids) {
                 crate::performance_events::lane_trim(db, id, trim);
                 if let Some(said) = note(&trim) {
-                    for run in state.waiting_since.keys() {
-                        state.notes.insert(*run, said.clone());
-                    }
+                    std::fs::write(dir.join(LAST), format!("{now}\t{said}")).ok();
                 }
             }
         }
     }
-    match state.notes.get(&id) {
+    match told(last_trim(&dir).as_ref(), since) {
         Some(said) => format!("{why}; {said}"),
         None => why,
     }
@@ -302,5 +335,21 @@ mod tests {
         assert_eq!(note(&Trim { processes: 12, available_before: 18 * gb, available_after: 21 * gb }).as_deref(), Some("Nitely emptied the working memory of 12 idle programs, 3.0 GB freed"));
         assert_eq!(note(&Trim { processes: 3, available_before: 18 * gb, available_after: 18 * gb }), None, "said only when it helped");
         assert!(setting().available == cfg!(windows));
+    }
+
+    /// NIT-657 review: the ten minutes between trims hold across Nitely's processes, and a run is
+    /// told of a trim only when it came while it waited.
+    #[test]
+    fn one_trim_per_ten_minutes_for_the_whole_machine() {
+        let dir = crate::paths::unique_temp("nitely-memory-trim", "");
+        std::fs::create_dir_all(&dir).unwrap();
+        assert!(claim(&dir, 1000), "the first is this process's to make");
+        assert!(!claim(&dir, 1000 + EVERY - 1), "another process, too soon");
+        assert!(claim(&dir, 1000 + EVERY));
+        std::fs::write(dir.join(LAST), format!("{}\tfreed 3.0 GB", 1000 + EVERY)).unwrap();
+        let last = last_trim(&dir);
+        assert_eq!(told(last.as_ref(), 1000), Some("freed 3.0 GB"), "it came while this run waited");
+        assert_eq!(told(last.as_ref(), 1000 + EVERY + 1), None, "before this run began waiting");
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
