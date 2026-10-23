@@ -399,12 +399,17 @@ pub fn waits(db: &Db, lane_runs: Vec<Waiting>, repos: &[String]) -> Result<Waits
     for repo in repos {
         waiting.extend(landing_now(db, repo)?);
     }
+    let archived = db.archived_project_keys()?;
+    waiting.retain(|w| !w.project.as_deref().is_some_and(|p| archived.contains(&p.to_uppercase()))
+        && !w.issue.as_deref().and_then(|k| k.split_once('-')).is_some_and(|(p, _)| archived.contains(&p.to_uppercase())));
     waiting.sort_by_key(|w| w.since);
     Ok(Waits { waiting })
 }
 
 /// `waits` for the app: the lanes overview read here too.
 pub fn overview(config: &nitely_core::Config, db: &Db) -> Result<Waits> {
+    let visible_config = db.active_project_config(config)?;
+    let config = &visible_config;
     let queues = lanes::queues(config, db)?;
     let repos: Vec<String> = config.repos.iter().map(|r| r.root.clone()).collect();
     waits(db, lane_waits(&queues), &repos)

@@ -244,12 +244,12 @@ trait PulseDb {
 impl PulseDb for Db {
     fn open_issue_facts(&self) -> Result<HashMap<String, Facts>> {
         let open: std::collections::HashSet<String> = {
-            let mut stmt = self.conn.prepare("SELECT key FROM issue WHERE state_type NOT IN ('completed', 'canceled')")?;
+            let mut stmt = self.conn.prepare("SELECT key FROM active_issue WHERE state_type NOT IN ('completed', 'canceled')")?;
             let keys = stmt.query_map([], |r| r.get::<_, String>(0))?;
             keys.map(|k| k.map(|k| k.to_uppercase())).collect::<rusqlite::Result<_>>()?
         };
         let mut stmt = self.conn.prepare(
-            "SELECT issue_key, ts, actor, type, summary, cwd FROM event WHERE issue_key COLLATE NOCASE IN (SELECT value FROM json_each(?1)) ORDER BY ts, id",
+            "SELECT issue_key, ts, actor, type, summary, cwd FROM active_event WHERE issue_key COLLATE NOCASE IN (SELECT value FROM json_each(?1)) ORDER BY ts, id",
         )?;
         let rows = stmt.query_map([serde_json::to_string(&open)?], |r| {
             Ok((
@@ -286,7 +286,7 @@ impl PulseDb for Db {
     }
 
     fn events_of(&self, kinds: &[&str], since: i64) -> Result<Vec<(i64, String)>> {
-        let mut stmt = self.conn.prepare("SELECT ts, type FROM event WHERE ts >= ?1 ORDER BY ts")?;
+        let mut stmt = self.conn.prepare("SELECT ts, type FROM active_event WHERE ts >= ?1 ORDER BY ts")?;
         let rows = stmt.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
         let mut out = Vec::new();
         for row in rows {
@@ -314,7 +314,7 @@ impl PulseDb for Db {
 
     fn stuck_since(&self, since: i64) -> Result<std::collections::HashSet<String>> {
         let mut stmt = self.conn.prepare(
-            "SELECT DISTINCT upper(issue_key) FROM event WHERE ts >= ?1 AND issue_key IS NOT NULL AND type IN ('gate_failed', 'land_failed', 'review_failed')",
+            "SELECT DISTINCT upper(issue_key) FROM active_event WHERE ts >= ?1 AND issue_key IS NOT NULL AND type IN ('gate_failed', 'land_failed', 'review_failed')",
         )?;
         let keys = stmt.query_map([since], |r| r.get::<_, String>(0))?.collect::<rusqlite::Result<_>>()?;
         Ok(keys)
@@ -346,10 +346,10 @@ const HAPPENINGS: &str = "
       CASE type WHEN 'landed' THEN 'landed' WHEN 'issue_created' THEN 'filed' WHEN 'submit' THEN 'review'
                 ELSE 'stuck' END AS kind,
       issue_key, actor, summary
-    FROM event
+    FROM active_event
     WHERE ts >= ?1 AND type IN ('landed', 'issue_created', 'gate_failed', 'land_failed', 'review_failed', 'submit')
     UNION ALL
-    SELECT asked_at, id, 'asked', issue_key, asked_by, question FROM ask WHERE asked_at >= ?1";
+    SELECT asked_at, id, 'asked', issue_key, asked_by, question FROM active_ask WHERE asked_at >= ?1";
 
 fn kind_name(kind: &str) -> &'static str {
     match kind {
@@ -386,6 +386,37 @@ mod tests {
             ..Default::default()
         };
         db.create_issue(&new, &Actor::Agent("claude:c:/x".into())).unwrap()
+    }
+
+    #[test]
+    fn archiving_removes_project_activity_from_pulse_and_leaderboard_until_restored() {
+        let (mut db, _dir) = db();
+        let a = file(&mut db, "Archived work");
+        let agent = Actor::Agent("codex:a".into());
+        db.log_event(&agent, Some(&a.key), None, "landed", "landed change").unwrap();
+        db.create_ask("Choose a behavior", &[], Some(&a.key), None, &agent).unwrap();
+        let before = pulse(&db, 0, 0).unwrap();
+        let project_of = |_: &str| Some("NIT".to_string());
+        let tokens = [crate::usage::Attributed {
+            usage: crate::usage::Usage { vendor: "codex", session: "a".into(), ts: nitely_core::db::now(), model: "example".into(), input: 100, output: 20, cache_read: 0, cache_write: 0, cwd: "C:/Code/example".into(), branch: "codex/task".into() },
+            project: Some("NIT".into()), issue: Some(a.key.clone()),
+        }];
+        let inputs = crate::leaderboard::Inputs { now: nitely_core::db::now(), utc_offset: 0, projects: &[], tokens: &tokens, project_of_dir: &project_of };
+        let count = |db: &Db| crate::leaderboard::stats(db, &inputs).unwrap().periods.iter().find(|p| p.period == "all").unwrap().landed;
+        assert_eq!(count(&db), 1);
+        assert_eq!(crate::leaderboard::stats(&db, &inputs).unwrap().periods.last().unwrap().tokens, 120);
+        db.set_project_archived("NIT", true, &Actor::Human).unwrap();
+        let hidden = pulse(&db, 0, 0).unwrap();
+        assert!(hidden.projects.is_empty() && hidden.asks.is_empty() && hidden.happened.is_empty());
+        assert_eq!((hidden.landed_today, hidden.happened_counts.landed, count(&db)), (0, 0, 0));
+        assert!(hidden.report.other_landed.is_empty() && hidden.report.needed.is_empty());
+        assert_eq!(crate::leaderboard::stats(&db, &inputs).unwrap().periods.last().unwrap().tokens, 0);
+        assert!(db.issue_detail(&a.key).unwrap().is_some());
+        db.set_project_archived("NIT", false, &Actor::Human).unwrap();
+        let restored = pulse(&db, 0, 0).unwrap();
+        assert_eq!(restored.landed_today, before.landed_today);
+        assert_eq!(restored.happened.len(), before.happened.len());
+        assert_eq!(count(&db), 1);
     }
 
     #[test]
