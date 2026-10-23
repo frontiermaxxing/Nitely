@@ -41,6 +41,13 @@ product.
 
 ## The lifecycle track
 
+Overview uses the available width. When its content area is at least 1320px wide, build lanes
+become project cards to the right of the agents and activity; below that they stay in the main
+reading flow. Flow and the recent-activity summary precede Goals. Section switches share the
+heading row, wrapping only when space requires it. Informational Inbox notices stay behind the
+Notifications disclosure, separate from decisions; opening it preserves dismissal and access
+to notification settings.
+
 Every issue moves along one track with fixed stations:
 
 ```

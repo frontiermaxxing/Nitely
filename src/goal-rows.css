@@ -6,8 +6,7 @@
 .project-focus-choice .select { flex: 1; max-width: 460px; width: 100%; }
 .project-focus-explanation { margin: 0; color: var(--fg-2); font-size: var(--text-sm); line-height: 1.5; }
 .project-focus-paused { color: var(--attention-ink); }
-.project-focus-urgent { display: flex; color: var(--fg-2); }
-.project-focus-urgent .ui-switch { color: inherit; font-size: var(--text-sm); }
+.project-focus-controls .ui-switch { color: var(--fg-2); font-size: var(--text-sm); }
 @media (max-width: 550px) { .project-focus-choice { display: grid; grid-template-columns: minmax(0, 1fr); } }
 .goal-rows { display: grid; gap: 14px; margin: 4px 0 22px; }
 .goal-row { display: grid; gap: 8px; padding: 12px 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); --mark-bg: var(--surface); }
@@ -60,7 +59,9 @@
 .gp-body pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; }
 
 /* Completed and dropped goals, shown on request (NIT-611): dimmed, with their state and Reopen. */
-.goal-rows-tools { display: flex; justify-content: flex-end; margin: 4px 0 8px; }
+.goal-section-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 8px 20px; margin: 24px 0 10px; }
+.goal-section-head h2 { margin: 0; }
+.goal-section-head .ui-switch { flex: none; }
 .goal-row-closed { opacity: 0.62; }
 .goal-row-closed:hover, .goal-row-closed:focus-within { opacity: 0.9; }
 .goal-state { font-size: var(--text-xs); color: var(--fg-3); border: 1px solid var(--line); border-radius: 999px; padding: 0 8px; }

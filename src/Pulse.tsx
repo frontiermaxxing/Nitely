@@ -187,14 +187,17 @@ export function Pulse(props: {
               Add a repo and connect your agents; their work shows up here as it moves.
             </EmptyState>
           )}
-          <RightNow data={data} board={props.board} ctx={ctx} />
-          <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} landQueue={landQueueLength(batches)} />
-          <WaitingStrip waits={waits} now={now} onOpenIssue={props.onOpenIssue} />
         </>
       )}
-      <GoalRows heading version={props.version} onOpenIssue={props.onOpenIssue} />
+      <div className="pulse-layout">
       {data && (
         <>
+          <div className="pulse-now"><RightNow data={data} board={props.board} ctx={ctx} /></div>
+          <aside className="pulse-builds" aria-label="Build activity">
+            <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} landQueue={landQueueLength(batches)} cards />
+          </aside>
+          <div className="pulse-work">
+          <WaitingStrip waits={waits} now={now} onOpenIssue={props.onOpenIssue} />
           {data.projects.length > 0 && (
             <section>
               <h2>
@@ -208,8 +211,11 @@ export function Pulse(props: {
             </section>
           )}
           <Since data={data} ctx={ctx} first={first} />
+          </div>
         </>
       )}
+        <div className="pulse-goals"><GoalRows heading version={props.version} onOpenIssue={props.onOpenIssue} /></div>
+      </div>
     </div>
   );
 }

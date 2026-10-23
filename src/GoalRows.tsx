@@ -54,7 +54,8 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
       {/* The focus picker never offers a completed goal. */}
       {props.project && <ProjectFocus key={props.project} project={props.project} version={props.version} goals={goals.filter((g) => g.goal.state === "active")} />}
       {goals.length > 0 && (
-        <div className="goal-rows-tools">
+        <div className="goal-section-head">
+          <h2>Goals {props.heading && <span className="head-note">how close each outcome is</span>}</h2>
           <Switch checked={showCompleted} onChange={setShowCompleted} label="Show completed" />
         </div>
       )}
@@ -77,9 +78,6 @@ export function GoalRows(props: { project?: string; version: number; onOpenIssue
   if (!props.heading) return rows;
   return (
     <section>
-      <h2>
-        Goals <span className="head-note">how close each outcome is</span>
-      </h2>
       {rows}
     </section>
   );
