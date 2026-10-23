@@ -227,7 +227,7 @@ function MemoryTrim() {
           onChange={choose}
           options={[
             { value: "off", label: "Off" },
-            { value: "away", label: "When I'm away", detail: "No input for ten minutes" },
+            { value: "away", label: "When I'm away", detail: "No input for fifteen minutes" },
             { value: "always", label: "Whenever a run waits" },
           ]}
         />

@@ -5,7 +5,8 @@
 //! processes refuse it and are skipped. Nothing here asks for admin or enables a privilege.
 //!
 //! A trim happens only while a run has waited `WAIT_BEFORE` for memory alone, at most once every
-//! `EVERY`, and by default only while the person is away (no input for `AWAY_AFTER`). It trims
+//! `EVERY`, and by default only while the person is away (no input for `machine::AWAY_AFTER`, as
+//! the admission floor counts it). It trims
 //! processes that used under `IDLE_CPU` of a core over the last `IDLE_WINDOW`, never the
 //! foreground window's process or this one. The harness and tests never trim.
 //!
@@ -23,8 +24,6 @@ use crate::Db;
 pub const WAIT_BEFORE: i64 = 120;
 /// The least time between two trims.
 pub const EVERY: i64 = 600;
-/// No input for this long, and the person is away.
-pub const AWAY_AFTER: u64 = 600;
 /// A process is idle when it used under this share of one core over the last `IDLE_WINDOW`. The
 /// samples start with the wait, so a fresh run is first helped `IDLE_WINDOW` into it: nothing
 /// before the wait says what a program did then.
@@ -138,6 +137,12 @@ struct State {
 /// so runs waiting in separate processes share it.
 static STATE: Mutex<Option<State>> = Mutex::new(None);
 
+/// Whether the person is away: no input for `machine::AWAY_AFTER`, as the admission floor counts
+/// it (NIT-656), so both agree on what away means.
+fn away() -> bool {
+    crate::machine::idle().is_some_and(|d| d >= crate::machine::AWAY_AFTER)
+}
+
 fn harness() -> bool {
     cfg!(test) || std::env::var_os("NITELY_HARNESS").is_some()
 }
@@ -216,7 +221,7 @@ pub fn while_waiting(db: &Db, id: i64, why: String) -> String {
         let ages: Vec<i64> = state.samples.iter().map(|(at, _)| now - at).collect();
         let since_last = last_trim(&dir).map(|(at, _)| now - at);
         // The claim last: it takes the machine's turn, so only once this process will trim.
-        if let Some(i) = baseline(&ages).filter(|_| due(setting.mode, true, false, now - since, since_last, os::away()) && claim(&dir, now)) {
+        if let Some(i) = baseline(&ages).filter(|_| due(setting.mode, true, false, now - since, since_last, away()) && claim(&dir, now)) {
             let pids = candidates(&state.samples[i].1, &os::samples(), ages[i], os::foreground(), &[std::process::id()]);
             if let Some(trim) = os::trim(&pids) {
                 crate::performance_events::lane_trim(db, id, trim);
@@ -241,26 +246,18 @@ mod os {
     const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
     const PROCESS_SET_QUOTA: u32 = 0x0100;
 
-    #[repr(C)]
-    struct LastInputInfo {
-        size: u32,
-        time: u32,
-    }
-
     #[link(name = "kernel32")]
     extern "system" {
         fn OpenProcess(access: u32, inherit: i32, process_id: u32) -> Handle;
         fn CloseHandle(handle: Handle) -> i32;
         fn K32EmptyWorkingSet(process: Handle) -> i32;
         fn ProcessIdToSessionId(process_id: u32, session: *mut u32) -> i32;
-        fn GetTickCount() -> u32;
         fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
     }
     #[link(name = "user32")]
     extern "system" {
         fn GetForegroundWindow() -> *mut c_void;
         fn GetWindowThreadProcessId(window: *mut c_void, process_id: *mut u32) -> u32;
-        fn GetLastInputInfo(info: *mut LastInputInfo) -> i32;
     }
 
     /// The processes now, with their processor time.
@@ -282,17 +279,6 @@ mod os {
         let mut pid = 0;
         unsafe { GetWindowThreadProcessId(window, &mut pid) };
         (pid != 0).then_some(pid)
-    }
-
-    /// Whether the person has given no input for `AWAY_AFTER`.
-    pub fn away() -> bool {
-        let mut info = LastInputInfo { size: std::mem::size_of::<LastInputInfo>() as u32, time: 0 };
-        // SAFETY: a sized LASTINPUTINFO, written by the call.
-        if unsafe { GetLastInputInfo(&mut info) } == 0 {
-            return false;
-        }
-        let idle_ms = unsafe { GetTickCount() }.wrapping_sub(info.time);
-        u64::from(idle_ms) >= super::AWAY_AFTER * 1000
     }
 
     /// Empties the working sets of `pids` in this session that let this user do so, and says how
@@ -343,9 +329,6 @@ mod os {
     }
     pub fn foreground() -> Option<u32> {
         None
-    }
-    pub fn away() -> bool {
-        false
     }
     pub fn trim(_: &[(u32, String)]) -> Option<Trim> {
         None
