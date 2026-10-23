@@ -299,6 +299,7 @@ export function IssuePanel(props: {
     <>
       <div className="panel-veil" onMouseDown={props.onClose} aria-hidden="true" />
       <aside className="panel issue-reading" aria-label={`Issue ${props.issueKey}`} ref={sheet} tabIndex={-1} onKeyDown={onKeyDown} onBlur={() => setMoving(false)}>
+        <button className="btn ghost issue-close" onClick={props.onClose} title="Close (Esc)" aria-label="Close issue">✕</button>
         <div className="panel-main">
           <div className="panel-head">
             <span className="panel-crumb">
@@ -324,7 +325,6 @@ export function IssuePanel(props: {
               )}
               <span className="mono">{props.issueKey}</span>
             </span>
-            <button className="btn ghost" onClick={props.onClose} title="Close (Esc)">✕</button>
           </div>
           {error && <p className="error small">{error}</p>}
           {!issue && !error && <Loading />}
@@ -347,7 +347,92 @@ export function IssuePanel(props: {
                 </p>
               )}
 
-              <details className="panel-properties">
+              <div className="panel-document">
+                {issue.body && <Markdown src={issue.body} onOpenIssue={props.onOpenIssue} />}
+                {issue.evidence && <section className="panel-evidence"><h3>Evidence</h3><Markdown src={issue.evidence} onOpenIssue={props.onOpenIssue} /></section>}
+                <div className="panel-document-actions">
+            {decision === "playbook" && detail.proposal && (
+              <div className="panel-waiting panel-decision">
+                <p className="panel-waiting-head">Playbook change{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
+                <PlaybookChangeDecision key={`pb-${issue.key}-${detail.proposal.id}`} proposal={detail.proposal} issueKey={issue.key} resolved={false} busy={acting} onAct={act} />
+              </div>
+            )}
+            {decision === "goal-plan" && detail.goal_plan && (
+              <div className="panel-waiting panel-decision">
+                <p className="panel-waiting-head">Goal plan</p>
+                <GoalPlanDecision key={`plan-${issue.key}`} plan={detail.goal_plan} issueKey={issue.key} resolved={acting} onAct={act} />
+              </div>
+            )}
+            {own && (
+              <div className="panel-waiting">
+                <p className="panel-waiting-head">Your own work</p>
+                <p className="panel-waiting-why">Only you can do this, so no agent will take it.</p>
+                <div className="actions">
+                  <button className="btn primary" onClick={() => move("Done", "Done by the human, outside Nitely.")}>Mark done</button>
+                  <button className="btn" onClick={handBack}>Hand back to agents</button>
+                </div>
+              </div>
+            )}
+            {waiting && issue.origin === "nitely" && (
+              <div className="panel-waiting">
+                <p className="panel-waiting-head">Waiting on you{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
+                <p className="panel-waiting-why">
+                  {review?.reasons.length ? `${capital(review.reasons.slice(0, 2).join("; "))}.` : "The playbook wants a person to approve before it lands."}
+                  {review?.reviewer && review.verdict === "pass" && ` ${VENDOR_LABEL[vendorOf(review.reviewer)]} passed it.`}
+                </p>
+                <div className="actions">
+                  <button className="btn primary" onClick={() => move("Approved")} title="Approve (a)">
+                    Approve <kbd>a</kbd>
+                  </button>
+                  <button className="btn" onClick={() => move("Todo")} title="Back to Todo (t)">
+                    Back to Todo <kbd>t</kbd>
+                  </button>
+                </div>
+              </div>
+            )}
+            {moving && (
+              <p className="panel-moving" role="status">
+                Move to: <kbd>t</kbd> Todo · <kbd>d</kbd> Done… · <kbd>c</kbd> Cancel… · <kbd>esc</kbd> stay
+              </p>
+            )}
+            {issue.origin === "nitely" && (
+              <div className="actions panel-moves">
+                {!waiting && issue.state !== "Todo" && <button className="btn" onClick={() => move("Todo")}>Back to Todo</button>}
+                {issue.state !== "Done" && <button className="btn" onClick={() => setPending("Done")}>Done…</button>}
+                {issue.state !== "Canceled" && <button className="btn" onClick={() => setPending("Canceled")}>Cancel…</button>}
+              </div>
+            )}
+            {pending && (
+            <form
+              className="answer"
+              onSubmit={(e) => {
+                e.preventDefault();
+                if (why.trim()) move(pending, why.trim());
+              }}
+            >
+              <input
+                autoFocus
+                value={why}
+                onChange={(e) => setWhy(e.target.value)}
+                placeholder={pending === "Done" ? "What shows it is done?" : "Why cancel it?"}
+              />
+              <button className="btn primary" disabled={!why.trim()}>{pending === "Done" ? "Mark done" : "Cancel issue"}</button>
+              <button type="button" className="btn ghost" onClick={() => setPending(null)}>Back</button>
+            </form>
+            )}
+
+                </div>
+              </div>
+              <WhoHadIt detail={detail} now={props.now} />
+              <IssueJourney key={issue.key} detail={detail} now={props.now} />
+              <SpendLine key={`spend-${issue.key}`} detail={detail} now={props.now} />
+
+            </>
+          )}
+        </div>
+        {issue && detail && (
+          <div className="panel-rail">
+              <details className="panel-properties" open>
                 <summary>Details <span className="muted">· {issue.state}{issue.kind && ` · ${issue.kind}`}</span></summary>
             <dl className="panel-facts">
               <dt>State</dt>
@@ -439,91 +524,7 @@ export function IssuePanel(props: {
             ) : null}
 
               </details>
-              <div className="panel-document">
-                {issue.body && <Markdown src={issue.body} onOpenIssue={props.onOpenIssue} />}
-                {issue.evidence && <section className="panel-evidence"><h3>Evidence</h3><Markdown src={issue.evidence} onOpenIssue={props.onOpenIssue} /></section>}
-                <div className="panel-document-actions">
-            {decision === "playbook" && detail.proposal && (
-              <div className="panel-waiting panel-decision">
-                <p className="panel-waiting-head">Playbook change{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
-                <PlaybookChangeDecision key={`pb-${issue.key}-${detail.proposal.id}`} proposal={detail.proposal} issueKey={issue.key} resolved={false} busy={acting} onAct={act} />
-              </div>
-            )}
-            {decision === "goal-plan" && detail.goal_plan && (
-              <div className="panel-waiting panel-decision">
-                <p className="panel-waiting-head">Goal plan</p>
-                <GoalPlanDecision key={`plan-${issue.key}`} plan={detail.goal_plan} issueKey={issue.key} resolved={acting} onAct={act} />
-              </div>
-            )}
-            {own && (
-              <div className="panel-waiting">
-                <p className="panel-waiting-head">Your own work</p>
-                <p className="panel-waiting-why">Only you can do this, so no agent will take it.</p>
-                <div className="actions">
-                  <button className="btn primary" onClick={() => move("Done", "Done by the human, outside Nitely.")}>Mark done</button>
-                  <button className="btn" onClick={handBack}>Hand back to agents</button>
-                </div>
-              </div>
-            )}
-            {waiting && issue.origin === "nitely" && (
-              <div className="panel-waiting">
-                <p className="panel-waiting-head">Waiting on you{waitedSince && ` · ${ago(props.now, waitedSince.ts).replace(" ago", "")}`}</p>
-                <p className="panel-waiting-why">
-                  {review?.reasons.length ? `${capital(review.reasons.slice(0, 2).join("; "))}.` : "The playbook wants a person to approve before it lands."}
-                  {review?.reviewer && review.verdict === "pass" && ` ${VENDOR_LABEL[vendorOf(review.reviewer)]} passed it.`}
-                </p>
-                <div className="actions">
-                  <button className="btn primary" onClick={() => move("Approved")} title="Approve (a)">
-                    Approve <kbd>a</kbd>
-                  </button>
-                  <button className="btn" onClick={() => move("Todo")} title="Back to Todo (t)">
-                    Back to Todo <kbd>t</kbd>
-                  </button>
-                </div>
-              </div>
-            )}
-            {moving && (
-              <p className="panel-moving" role="status">
-                Move to: <kbd>t</kbd> Todo · <kbd>d</kbd> Done… · <kbd>c</kbd> Cancel… · <kbd>esc</kbd> stay
-              </p>
-            )}
-            {issue.origin === "nitely" && (
-              <div className="actions panel-moves">
-                {!waiting && issue.state !== "Todo" && <button className="btn" onClick={() => move("Todo")}>Back to Todo</button>}
-                {issue.state !== "Done" && <button className="btn" onClick={() => setPending("Done")}>Done…</button>}
-                {issue.state !== "Canceled" && <button className="btn" onClick={() => setPending("Canceled")}>Cancel…</button>}
-              </div>
-            )}
-            {pending && (
-            <form
-              className="answer"
-              onSubmit={(e) => {
-                e.preventDefault();
-                if (why.trim()) move(pending, why.trim());
-              }}
-            >
-              <input
-                autoFocus
-                value={why}
-                onChange={(e) => setWhy(e.target.value)}
-                placeholder={pending === "Done" ? "What shows it is done?" : "Why cancel it?"}
-              />
-              <button className="btn primary" disabled={!why.trim()}>{pending === "Done" ? "Mark done" : "Cancel issue"}</button>
-              <button type="button" className="btn ghost" onClick={() => setPending(null)}>Back</button>
-            </form>
-            )}
 
-                </div>
-              </div>
-              <WhoHadIt detail={detail} now={props.now} />
-              <IssueJourney key={issue.key} detail={detail} now={props.now} />
-              <SpendLine key={`spend-${issue.key}`} detail={detail} now={props.now} />
-
-            </>
-          )}
-        </div>
-        {issue && detail && (
-          <div className="panel-rail">
               <details className="panel-timeline" open>
                 <summary>
                   Timeline <span className="muted">· {timelineItems(detail).length} event{timelineItems(detail).length === 1 ? "" : "s"}</span>
