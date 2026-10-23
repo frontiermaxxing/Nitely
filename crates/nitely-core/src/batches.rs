@@ -327,7 +327,7 @@ impl Db {
             }
             let Some(b) = self.conn.query_row(&format!("SELECT {BATCH_COLUMNS} FROM review_batch WHERE id = ?1"), [batch], batch_row).optional()? else { continue };
             let findings: Vec<crate::review::Finding> = serde_json::from_str(&findings).unwrap_or_default();
-            let review = Review { reviewer: b.reviewer.clone(), verdict: verdict.clone(), findings, flagged: vec![], summary: String::new(), seconds: 0, previous: vec![], note: String::new(), batch: None, tokens: None, reused: None };
+            let review = Review { reviewer: b.reviewer.clone(), verdict: verdict.clone(), findings, flagged: vec![], summary: String::new(), seconds: 0, previous: vec![], note: String::new(), batch: None, tokens: None, reused: None, outside: vec![] };
             reviews.push(IssueReview {
                 sent_back: review_sent_back(&review),
                 blocking: review.findings.iter().filter(|f| f.priority <= 1).count(),
@@ -418,6 +418,7 @@ mod tests {
             batch: None,
             tokens: None,
             reused: None,
+            outside: vec![],
         };
         assert_eq!(review_sent_back(&review), None);
         review.verdict = "changes".into();

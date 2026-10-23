@@ -1085,6 +1085,7 @@ fn reused_pass(
         batch: None,
         tokens: None,
         reused: Some(commit),
+        outside: vec![],
     };
     let choice = crate::review::Choice { independent: rules.is_independent(&reviewer, vendor), reviewer, note };
     Ok(Some((choice, review)))
@@ -1184,6 +1185,13 @@ pub fn describe(issue: &IssueRecord, s: &Submitted, land_by: crate::playbook::La
                 };
                 format!("- [P{}] {}{carried}", f.priority, f.text)
             }));
+            if !r.outside.is_empty() {
+                lines.push(format!(
+                    "Set aside, about code this change does not touch (the base's own, so they do not count; file any that is real against `{}`):",
+                    s.base
+                ));
+                lines.extend(r.outside.iter().map(|f| format!("- [P{}] {}", f.priority, f.text)));
+            }
         }
         None if s.review_batched => lines.push(format!("**Review:** {}.", crate::review_batch::PENDING_NOTE)),
         None if s.yolo => lines.push(format!("**Review:** {}. This revision is unverified.", crate::project_yolo::NOTE)),
@@ -1466,6 +1474,7 @@ mod tests {
             batch: None,
             tokens: None,
             reused: None,
+            outside: vec![],
         };
         // Round 2 carrying a P1 once is still a round that may converge.
         let first = record(vec![f(1, "Drops the last row: a.rs", false)]);
