@@ -190,7 +190,11 @@ export function Pulse(props: {
           <RightNow data={data} board={props.board} ctx={ctx} />
           <LanesStrip version={props.version} now={now} onOpenIssue={props.onOpenIssue} landQueue={landQueueLength(batches)} />
           <WaitingStrip waits={waits} now={now} onOpenIssue={props.onOpenIssue} />
-          <GoalRows heading version={props.version} onOpenIssue={props.onOpenIssue} />
+        </>
+      )}
+      <GoalRows heading version={props.version} onOpenIssue={props.onOpenIssue} />
+      {data && (
+        <>
           {data.projects.length > 0 && (
             <section>
               <h2>
