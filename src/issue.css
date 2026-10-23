@@ -74,10 +74,16 @@ button.journey-toggle:focus-visible { outline: 2px solid var(--focus); outline-o
 .relation-add { margin-top: 0; }
 
 /* ----- issue reading: the document leads, history has its own expanded rail ----- */
-.panel.issue-reading { width: 100%; grid-template-columns: minmax(0, 1fr) minmax(320px, 32%); box-shadow: none; }
+.panel.issue-reading {
+  inset: 24px auto 24px 50%; transform: translateX(-50%); width: min(1600px, calc(100vw - 48px));
+  grid-template-columns: minmax(0, 1fr) minmax(340px, 32%); border: 1px solid var(--line-strong);
+  border-radius: var(--radius-lg); box-shadow: var(--shadow-panel);
+}
+.drag-titlebar .panel.issue-reading { top: calc(var(--titlebar-h) + 24px); }
+.issue-close { position: absolute; top: 10px; right: 10px; z-index: 2; width: 32px; height: 32px; padding: 0; background: var(--bg); }
 .issue-reading .panel-main { padding: 24px clamp(20px, 4vw, 64px) 40px; overflow-y: auto; }
 .issue-reading .panel-main > * { max-width: 90ch; margin-left: auto; margin-right: auto; }
-.issue-reading .panel-rail { padding: 24px; overflow-y: auto; border-left: 1px solid var(--line); border-top: 0; }
+.issue-reading .panel-rail { padding: 52px 24px 24px; overflow-y: auto; border-left: 1px solid var(--line); border-top: 0; }
 .panel-properties { margin-bottom: 24px; padding: 12px 0; border-block: 1px solid var(--line); }
 .panel-properties > summary { color: var(--fg-2); font-size: var(--text-sm); cursor: pointer; }
 .panel-properties[open] > summary { margin-bottom: 16px; }
@@ -92,9 +98,11 @@ button.journey-toggle:focus-visible { outline: 2px solid var(--focus); outline-o
 .issue-reading .tl-text .brief-doc { font-size: var(--text-sm); }
 .issue-reading .tl-text .brief-doc > :last-child { margin-bottom: 0; }
 @media (max-width: 900px) {
-  .panel.issue-reading { grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+  .panel.issue-reading { inset: 8px auto 8px 50%; width: calc(100vw - 16px); grid-template-columns: minmax(0, 1fr); overflow-y: auto; }
+  .drag-titlebar .panel.issue-reading { top: calc(var(--titlebar-h) + 8px); }
+  .issue-reading .panel-main { padding-top: 52px; }
   .issue-reading .panel-main, .issue-reading .panel-rail { overflow: visible; }
-  .issue-reading .panel-rail { border-left: 0; border-top: 1px solid var(--line); }
+  .issue-reading .panel-rail { padding-top: 24px; border-left: 0; border-top: 1px solid var(--line); }
 }
 
 /* ----- the text timeline ----- */
