@@ -217,7 +217,7 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
         },
         throughput,
         landed_today,
-        report: db.goal_report(None, since)?,
+        report: db.goal_report_from_issues(None, since, &issues)?,
     })
 }
 
@@ -249,9 +249,9 @@ impl PulseDb for Db {
             keys.map(|k| k.map(|k| k.to_uppercase())).collect::<rusqlite::Result<_>>()?
         };
         let mut stmt = self.conn.prepare(
-            "SELECT issue_key, ts, actor, type, summary, cwd FROM event WHERE issue_key IS NOT NULL ORDER BY ts, id",
+            "SELECT issue_key, ts, actor, type, summary, cwd FROM event WHERE issue_key COLLATE NOCASE IN (SELECT value FROM json_each(?1)) ORDER BY ts, id",
         )?;
-        let rows = stmt.query_map([], |r| {
+        let rows = stmt.query_map([serde_json::to_string(&open)?], |r| {
             Ok((
                 r.get::<_, String>(0)?,
                 r.get::<_, i64>(1)?,

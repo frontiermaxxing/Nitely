@@ -197,6 +197,10 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.equal(waitingForFocus.issue, null, "focus never spills into other Todo work");
     assert.match(waitingForFocus.message, /focus/i, "the agent is told why it waits");
     await page.invoke("set_issue_goal", { key: A, goal: focusedGoal.id });
+    // Leave unfinished work in the goal while checking focus. Finishing its last card now
+    // completes the goal and clears focus, which is verified separately below.
+    const remaining = await agent.call("file_issue", { title: "Write the welcome copy", kind: "feature", body: "Copy is deferred until the greeting ships.", evidence: "harness focus scenario", priority: 3, state: "Backlog" });
+    await page.invoke("set_issue_goal", { key: remaining.key, goal: focusedGoal.id });
 
     // The person turns the crew on: one worker.
     writeFileSync(join(repo, ".nitely", "playbook.toml"), playbook({ workers: 1 }));
@@ -219,7 +223,7 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.equal(one.reviews[0].verdict, "pass");
     assert.equal(one.reviews[0].batch_id ?? null, null, "reviewed alone: the mode batches nothing yet");
     assert.equal(await state(urgent.key), "Todo", "Crew respected focus even with an unrelated urgent issue ready");
-    assert.equal((await agent.call("next_task", {})).issue, null, "finished focused work still does not spill over");
+    assert.equal((await agent.call("next_task", {})).issue, null, "a focused goal with only deferred work does not spill over");
     // Pause Crew before testing the external agent's urgent selection, so it cannot race the claim.
     await page.invoke("crew_pause", { project: "APP", paused: true });
     await page.invoke("set_project_focus", { project: "APP", goal: focusedGoal.id, allowUrgent: true });
@@ -228,6 +232,10 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     await agent.call("update_issue", { key: urgent.key, state: "Canceled", reason: "The focus scenario has verified urgent selection." });
     await page.invoke("set_project_focus", { project: "APP", goal: null, allowUrgent: true });
     assert.equal((await page.invoke("project_focus", { project: "APP" })).goal, null, "clearing focus restores ordinary selection");
+    await page.invoke("set_project_focus", { project: "APP", goal: focusedGoal.id, allowUrgent: false });
+    await agent.call("update_issue", { key: remaining.key, state: "Canceled", reason: "The deferred work has verified focus selection." });
+    assert.equal((await agent.call("goals", { id: focusedGoal.id })).goal.state, "done", "closing the final card completes the goal");
+    assert.equal((await page.invoke("project_focus", { project: "APP" })).goal, null, "completing the goal clears focus automatically");
     await page.invoke("crew_pause", { project: "APP", paused: false });
     await page.open("#now");
 

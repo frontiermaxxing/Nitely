@@ -492,6 +492,12 @@ pub fn scan(config: &Config, db: &Db, since: i64) -> Vec<Attributed> {
     records
 }
 
+/// Project totals do not need the session-to-issue event history. Keep the same transcript
+/// cache and project attribution as `scan`, without reading all historical tool calls.
+pub fn scan_projects(config: &Config, db: &Db, since: i64) -> Vec<Attributed> {
+    scan_stored(config, &HashMap::new(), since, claude_home().as_deref(), codex_home().as_deref(), Some(db))
+}
+
 /// How far before a scan's start a session's last named issue is looked for: a session that took
 /// an issue in the morning is still on it in the afternoon.
 const TOUCH_LOOKBACK_SECS: i64 = 2 * 86_400;

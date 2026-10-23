@@ -168,7 +168,7 @@ button.dd-title:hover { text-decoration: underline; text-decoration-color: var(-
 
 /* The split answers to the Inbox's own width (NIT-591): beside the sidebar, a window 800 px wide
    left the open decision about 140 px. Narrower, the list takes less; narrower still, they stack. */
-.inbox-frame { container-type: inline-size; min-height: 100%; }
+.inbox-frame { container-type: inline-size; min-height: 100%; display: grid; }
 @container (max-width: 860px) {
   .inbox-split { grid-template-columns: minmax(260px, 340px) minmax(0, 1fr); }
   .inbox-detail { padding: 28px 24px 40px; }

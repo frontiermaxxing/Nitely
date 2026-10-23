@@ -59,7 +59,7 @@ async fn snapshot() -> Result<Board, String> {
 /// start of their local day, both in seconds.
 #[tauri::command]
 async fn pulse(since: i64, day_start: i64) -> Result<nitely_crew::Pulse, String> {
-    nitely_crew::pulse(&db()?, since, day_start).map_err(err)
+    tauri::async_runtime::spawn_blocking(move || nitely_crew::pulse(&db()?, since, day_start).map_err(err)).await.map_err(|e| e.to_string())?
 }
 
 /// What happened since `since`, per goal, and every place the person was needed (NIT-247).
@@ -357,7 +357,7 @@ async fn goal_workers(id: i64, workers: i64) -> Result<nitely_core::goals::Goal,
 /// `include_closed`, completed and dropped goals too ("Show completed", NIT-611).
 #[tauri::command]
 async fn goals(project: Option<String>, include_closed: Option<bool>) -> Result<Vec<nitely_core::goals::GoalDetail>, String> {
-    db()?.goal_rows(project.as_deref(), include_closed.unwrap_or(false)).map_err(err)
+    tauri::async_runtime::spawn_blocking(move || db()?.goal_rows(project.as_deref(), include_closed.unwrap_or(false)).map_err(err)).await.map_err(|e| e.to_string())?
 }
 
 /// The person reopens a completed or dropped goal, or closes one: one click (NIT-611).
@@ -420,7 +420,7 @@ async fn issue_spend(key: String) -> Result<nitely_crew::usage::IssueSpend, Stri
 /// The Leaderboard's numbers over `projects` (empty: every project), read from this machine only.
 #[tauri::command]
 async fn leaderboard_stats(projects: Vec<String>) -> Result<nitely_crew::leaderboard::Leaderboard, String> {
-    nitely_crew::leaderboard::stats_now(&Config::load().map_err(err)?, &db()?, &projects).map_err(err)
+    tauri::async_runtime::spawn_blocking(move || nitely_crew::leaderboard::stats_now(&Config::load().map_err(err)?, &db()?, &projects).map_err(err)).await.map_err(|e| e.to_string())?
 }
 
 /// The weekly report exactly as it would be shared, for the opt-in page's preview. Sends nothing.
