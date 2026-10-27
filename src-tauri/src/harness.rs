@@ -184,6 +184,9 @@ mod tests {
             "CLAUDE_CONFIG_DIR",
             "CODEX_HOME",
             "nitely_on_path",
+            "Git.Git",
+            "claude.ai/install",
+            "@openai/codex",
             "EmptyWorkingSet",
         ];
         // (file, what it reaches, how many lines, or 0 for any): why the harness is clear of it.
@@ -198,6 +201,9 @@ mod tests {
             ("crates/nitely-core/src/install.rs", "dirs::", 0, "`nitely install`, the CLI's; the app never runs it"),
             ("crates/nitely-core/src/mirror.rs", "dirs::", 1, "the home's path as text, kept out of mirrored issues; nothing is read"),
             ("src-tauri/src/lib.rs", "register_all", 0, "skipped under the harness"),
+            ("crates/nitely-core/src/tools_install.rs", "Git.Git", 0, "install() refuses under NITELY_HARNESS and in tests: the harness never installs a tool"),
+            ("crates/nitely-core/src/tools_install.rs", "claude.ai/install", 0, "as Git.Git"),
+            ("crates/nitely-core/src/tools_install.rs", "@openai/codex", 0, "as Git.Git"),
             ("crates/nitely-core/src/memory_trim.rs", "EmptyWorkingSet", 0, "while_waiting never trims under NITELY_HARNESS or in tests (harness())"),
             ("src-tauri/src/lib.rs", "Classes\\nitely", 1, "quiet_dev_links runs only after register_all, which the harness skips"),
             ("crates/nitely-core/src/link_service.rs", "CurrentVersion\\Run", 0, "the links listener at login: allowed() refuses it under NITELY_HARNESS and with NITELY_AGENT_HOME set, which the harness sets"),
