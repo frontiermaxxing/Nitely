@@ -111,6 +111,9 @@ enum Cmd {
     /// asks another build before putting it in place.
     #[command(hide = true)]
     CheckDatabase,
+    /// Git, Claude Code, Codex and the GitHub CLI: where each is, its version, and whether it is
+    /// signed in, as JSON (NIT-687). Reads no tokens.
+    Tools,
     /// Check one file's syntax without running it: parse JSON or TOML, or ask PowerShell, bash,
     /// Python or node. What a small change to a file no test reaches runs (NIT-623).
     #[command(hide = true)]
@@ -1174,6 +1177,7 @@ fn run(cmd: Cmd) -> Result<()> {
             print_json(&found)
         }
         Cmd::CheckFile { path } => nitely_core::affected_tests::check_file(&path),
+        Cmd::Tools => print_json(&nitely_core::tools::check()),
         Cmd::CheckDatabase => match nitely_core::db::refused_by_this_build(&paths::db_path())? {
             Some(why) => {
                 eprintln!("{why}");

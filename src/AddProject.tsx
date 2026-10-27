@@ -22,8 +22,9 @@ export const exampleRepoPath = () => {
   return platform.startsWith("Mac") ? "/Users/you/code/my-app" : "/home/you/code/my-app";
 };
 
-/** Pick a repo folder, see everything Nitely will set up, then add it. */
-export function AddProject(props: { onAdded: (projectKey: string) => void }) {
+/** Pick a repo folder, see everything Nitely will set up, then add it. `embedded` drops the page's own
+ * heading, for the first-run setup's First project step (NIT-690). */
+export function AddProject(props: { onAdded: (projectKey: string) => void; embedded?: boolean }) {
   const [path, setPath] = useState("");
   const [key, setKey] = useState("");
   const [name, setName] = useState("");
@@ -98,14 +99,18 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
   const changes = plan ? pendingChanges(plan.agents) : 0;
 
   return (
-    <div className="page page-form">
-      <div className="page-head">
-        <h1>Add a project</h1>
-      </div>
-      <p className="page-lead">
-        Point Nitely at a repo you already work in. It creates the project, watches the repo and its worktrees, and
-        connects your agents so they take work from Nitely and report back. Nothing is written into the repo.
-      </p>
+    <div className={props.embedded ? "page-form add-embedded" : "page page-form"}>
+      {!props.embedded && (
+        <>
+          <div className="page-head">
+            <h1>Add a project</h1>
+          </div>
+          <p className="page-lead">
+            Point Nitely at a repo you already work in. It creates the project, watches the repo and its worktrees, and
+            connects your agents so they take work from Nitely and report back. Nothing is written into the repo.
+          </p>
+        </>
+      )}
 
       <form
         className="answer"
