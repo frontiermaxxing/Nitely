@@ -621,9 +621,12 @@ anything. Start each finding with the key of the change it is about.\n{changes}\
             f.priority = 2;
         }
         // In a re-review, a new P1 holds the change only on a line changed since that round (NIT-704).
+        // One said in an earlier round's words is no new finding: it keeps those words, so an
+        // acceptance or a question about it stays attached.
         if let (Some(prev), Some(code)) = (previous.filter(|p| p.in_history), &code) {
             if let Some(changed) = changed_between(&code.root, &prev.commit, "HEAD") {
-                for f in findings.iter_mut().filter(|f| f.priority == 1 && !cites_changed(&f.text, code, &changed)) {
+                let said_before = |t: &str| prev.findings.iter().chain(prev.accepted.iter().map(|(f, _)| f)).any(|f| f.text == t);
+                for f in findings.iter_mut().filter(|f| f.priority == 1 && !said_before(&f.text) && !cites_changed(&f.text, code, &changed)) {
                     f.priority = 2;
                     f.text.push_str(OLD_CODE);
                 }
