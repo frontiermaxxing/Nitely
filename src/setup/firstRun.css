@@ -123,6 +123,9 @@
 .fr-notice-fail { background: var(--fail-wash); border-color: var(--fail); padding: 9px 12px; }
 
 .fr-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.fr-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--bg); }
+.fr-waiting { flex-direction: row; align-items: center; gap: 10px; font-family: var(--font); font-size: var(--text-sm); }
+.fr-waiting .fr-dot { background: var(--attention); }
 .fr-hint { font-size: var(--text-xs); color: var(--fg-3); }
 .fr-copied { color: var(--live); }
 

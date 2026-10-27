@@ -88,6 +88,8 @@ export function FirstRun(props: {
   const [tools, setTools] = useState<Tool[] | null>(null);
   const [installs, setInstalls] = useState<Record<string, InstallState>>({});
   const [plans, setPlans] = useState<InstallPlan[]>([]);
+  const [signingIn, setSigningIn] = useState<string[]>([]);
+  const [signInErrors, setSignInErrors] = useState<Record<string, string>>({});
   const [checking, setChecking] = useState(false);
   // Reopened from Settings, Welcome was seen: the setup ran before.
   const [seen, setSeen] = useState<StepId[]>(() => {
@@ -119,6 +121,22 @@ export function FirstRun(props: {
       off.then((f) => f());
     };
   }, []);
+
+  // Each tool's own login, in a terminal window of the person's (NIT-689): Nitely never sees it,
+  // and checks again when the window comes back into focus.
+  const signIn = async (command: string) => {
+    setSignInErrors((all) => {
+      const rest = { ...all };
+      delete rest[command];
+      return rest;
+    });
+    try {
+      await invoke("tool_sign_in", { command });
+      setSigningIn((all) => (all.includes(command) ? all : [...all, command]));
+    } catch (e) {
+      setSignInErrors((all) => ({ ...all, [command]: String(e) }));
+    }
+  };
 
   // One install at a time, as confirmed by the click: the plan's command, as shown.
   const install = async (tool: string) => {
@@ -270,7 +288,7 @@ export function FirstRun(props: {
             </>
           )}
 
-          {current === "signin" && <SignInStep tools={tools} onCheck={check} checking={checking} />}
+          {current === "signin" && <SignInStep tools={tools} onCheck={check} checking={checking} onSignIn={signIn} waiting={signingIn} errors={signInErrors} />}
 
           {current === "project" &&
             (props.projects.length > 0 ? (

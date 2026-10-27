@@ -1794,11 +1794,15 @@ const setupState = () => new URLSearchParams(location.search).get("setup") ?? "d
 
 /** Tools installed in this preview session (install_tool): found from then on. */
 const installedTools = new Set<string>();
+/** Tools whose sign-in window the preview "opened" (tool_sign_in): signed in at the next check. */
+const signedInTools = new Set<string>();
 
 const toolPath = (command: string) => `C:\\Users\\you\\.local\\bin\\${command}.exe`;
 
 function toolsCheck(): Tool[] {
-  return setupTools().map((t) => (installedTools.has(t.command) && !t.path ? { ...t, path: toolPath(t.command), version: "1.0.0" } : t));
+  return setupTools()
+    .map((t) => (installedTools.has(t.command) && !t.path ? { ...t, path: toolPath(t.command), version: "1.0.0" } : t))
+    .map((t) => (signedInTools.has(t.command) && t.path ? { ...t, signed_in: true } : t));
 }
 
 function setupTools(): Tool[] {
@@ -2570,6 +2574,9 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return toolInstallPlans();
       case "install_tool":
         return installTool(args);
+      case "tool_sign_in":
+        signedInTools.add(String(args.command));
+        return null;
       case "connect_init":
         return connectInit(args);
       case "first_commit_preview":

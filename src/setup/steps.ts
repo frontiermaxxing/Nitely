@@ -129,8 +129,3 @@ export function stepSummary(id: StepId, f: SetupFacts): string | null {
 export function listWords(items: string[]): string {
   return items.length <= 2 ? items.join(" and ") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
-
-/** The command that signs a tool in, in its own window: what Sign in runs. Claude Code asks to log in when it starts signed out. */
-export function signInCommand(command: string): string | null {
-  return ({ claude: "claude", codex: "codex login", gh: "gh auth login" } as Record<string, string>)[command] ?? null;
-}
