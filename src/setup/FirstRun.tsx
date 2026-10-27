@@ -4,7 +4,7 @@ import type { AgentPlan, AgentsUpdated, InstallPlan, Project, Tool } from "../ty
 import { AgentChanges } from "../Agents";
 import { AddProject } from "../AddProject";
 import { Button } from "../ui";
-import { canContinue, openingStep, STEPS, stepStates, stepSummary, type SetupFacts, type StepId } from "./steps";
+import { canContinue, openingStep, reviewPairing, STEPS, stepStates, stepSummary, type SetupFacts, type StepId } from "./steps";
 import { SignInStep, ToolsStep, type InstallState } from "./ToolsStep";
 import { SkillsStep } from "./SkillsStep";
 import "./firstRun.css";
@@ -277,6 +277,7 @@ export function FirstRun(props: {
           {current === "tools" && (
             <>
               <ToolsStep tools={tools} plans={plans} installs={installs} onInstall={install} />
+              <ReviewPairing tools={tools} />
               {held && tools && (
                 <div className="fr-notice fr-notice-needs">
                   <strong>Continue waits for git and one agent.</strong> Install what's missing, then check again. GitHub CLI can wait.
@@ -301,7 +302,12 @@ export function FirstRun(props: {
               <AddProject embedded onAdded={props.onProjectAdded} />
             ))}
 
-          {current === "agents" && <AgentsStep agents={props.agents} onChanged={props.onAgentsChanged} />}
+          {current === "agents" && (
+            <>
+              <AgentsStep agents={props.agents} onChanged={props.onAgentsChanged} />
+              <ReviewPairing tools={tools} />
+            </>
+          )}
 
           {current === "skills" && <SkillsStep projectKey={projectKey} />}
         </div>
@@ -328,6 +334,17 @@ export function FirstRun(props: {
           </Button>
         </div>
       </main>
+    </div>
+  );
+}
+
+/** What the agent CLIs installed mean for reviews (NIT-694), under Tools and Agents. */
+function ReviewPairing(props: { tools: Tool[] | null }) {
+  const pairing = reviewPairing(props.tools);
+  if (!pairing) return null;
+  return (
+    <div className={`fr-notice fr-review fr-review-${pairing.kind}`}>
+      <strong>Reviews.</strong> {pairing.text}
     </div>
   );
 }
