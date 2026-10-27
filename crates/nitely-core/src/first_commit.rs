@@ -228,14 +228,17 @@ pub fn make(root: &Path, gitignore: Option<&[String]>, include: &[String], ident
     git(root, &["read-tree", "--empty"])?;
     git(root, &["add", "--all"])?;
     let chosen = |p: &str| include.iter().any(|i| p == i || p.starts_with(&format!("{i}/")));
-    let out: Vec<String> = git(root, &["diff", "--cached", "--name-only", "--no-renames"])?
-        .lines()
+    // The staged paths as they are: NUL-separated and unquoted, since git quotes a name with
+    // non-ASCII characters in its default output (NIT-685 review).
+    let out: Vec<String> = git(root, &["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--no-renames", "-z"])?
+        .split('\0')
         .map(str::to_string)
         .filter(|p| !p.is_empty() && !chosen(p))
         .filter(|p| kept_out(p, std::fs::metadata(root.join(p)).map(|m| m.len()).unwrap_or(0)))
         .collect();
+    // Each one named literally: a path with `[` or `*` in it is not a pattern here.
     for batch in out.chunks(200) {
-        let mut args = vec!["rm", "--cached", "--quiet", "--ignore-unmatch", "--"];
+        let mut args = vec!["--literal-pathspecs", "rm", "--cached", "--quiet", "--ignore-unmatch", "--"];
         args.extend(batch.iter().map(String::as_str));
         git(root, &args)?;
     }
@@ -301,6 +304,9 @@ mod tests {
         std::fs::create_dir_all(dir.join("certs")).unwrap();
         std::fs::write(dir.join("certs/server.pem"), "KEY").unwrap();
         std::fs::write(dir.join("certs/.gitignore"), "!server.pem\n").unwrap();
+        // Nor do keys whose names git would quote, or read as a pattern.
+        std::fs::write(dir.join("certs/clé.pem"), "KEY").unwrap();
+        std::fs::write(dir.join("certs/[x].pem"), "KEY").unwrap();
         git(&dir, &["init", "--quiet", "--initial-branch=main"]).unwrap();
         // A secret the person staged before connecting stays out all the same, and a file staged
         // and then edited again does not stop the commit.
@@ -320,6 +326,20 @@ mod tests {
         let committed = git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
         assert_eq!(committed.lines().collect::<Vec<_>>(), [".env.example", ".gitignore", "certs/.gitignore", "src/main.rs"], "the template goes in; the staged .env and the re-included key do not");
         assert!(preview(&dir).is_err() && make(&dir, None, &[], None).is_err(), "only a repo with no commits");
+        std::fs::remove_dir_all(&dir).ok();
+
+        // With a .gitignore of its own that keeps nothing out, the backend alone keeps the keys
+        // out, names git would quote and names with pattern characters included.
+        let dir = crate::paths::unique_temp("nitely-first-commit", "");
+        std::fs::create_dir_all(dir.join("certs")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "").unwrap();
+        std::fs::write(dir.join("README.md"), "hi").unwrap();
+        std::fs::write(dir.join("certs/clé.pem"), "KEY").unwrap();
+        std::fs::write(dir.join("certs/[x].pem"), "KEY").unwrap();
+        git(&dir, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        make(&dir, None, &[], Some(("You", "you@example.com"))).unwrap();
+        let committed = git(&dir, &["-c", "core.quotePath=false", "ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
+        assert_eq!(committed.lines().collect::<Vec<_>>(), [".gitignore", "README.md"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
