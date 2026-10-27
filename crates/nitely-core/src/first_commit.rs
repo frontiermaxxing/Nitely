@@ -108,9 +108,16 @@ pub struct Flagged {
 /// Whether the staged path `path` (`/`-separated) is one `classify` keeps out: a file it flags, or a
 /// file inside a folder it flags. A .gitignore cannot be trusted with that alone: a nested one can
 /// re-include what the root one excludes (NIT-685 review).
-pub fn kept_out(path: &str, size: u64) -> bool {
+pub fn kept_out(path: &str, size: u64, include: &[String]) -> bool {
+    // Choosing a flagged path lets in that path only: a folder chosen is no longer a build folder,
+    // but each file in it, and any build folder below it, is still judged on its own, so a `.env`
+    // inside a chosen `bin` stays out (NIT-685 review).
+    let chose = |p: &str| include.iter().any(|i| i == p);
     let parts: Vec<&str> = path.split('/').collect();
-    (1..parts.len()).any(|n| classify(&parts[..n].join("/"), 0, true).is_some()) || classify(path, size, false).is_some()
+    (1..parts.len()).any(|n| {
+        let dir = parts[..n].join("/");
+        !chose(&dir) && classify(&dir, 0, true).is_some()
+    }) || (!chose(path) && classify(path, size, false).is_some())
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -234,14 +241,13 @@ pub fn make(root: &Path, gitignore: Option<&[String]>, include: &[String], ident
         args.extend(batch.iter().map(String::as_str));
         git(root, &args)?;
     }
-    let chosen = |p: &str| include.iter().any(|i| p == i || p.starts_with(&format!("{i}/")));
     // The staged paths as they are: NUL-separated and unquoted, since git quotes a name with
     // non-ASCII characters in its default output (NIT-685 review).
     let out: Vec<String> = git(root, &["-c", "core.quotePath=false", "diff", "--cached", "--name-only", "--no-renames", "-z"])?
         .split('\0')
         .map(str::to_string)
-        .filter(|p| !p.is_empty() && !chosen(p))
-        .filter(|p| kept_out(p, std::fs::metadata(root.join(p)).map(|m| m.len()).unwrap_or(0)))
+        .filter(|p| !p.is_empty())
+        .filter(|p| kept_out(p, std::fs::metadata(root.join(p)).map(|m| m.len()).unwrap_or(0), include))
         .collect();
     // Each one named literally: a path with `[` or `*` in it is not a pattern here.
     for batch in out.chunks(200) {
@@ -287,7 +293,11 @@ mod tests {
         assert_eq!(literal("!important*.bin"), r"\!important\*.bin");
         // A flagged template stays out: its own path line comes after the template exceptions.
         let flag = |path: &str, reason| Flagged { path: path.into(), reason, bytes: 0, line: ignore_line(path, reason) };
-        assert!(kept_out("web/node_modules/pkg/index.js", 1) && kept_out("certs/server.pem", 1) && !kept_out("src/main.rs", 1));
+        assert!(kept_out("web/node_modules/pkg/index.js", 1, &[]) && kept_out("certs/server.pem", 1, &[]) && !kept_out("src/main.rs", 1, &[]));
+        // A chosen folder lets its files in, but not a secret or a build folder inside it.
+        let bin = ["bin".to_string()];
+        assert!(!kept_out("bin/tool", 1, &bin) && kept_out("bin/.env", 1, &bin) && kept_out("bin/node_modules/x.js", 1, &bin));
+        assert!(!kept_out("certs/server.pem", 1, &["certs/server.pem".to_string()]), "a chosen file goes in");
         let lines = proposed_gitignore(&[flag(".env.example", Reason::Large), flag(".env.local", Reason::Secret)]);
         assert_eq!(lines.last().map(String::as_str), Some("/.env.example"), "{lines:?}");
         assert_eq!(ignore_line("deploy/server.pem", Reason::Secret), "*.pem");
@@ -355,10 +365,11 @@ mod tests {
         std::fs::write(dir.join(".gitignore"), "bin/
 ").unwrap();
         std::fs::write(dir.join("bin/tool"), "#!/bin/sh").unwrap();
+        std::fs::write(dir.join("bin/.env"), "TOKEN=1").unwrap();
         git(&dir, &["init", "--quiet", "--initial-branch=main"]).unwrap();
         make(&dir, None, &["bin".to_string()], Some(("You", "you@example.com"))).unwrap();
         let committed = git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
-        assert_eq!(committed.lines().collect::<Vec<_>>(), [".gitignore", "bin/tool"]);
+        assert_eq!(committed.lines().collect::<Vec<_>>(), [".gitignore", "bin/tool"], "the chosen folder, without the secret in it");
         std::fs::remove_dir_all(&dir).ok();
     }
 }
