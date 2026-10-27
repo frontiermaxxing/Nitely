@@ -315,7 +315,21 @@ pub fn check_playbook_authority(db:&Db,keys:&[&str],pb:&Playbook)->Result<()> {
 #[derive(Debug,Clone,Serialize)]
 pub struct EffectiveRepository {pub repo:String,pub options:Options,pub warnings:Vec<String>,
  /// Nothing runs the full suite on main: only Custom can choose this, and the app shows it in red.
- pub backstop_off:bool}
+ pub backstop_off:bool,
+ /// With review off, why each change will wait for the person: the playbook's review flags, which
+ /// no reviewer is there to answer (NIT-701). Shown where the mode is chosen, not folded away.
+ #[serde(skip_serializing_if="Option::is_none")]
+ pub flags_wait:Option<String>}
+
+/// With review off, each of the playbook's `[[review.flags]]` questions goes unanswered and sends
+/// every change to the person for approval (`ReviewRules::unevaluated_reasons`). Says so, naming
+/// them, with the ways out; None while review is on or there are no flags.
+pub fn flags_wait(options:&Options,pb:&Playbook)->Option<String> {
+ if options.pre_review!=Some(PreReview::Off)||pb.review.flags.is_empty() {return None;}
+ let names:Vec<&str>=pb.review.flags.iter().map(|f|f.name.as_str()).collect();
+ let (them,it)=if names.len()==1 {("this review flag","it")} else {("these review flags","them")};
+ Some(format!("Review is off, but the playbook asks the reviewer {them}: {}. With no reviewer to answer {it}, each change will wait for you to approve it. To go without approving each one, propose a playbook change that drops {it}, or turn a flag into an [[approval.human_paths]] rule on the paths it is about.",names.join(", ")))
+}
 pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result<Vec<EffectiveRepository>> {
  let settings=db.project_review_mode(project)?;
  config.repos.iter().filter(|r|r.project.as_deref().is_some_and(|p|p.eq_ignore_ascii_case(project))).map(|repo| {
@@ -332,13 +346,29 @@ pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result
   if options.test_depth==Some(TestDepth::Risk) {warnings.push("Risk-based verification falls back to Full for missing mappings, protected changes or an unhealthy enabled backstop.".into());}
   if options.full_backstop.as_ref().is_some_and(|b|!b.enabled) {warnings.push("The full suite on main is off: nothing checks main after reduced checks land.".into());}
   let backstop_off=options.full_backstop.as_ref().is_some_and(|b|!b.enabled);
-  Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings,backstop_off})
+  let flags_wait=flags_wait(&options,&pb);
+  Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings,backstop_off,flags_wait})
  }).collect()
 }
 
 #[cfg(test)]
 mod tests {
  use super::*;
+ /// NIT-701: review off with flags in the playbook means every change waits for the person; the
+ /// settings say so, naming the flags. Review on, or no flags, says nothing.
+ #[test]
+ fn review_off_with_review_flags_says_each_change_waits_for_the_person() {
+  let mut pb=Playbook::default();
+  let off=Options{pre_review:Some(PreReview::Off),..Default::default()};
+  assert_eq!(flags_wait(&off,&pb),None);
+  for name in ["MONEY","RELEASE"] {pb.review.flags.push(crate::review::Flag{name:name.into(),question:"Does it touch money?".into(),reason:String::new()});}
+  let said=flags_wait(&off,&pb).unwrap();
+  assert!(said.contains("MONEY, RELEASE")&&said.contains("each change will wait for you"),"{said}");
+  assert_eq!(flags_wait(&Options{pre_review:Some(PreReview::Individual),..Default::default()},&pb),None);
+  // What submit then reasons with: one unanswered question per flag.
+  pb.review.enabled=false;
+  assert_eq!(pb.review.unevaluated_reasons().len(),2);
+ }
  /// Which plans start by themselves decides nothing about checking a change: it never moves a
  /// gate's authority, and the presets keep it to plans the person asked for (NIT-550).
  #[test]
