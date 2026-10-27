@@ -330,11 +330,17 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
                 let started = format!("Review by {reviewer}{} started", noted(&choice.note));
                 db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
                 match rules.run(&reviewer, &worktree, &since, previous.as_ref()) {
-                    Ok(r) => break (choice, r),
+                    Ok(r) => {
+                        db.reviewer_ran(&reviewer)?;
+                        break (choice, r);
+                    }
                     Err(e) if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() => return Err(e),
                     Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
                         Ok(out) => {
                             db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
+                            // Told once, until it reviews again (NIT-362).
+                            let hint = if out.why == "not signed in" { crate::review::login_hint(&reviewer, &pb.review) } else { String::new() };
+                            db.reviewer_could_not_run(&issue.key, &reviewer, &out.why, &hint)?;
                             failed.push(out);
                         }
                         Err(e) => {
@@ -641,10 +647,15 @@ fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, b
         let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, worktree), &failed)?;
         db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &format!("Item review by {}{} started", choice.reviewer, noted(&choice.note)))?;
         match rules.run(&choice.reviewer, worktree, &since, previous.as_ref()) {
-            Ok(r) => break (choice, r),
+            Ok(r) => {
+                db.reviewer_ran(&choice.reviewer)?;
+                break (choice, r);
+            }
             Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
                 Ok(out) => {
                     db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Item review by {} could not run ({}); trying another reviewer", choice.reviewer, out.why))?;
+                    let hint = if out.why == "not signed in" { crate::review::login_hint(&choice.reviewer, &pb.review) } else { String::new() };
+                    db.reviewer_could_not_run(&issue.key, &choice.reviewer, &out.why, &hint)?;
                     failed.push(out);
                 }
                 Err(e) => return Err(e),

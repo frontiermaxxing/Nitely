@@ -2370,7 +2370,9 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
   const result: unknown = (() => {
     switch (cmd) {
       case "snapshot":
-        return snapshot();
+        return reviewersFixture(snapshot());
+      case "rerun_same_vendor_reviews":
+        return (args.keys as string[]) ?? [];
       case "pulse":
         return pulse(Number(args.since), Number(args.dayStart));
       case "activity":
@@ -2685,4 +2687,20 @@ function linksStatus() {
     command: 'conhost.exe --headless "C:\\Users\\you\\.cargo\\bin\\nitely.exe" links serve',
     port: 7423,
   };
+}
+
+/**
+ * `?reviewer=down`: Codex can't review and two changes were reviewed by their author's own vendor
+ * meanwhile; `?reviewer=back`: it reviews again, and those changes can be rerun (NIT-362).
+ */
+function reviewersFixture<T extends object>(board: T): T {
+  const mode = new URLSearchParams(location.search).get("reviewer");
+  if (mode !== "down" && mode !== "back") return board;
+  const now = Math.floor(Date.now() / 1000);
+  const same = [
+    { key: "NIT-41", title: "Sync retries back off", state: "In Review", reviewer: "claude", note: "same vendor: codex could not run: not signed in", ts: now - 3600 },
+    { key: "NIT-44", title: "Inbox keeps its scroll", state: "Needs You", reviewer: "claude", note: "same vendor: codex could not run: not signed in", ts: now - 1800 },
+  ];
+  const down = mode === "down" ? [{ reviewer: "codex", why: "not signed in", hint: "run `codex login`", since: now - 5400 }] : [];
+  return { ...board, reviewers_down: down, same_vendor_reviews: same };
 }
