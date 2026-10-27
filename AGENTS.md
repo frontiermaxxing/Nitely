@@ -33,12 +33,16 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    them and submit again), to Needs You when Andrew must approve, and to In Review otherwise. The
    result comes back through `next_task`, `submit_status` (`nitely submit-status`), or a notice on
    your next nitely call. `submit` with `wait: true` (`nitely submit --wait`) blocks for the result
-   as before. `run_gate` alone runs just the gate.
+   as before. `run_gate` alone runs just the gate. The reviewer reads the issue, the issues it
+   blocks and is blocked by, its goal and your notes; put what the change deliberately leaves out,
+   scope split with other issues and decisions already made in `reviewer_note` (`--reviewer-note`),
+   and on a resubmit answer there a finding you dispute before you `request_acceptance`.
 7. Once the review passed (and Andrew approved, when it waits for him), call `land` (or
    `nitely land NIT-n`). It lands one branch at a time: rebase onto `main`, check the review still
    covers exactly this change, gate (in a lane, ahead of everything else queued), fast-forward,
    push, clean up, and move the issue to Done. On a rebase conflict, resolve it in the worktree,
-   then submit and land again.
+   then land again: a resolution that only combines the two sides keeps the review, and anything
+   more is reviewed at the land, with no new submit.
 8. Nitely is public. Code, UI text, CLI help, sample data, tests, comments, docs and commit messages
    never name another project Andrew works on, or its paths, branches, accounts or files: use
    made-up examples (`C:\Code\my-app`, "Acme", project key `APP`). An issue on the board may mention

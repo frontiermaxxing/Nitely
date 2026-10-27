@@ -52,6 +52,27 @@ impl Db {
     /// person reads. It is an ask (answered like one, `get_answer`) that carries the finding. The
     /// question holds the land, never the agent (NIT-568): the issue stays where it is.
     pub fn request_acceptance(&mut self, key: &str, finding: &str, why: &str, cwd: Option<&str>, actor: &Actor) -> Result<Ask> {
+        let (issue, found, _) = self.disputed_finding(key, finding, why)?;
+        let asked = AskedFinding { priority: found.priority, text: found.text.clone() };
+        // One decision per finding: a request already open for it stands, with this reasoning (NIT-353).
+        let ask = match self.open_request_for(&issue.key, &found.text)? {
+            Some(open) => {
+                self.conn.execute("UPDATE ask SET finding = ?2, question = ?3 WHERE id = ?1", params![open.id, serde_json::to_string(&asked)?, why])?;
+                open
+            }
+            None => {
+                let ask = self.create_ask(why, &[], Some(&issue.key), cwd, actor)?;
+                self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![ask.id, serde_json::to_string(&asked)?])?;
+                ask
+            }
+        };
+        self.ask(ask.id)?.context("ask vanished")
+    }
+
+    /// The P0/P1 finding of `key`'s latest review that `finding` names (its number from 1, or its
+    /// exact text), with the issue and the reviewer that raised it: what a request to accept it is
+    /// about, checked before a fresh review looks at it (NIT-318) and again before it is asked.
+    pub fn disputed_finding(&self, key: &str, finding: &str, why: &str) -> Result<(crate::issues::IssueRecord, Finding, String)> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         if why.trim().is_empty() {
             bail!("say why the person should accept it as it is: that is what they decide on");
@@ -73,20 +94,8 @@ impl Db {
         if self.accepted_for(&issue.key, &review.patch_id)?.iter().any(|a| a.finding == found.text) {
             bail!("the person already accepted that finding for this patch");
         }
-        let asked = AskedFinding { priority: found.priority, text: found.text.clone() };
-        // One decision per finding: a request already open for it stands, with this reasoning (NIT-353).
-        let ask = match self.open_request_for(&issue.key, &found.text)? {
-            Some(open) => {
-                self.conn.execute("UPDATE ask SET finding = ?2, question = ?3 WHERE id = ?1", params![open.id, serde_json::to_string(&asked)?, why])?;
-                open
-            }
-            None => {
-                let ask = self.create_ask(why, &[], Some(&issue.key), cwd, actor)?;
-                self.conn.execute("UPDATE ask SET finding = ?2 WHERE id = ?1", params![ask.id, serde_json::to_string(&asked)?])?;
-                ask
-            }
-        };
-        self.ask(ask.id)?.context("ask vanished")
+        let found = found.clone();
+        Ok((issue, found, review.reviewer))
     }
 
     /// Review rounds on `key` stopped converging (`why`): the person decides each P0/P1 finding of

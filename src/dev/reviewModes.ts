@@ -35,7 +35,9 @@ export function effectiveModes(project: string) {
   // Mirrors project_modes::builtin: what Custom leaves unset is Nitely's default, not the playbook's.
   const fallback: ModeOptions = { ...presets.find((p) => p.mode === "release")!.options, full_backstop: { enabled: false, landings: 5, delay_seconds: 1800 }, audit_percent: 10, goal_branches: false, item_review: "off", checkpoint: null, goal_plans: "approve", stalled_reviews: "ask" };
   const effective = Object.fromEntries(Object.entries(options).map(([key, value]) => [key, value ?? fallback[key as keyof ModeOptions]])) as unknown as ModeOptions;
-  return [{ repo: "Sample project", options: effective, warnings: [], backstop_off: effective.full_backstop?.enabled === false }];
+  // Mirrors project_modes::flags_wait: the sample playbook asks the reviewer one flag (src/dev/rules.ts).
+  const flags_wait = effective.pre_review === "off" ? "Review is off, but the playbook asks the reviewer this review flag: MONEY_OR_RELEASE. With no reviewer to answer it, each change will wait for you to approve it. To go without approving each one, propose a playbook change that drops it, or turn a flag into an [[approval.human_paths]] rule on the paths it is about." : undefined;
+  return [{ repo: "Sample project", options: effective, warnings: [], backstop_off: effective.full_backstop?.enabled === false, flags_wait }];
 }
 export function periodicReviews(project: string): PeriodicStatus[] {
   if (project !== "NIT") return [];

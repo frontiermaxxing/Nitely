@@ -246,6 +246,10 @@ enum Cmd {
         /// The issue; defaults to the one the branch names.
         #[arg(long)]
         issue: Option<String>,
+        /// For the reviewer: what the change deliberately leaves out, scope split with other
+        /// issues, decisions made, answers to findings you dispute. Claims it checks against the code.
+        #[arg(long)]
+        reviewer_note: Option<String>,
         /// Skip the review; the change then waits for a human's approval.
         #[arg(long)]
         no_review: bool,
@@ -326,6 +330,19 @@ enum Cmd {
         project: Option<String>,
         #[arg(long, default_value_t = 14)]
         days: usize,
+    },
+    /// How the pipeline performed per week (NIT-703): reviews and their rounds, findings accepted or
+    /// split off, lane waits against run time, land stops by cause, questions to the person, each
+    /// issue's claim-to-landed times, and tokens per landed issue.
+    Pipeline {
+        #[arg(long)]
+        project: Option<String>,
+        /// How many weeks back, this one included.
+        #[arg(long, default_value_t = 4)]
+        weeks: usize,
+        /// Leave out the token figures, which read the agents' session files.
+        #[arg(long)]
+        no_tokens: bool,
     },
     /// The issue mirror (docs/mirror.md): `status` says what it would publish; `sync` brings the
     /// host up to date now. Only the app turns it on.
@@ -1829,7 +1846,7 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Submit { issue, no_review, local, wait, solution_title, solution_summary } => {
+        Cmd::Submit { issue, no_review, local, wait, solution_title, solution_summary, reviewer_note } => {
             let config = Config::load()?;
             let mut db = Db::open_default()?;
             let cwd = cwd()?;
@@ -1839,6 +1856,9 @@ fn run(cmd: Cmd) -> Result<()> {
             if !wait {
                 let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
                 let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &me, &runner)?;
+                if let Some(note) = reviewer_note.as_deref().filter(|n| !n.trim().is_empty()) {
+                    nitely_core::submit::brief_reviewer(&db, &job.issue, note, &me)?;
+                }
                 print_json(&job)?;
                 if job.finished() {
                     eprintln!("{}", job.outcome());
@@ -1851,6 +1871,9 @@ fn run(cmd: Cmd) -> Result<()> {
             // As a job run here, so it is on record while it runs and after, as a background one is
             // (closing an issue reads both: landed_elsewhere.rs).
             let job = nitely_core::submit_job::enqueue(&db, &opts, &me)?;
+            if let Some(note) = reviewer_note.as_deref().filter(|n| !n.trim().is_empty()) {
+                nitely_core::submit::brief_reviewer(&db, &job.issue, note, &me)?;
+            }
             let job = nitely_core::submit_job::run(&mut db, &config, job.id)?;
             let Some(s) = job.result else { bail!("{}", job.error.unwrap_or_else(|| format!("submit job {} ended {}", job.id, job.state))) };
             print_json(&s)?;
@@ -2002,6 +2025,12 @@ fn run(cmd: Cmd) -> Result<()> {
                 bail!("this deletes every report this install sent from the public board and forgets its key; run it again with --yes if that is what you want");
             }
             print_json(&serde_json::json!({ "deleted": nitely_crew::leaderboard_send::Sharing::default_dir().leave("cli")? }))
+        }
+        Cmd::Pipeline { project, weeks, no_tokens } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+            print_json(&nitely_crew::pipeline::read(&db, (!no_tokens).then_some(&config), &project, weeks, nitely_core::db::now())?)
         }
         Cmd::Spend { issue, project, days } => {
             let config = Config::load()?;
