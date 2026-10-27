@@ -181,7 +181,10 @@ pub fn review_rebased(db: &mut Db, root: &Path, pb: &Playbook, key: &str, worktr
     pending.commit_sha = head.clone();
     pending.solution = None;
     pending.reasons = pb.human_reasons(&files)?;
-    let change = BatchChange { key: key.to_string(), title: issue.title, branch: branch.to_string(), base: base.to_string(), head, worktree: worktree.to_path_buf(), files, previous };
+    // Reviewed alone: told what a single review would be (NIT-501).
+    let gate = pending.gate.clone().unwrap_or(crate::playbook::GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.clone(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
+    let context = crate::submit::review_context(db, &issue, &gate)?;
+    let change = BatchChange { key: key.to_string(), title: issue.title, branch: branch.to_string(), base: base.to_string(), head, worktree: worktree.to_path_buf(), files, previous, context };
     let w = Waiting { pending, change, vendor, choice };
     db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "status", "The rebase changed more than its conflicts: it is reviewed at its land, on how it differs from the change that passed")?;
     let reviewer = w.choice.reviewer.clone();
