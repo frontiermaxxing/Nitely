@@ -130,22 +130,7 @@ export function listWords(items: string[]): string {
   return items.length <= 2 ? items.join(" and ") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
 
-/** How a missing tool installs, as its official installer says, on this platform: the command shown behind its disclosure. */
-export function installCommand(command: string, platform: "windows" | "mac" | "linux"): string | null {
-  const commands: Record<string, Record<string, string>> = {
-    git: { windows: "winget install --id Git.Git -e", mac: "xcode-select --install", linux: "sudo apt install git" },
-    claude: { windows: "irm https://claude.ai/install.ps1 | iex", mac: "curl -fsSL https://claude.ai/install.sh | bash", linux: "curl -fsSL https://claude.ai/install.sh | bash" },
-    codex: { windows: "npm install -g @openai/codex", mac: "npm install -g @openai/codex", linux: "npm install -g @openai/codex" },
-    gh: { windows: "winget install --id GitHub.cli -e", mac: "brew install gh", linux: "sudo apt install gh" },
-  };
-  return commands[command]?.[platform] ?? null;
-}
-
 /** The command that signs a tool in, in its own window: what Sign in runs. Claude Code asks to log in when it starts signed out. */
 export function signInCommand(command: string): string | null {
   return ({ claude: "claude", codex: "codex login", gh: "gh auth login" } as Record<string, string>)[command] ?? null;
-}
-
-export function platformOf(userAgent: string): "windows" | "mac" | "linux" {
-  return /Windows/i.test(userAgent) ? "windows" : /Mac/i.test(userAgent) ? "mac" : "linux";
 }

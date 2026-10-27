@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
-import { invoke } from "../backend";
-import type { AgentPlan, AgentsUpdated, Project, Tool } from "../types";
+import { invoke, listen } from "../backend";
+import type { AgentPlan, AgentsUpdated, InstallPlan, Project, Tool } from "../types";
 import { AgentChanges } from "../Agents";
 import { AddProject } from "../AddProject";
 import { Button } from "../ui";
@@ -87,6 +87,7 @@ export function FirstRun(props: {
 }) {
   const [tools, setTools] = useState<Tool[] | null>(null);
   const [installs, setInstalls] = useState<Record<string, InstallState>>({});
+  const [plans, setPlans] = useState<InstallPlan[]>([]);
   const [checking, setChecking] = useState(false);
   // Reopened from Settings, Welcome was seen: the setup ran before.
   const [seen, setSeen] = useState<StepId[]>(() => {
@@ -103,10 +104,39 @@ export function FirstRun(props: {
     } catch {
       setTools([]);
     }
-    // Installs in progress or stopped, where the backend reports them (NIT-688); none until then.
-    invoke<Record<string, InstallState>>("tools_installs").then(setInstalls, () => setInstalls({}));
+    // How each missing tool would install: the exact command, shown before it runs (NIT-688).
+    invoke<InstallPlan[]>("tool_install_plans").then(setPlans, () => setPlans([]));
     setChecking(false);
   }, []);
+
+  // Each line an installer prints, as it prints it.
+  useEffect(() => {
+    const off = listen<{ tool: string; line: string }>("tool-install", (e) => {
+      const { tool, line } = e.payload;
+      setInstalls((all) => (all[tool]?.state === "installing" ? { ...all, [tool]: { ...all[tool], log: [...all[tool].log, line].slice(-8) } } : all));
+    });
+    return () => {
+      off.then((f) => f());
+    };
+  }, []);
+
+  // One install at a time, as confirmed by the click: the plan's command, as shown.
+  const install = async (tool: string) => {
+    const plan = plans.find((p) => p.tool === tool);
+    setInstalls((all) => ({ ...all, [tool]: { state: "installing", progress: plan ? `Installing with ${plan.via === "Vendor" ? "its own installer" : plan.via.toLowerCase()}` : "Installing", log: [] } }));
+    try {
+      const after = await invoke<Tool>("install_tool", { tool });
+      setTools((all) => (all ? all.map((t) => (t.command === tool ? after : t)) : all));
+      setInstalls((all) => {
+        const rest = { ...all };
+        delete rest[tool];
+        return rest;
+      });
+      check();
+    } catch (e) {
+      setInstalls((all) => ({ ...all, [tool]: { state: "failed", log: all[tool]?.log ?? [], error: String(e) } }));
+    }
+  };
   useEffect(() => {
     check();
   }, [check]);
@@ -226,7 +256,7 @@ export function FirstRun(props: {
 
           {current === "tools" && (
             <>
-              <ToolsStep tools={tools} installs={installs} />
+              <ToolsStep tools={tools} plans={plans} installs={installs} onInstall={install} />
               {held && tools && (
                 <div className="fr-notice fr-notice-needs">
                   <strong>Continue waits for git and one agent.</strong> Install what's missing, then check again. GitHub CLI can wait.

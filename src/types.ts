@@ -730,6 +730,21 @@ export interface Tool {
   signed_in: boolean | null;
 }
 
+/** How a missing tool installs (crates/nitely-core/src/tools_install.rs, NIT-688): shown before it runs. */
+export interface InstallPlan {
+  tool: string;
+  command: string[];
+  /** The command as the person reads it. */
+  shown: string;
+  via: "Winget" | "Brew" | "Npm" | "Vendor" | "System";
+  docs: string;
+  /** The installer asks for administrator rights; the OS shows that prompt. */
+  elevates: boolean;
+  /** Nitely runs it when the person says so; false where it only shows it. */
+  runs: boolean;
+  note?: string;
+}
+
 export interface ConnectChange {
   target: string;
   action: "create" | "update" | "unchanged" | "run" | "manual" | "remove";

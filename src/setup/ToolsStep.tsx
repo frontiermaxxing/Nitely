@@ -1,18 +1,13 @@
 import { useState } from "react";
-import type { Tool } from "../types";
+import type { InstallPlan, Tool } from "../types";
 import { Button } from "../ui";
-import { installCommand, platformOf, signInCommand } from "./steps";
+import { signInCommand } from "./steps";
 
-/**
- * An install in progress or one that stopped, as the installer reports it (NIT-688 fills these in;
- * until then the command is shown to run by hand).
- */
+/** An install in progress or one that stopped, with the lines its installer printed (`tool-install` events, NIT-688). */
 export interface InstallState {
   state: "installing" | "failed";
-  /** "Installing with npm · 38 s". */
+  /** "Installing with npm". */
   progress?: string;
-  /** 0 to 1, when the installer says. */
-  fraction?: number;
   log: string[];
   /** Why it stopped. */
   error?: string;
@@ -63,14 +58,16 @@ export function ToolMark(props: { command: string }) {
 }
 
 /** Git, Claude Code, Codex and the GitHub CLI, each found, missing, installing or failed (NIT-690). */
-export function ToolsStep(props: { tools: Tool[] | null; installs: Record<string, InstallState>; onInstall?: (command: string) => void; onCancel?: (command: string) => void }) {
-  const platform = platformOf(navigator.userAgent);
+export function ToolsStep(props: { tools: Tool[] | null; plans: InstallPlan[]; installs: Record<string, InstallState>; onInstall: (command: string) => void }) {
   if (!props.tools) return <p className="fr-note">Looking for the tools on this machine…</p>;
   return (
     <div className="fr-list">
       {props.tools.map((t) => {
         const install = props.installs[t.command];
-        const command = installCommand(t.command, platform);
+        const plan = props.plans.find((p) => p.tool === t.command);
+        const command = plan?.shown ?? null;
+        // Nitely runs the installer only where the plan says it may; elsewhere the command is shown to run by hand.
+        const installs = !!plan?.runs;
         return (
           <div key={t.command} className="fr-row">
             <div className="fr-row-main">
@@ -86,11 +83,6 @@ export function ToolsStep(props: { tools: Tool[] | null; installs: Record<string
                   <div className="fr-progress">
                     <span>{install.progress ?? "Installing"}</span>
                   </div>
-                  {install.fraction !== undefined && (
-                    <div className="fr-bar">
-                      <div style={{ width: `${Math.round(install.fraction * 100)}%` }} />
-                    </div>
-                  )}
                   {install.log.length > 0 && (
                     <div className="fr-log">
                       {install.log.map((l, i) => (
@@ -102,34 +94,29 @@ export function ToolsStep(props: { tools: Tool[] | null; installs: Record<string
               )}
               {!t.path && install?.state === "failed" && <div className="fr-notice fr-notice-fail">{install.error ?? "The installer stopped."} Try again, or run the command yourself.</div>}
               {!t.path && install?.state !== "installing" && command && (
-                <details className="fr-disclosure" open={install?.state === "failed"}>
-                  <summary>The command it runs</summary>
+                <details className="fr-disclosure" open={install?.state === "failed" || !installs}>
+                  <summary>{installs ? "The command it runs" : "Run this yourself"}</summary>
                   <CommandLine command={command} />
                 </details>
               )}
+              {!t.path && install?.state !== "installing" && plan?.elevates && <div className="fr-note">The installer asks for administrator rights; Windows or macOS shows that prompt, not Nitely.</div>}
+              {!t.path && plan?.note && <div className="fr-note">{plan.note}</div>}
             </div>
             <div className="fr-row-side">
               {t.path ? (
                 <Chip tone="ready">Found</Chip>
               ) : install?.state === "installing" ? (
-                <>
-                  <Chip tone="busy">Installing</Chip>
-                  {props.onCancel && (
-                    <Button variant="quiet" onClick={() => props.onCancel!(t.command)}>
-                      Cancel
-                    </Button>
-                  )}
-                </>
+                <Chip tone="busy">Installing</Chip>
               ) : install?.state === "failed" ? (
                 <>
                   <Chip tone="fail">Failed</Chip>
-                  {props.onInstall && <Button onClick={() => props.onInstall!(t.command)}>Try again</Button>}
+                  {installs && <Button onClick={() => props.onInstall(t.command)}>Try again</Button>}
                 </>
               ) : (
                 <>
                   <Chip tone="quiet">Not installed</Chip>
-                  {props.onInstall && (
-                    <Button variant="primary" onClick={() => props.onInstall!(t.command)}>
+                  {installs && (
+                    <Button variant="primary" onClick={() => props.onInstall(t.command)}>
                       Install
                     </Button>
                   )}

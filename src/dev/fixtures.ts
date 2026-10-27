@@ -44,6 +44,7 @@ import type {
   ConnectPlan,
   FirstCommitPreview,
   Tool,
+  InstallPlan,
   FlowIssue,
   Happening,
   IssueDetail,
@@ -1786,15 +1787,25 @@ const madeRepos = new Set<string>();
 
 /**
  * The tools as the first-run setup sees them (NIT-690). `?setup=` picks a state: none (nothing
- * found), partial (git and Claude Code, signed out), installing, failed, or done (the default).
+ * found), partial (git and Claude Code, signed out), installing (an Install clicked takes a long
+ * while), failed (the GitHub CLI's install stops), or done (the default).
  */
 const setupState = () => new URLSearchParams(location.search).get("setup") ?? "done";
 
+/** Tools installed in this preview session (install_tool): found from then on. */
+const installedTools = new Set<string>();
+
+const toolPath = (command: string) => `C:\\Users\\you\\.local\\bin\\${command}.exe`;
+
 function toolsCheck(): Tool[] {
+  return setupTools().map((t) => (installedTools.has(t.command) && !t.path ? { ...t, path: toolPath(t.command), version: "1.0.0" } : t));
+}
+
+function setupTools(): Tool[] {
   const t = (command: string, name: string, version: string | null, signed_in: boolean | null): Tool => ({
     command,
     name,
-    path: version ? `C:\Users\you\.local\bin\${command}.exe` : null,
+    path: version ? toolPath(command) : null,
     version,
     signed_in,
   });
@@ -1810,17 +1821,37 @@ function toolsCheck(): Tool[] {
   }
 }
 
-function toolsInstalls() {
-  switch (setupState()) {
-    case "installing":
-      return {
-        codex: { state: "installing", progress: "Installing with npm · 38 s", fraction: 0.68, log: ["> npm install -g @openai/codex", "added 3 packages in 12s", "fetching the platform binary…", "verifying codex.exe"] },
-      };
-    case "failed":
-      return { gh: { state: "failed", log: [], error: "winget stopped: another installation is in progress (0x8A150056)." } };
-    default:
-      return {};
+/** How each missing tool would install, as tools_install.rs plans it on Windows. */
+function toolInstallPlans(): InstallPlan[] {
+  const plan = (tool: string, shown: string, via: InstallPlan["via"], elevates = false): InstallPlan => ({ tool, command: shown.split(" "), shown, via, docs: "https://example.com", elevates, runs: true });
+  return toolsCheck()
+    .filter((t) => !t.path)
+    .map((t) =>
+      t.command === "git"
+        ? plan("git", "winget install --id Git.Git -e", "Winget", true)
+        : t.command === "claude"
+          ? plan("claude", "irm https://claude.ai/install.ps1 | iex", "Vendor")
+          : t.command === "codex"
+            ? plan("codex", "npm install -g @openai/codex", "Npm")
+            : plan("gh", "winget install --id GitHub.cli -e", "Winget"),
+    );
+}
+
+/**
+ * An install, streamed as `tool-install` events. Under `?setup=failed` the GitHub CLI's stops as
+ * winget does when another install is running; under `?setup=installing` it takes a long while.
+ */
+async function installTool(args: Record<string, unknown>): Promise<Tool> {
+  const tool = String(args.tool);
+  const lines = [`> ${toolInstallPlans().find((p) => p.tool === tool)?.shown ?? tool}`, "added 3 packages in 12s", "fetching the platform binary…", `verifying ${tool}.exe`];
+  const wait = setupState() === "installing" ? 4000 : 600;
+  for (const line of lines) {
+    await new Promise((r) => setTimeout(r, wait));
+    window.dispatchEvent(new CustomEvent("tool-install", { detail: { tool, line } }));
   }
+  if (setupState() === "failed" && tool === "gh") throw new Error("winget stopped: another installation is in progress (0x8A150056).");
+  installedTools.add(tool);
+  return toolsCheck().find((t) => t.command === tool)!;
 }
 
 /** Repos made in the preview that have their first commit (first_commit). */
@@ -2535,8 +2566,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return connectApply(args);
       case "tools_check":
         return toolsCheck();
-      case "tools_installs":
-        return toolsInstalls();
+      case "tool_install_plans":
+        return toolInstallPlans();
+      case "install_tool":
+        return installTool(args);
       case "connect_init":
         return connectInit(args);
       case "first_commit_preview":
@@ -2628,7 +2661,8 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
     }
   })();
   // Callers own what they get back, as they would a fresh copy from Tauri.
-  return structuredClone(result) as T;
+  // A command that takes time of its own (a streamed install) answers with a promise.
+  return structuredClone(result instanceof Promise ? await result : result) as T;
 }
 
 // The listener for issue links at login (Settings, Issue links): on until turned off.

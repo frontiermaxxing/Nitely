@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canContinue, installCommand, openingStep, opensOnLaunch, stepStates, stepSummary, toolsReady, type SetupFacts } from "./steps.ts";
+import { canContinue, openingStep, opensOnLaunch, stepStates, stepSummary, toolsReady, type SetupFacts } from "./steps.ts";
 import type { AgentPlan, Tool } from "../types.ts";
 
 const tool = (command: string, name: string, path: string | null, signed_in: boolean | null = null, version: string | null = null): Tool => ({ command, name, path, version, signed_in });
@@ -64,6 +64,4 @@ test("NIT-690: a done step's line says what it found", () => {
   assert.equal(stepSummary("project", f), "my-app · APP");
   assert.equal(stepSummary("agents", f), "Claude Code and Codex");
   assert.equal(stepSummary("agents", { ...f, agents: [agent("Claude Code", true, 0), agent("Codex", true, 0), agent("Cursor", true, 0)] }), "Claude Code, Codex and Cursor");
-  assert.equal(installCommand("claude", "windows"), "irm https://claude.ai/install.ps1 | iex");
-  assert.equal(installCommand("nope", "mac"), null);
 });
