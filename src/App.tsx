@@ -1,7 +1,7 @@
 import { lazy, Suspense, useCallback, useEffect, useRef, useState } from "react";
 import { ApprovalNotice, UpdateLine, useUpdateStatus } from "./Update";
 import { invoke, isLive, isPreview, listen } from "./backend";
-import type { AgentPlan, Board, Project } from "./types";
+import type { AgentPlan, Board, Project, Tool } from "./types";
 import { AgentSetup, pendingChanges, setupErrors } from "./Agents";
 import { Inbox, storeInboxProject, storedInboxProject, useDecisionDetails } from "./Inbox";
 import { decisionsOf, projectCounts, projectOf, type Decision } from "./decisions";
@@ -17,6 +17,8 @@ import type { GoalFocus } from "./GoalRows";
 import { IssuePanel } from "./IssuePanel";
 import { AskPanel, askIdOf } from "./AskPanel";
 import { AddProject } from "./AddProject";
+import { FirstRun, setupClosed } from "./setup/FirstRun";
+import { opensOnLaunch } from "./setup/steps";
 import { HOME_LABEL, nowSecs } from "./util";
 import { KeysSheet, Palette, useKeys } from "./Palette";
 import { reposOf } from "./BranchMap";
@@ -52,6 +54,8 @@ export type View =
   | { kind: "add" }
   | { kind: "agents" }
   | { kind: "settings"; section?: SettingsSection; project?: string }
+  /** The first-run setup (NIT-690), on first launch, or `reopened` from Settings. */
+  | { kind: "setup"; reopened?: boolean }
   | { kind: "kit" };
 
 // The view and the open issue live in the URL hash (`#now`, `#project/NIT/board`, `#inbox@NIT-12`,
@@ -76,6 +80,8 @@ function fromHash(hash: string): { view: View; issue: string | null } {
       ? { kind: "project", key: key.toUpperCase(), ...(isProjectTab(tab) ? { tab } : {}) }
       : kind === "settings"
         ? { kind: "settings", ...(isSettingsSection(key) ? { section: key, ...(key === "crew" && tab ? { project: tab.toUpperCase() } : {}) } : {}) }
+        : kind === "setup"
+          ? { kind: "setup", ...(new URLSearchParams(query).get("from") === "settings" ? { reopened: true } : {}) }
         : moved[kind]
           ? { kind: "settings", section: moved[kind] }
           : named === "inbox"
@@ -92,6 +98,8 @@ function toHash(view: View, issue: string | null): string {
       ? `project/${view.key}${view.tab ? `/${view.tab}` : ""}`
       : view.kind === "settings"
         ? `settings${view.section ? `/${view.section}${view.project ? `/${view.project}` : ""}` : ""}`
+        : view.kind === "setup"
+          ? `setup${view.reopened ? "?from=settings" : ""}`
         : view.kind === "pulse"
           ? "overview"
           : view.kind === "inbox" && view.project
@@ -286,6 +294,42 @@ export function App() {
   }, [inboxProject]);
   // Agents moving, here and on other machines: state, so on the sidebar where it is seen at a glance.
   const moving = board ? movingCounts(board, now) : { here: 0, elsewhere: 0, total: 0 };
+
+  // The first-run setup opens by itself once, on a launch with no project connected or a needed tool
+  // missing, unless the person closed it before (NIT-690). Asked once the projects are known.
+  const launchChecked = useRef(false);
+  useEffect(() => {
+    if (!board || launchChecked.current) return;
+    launchChecked.current = true;
+    if (setupClosed() || view.kind === "setup") return;
+    invoke<Tool[]>("tools_check").then(
+      (tools) => {
+        if (opensOnLaunch(tools, projects.length, setupClosed())) setView({ kind: "setup" });
+      },
+      () => {},
+    );
+  }, [board, projects.length, view.kind, setView]);
+
+  if (view.kind === "setup") {
+    return (
+      <div className="shell-setup">
+        <WindowControls />
+        <FirstRun
+          reopened={!!view.reopened}
+          projects={projects}
+          agents={agentsError ? null : agents}
+          onAgentsChanged={loadAgents}
+          onProjectAdded={() => {
+            changed();
+            loadAgents();
+          }}
+          onClose={(finished) =>
+            setView(view.reopened ? { kind: "settings", section: "setup" } : finished && projects[0] ? { kind: "project", key: projects[0].key } : { kind: "pulse" })
+          }
+        />
+      </div>
+    );
+  }
 
   return (
     <div className="shell">
