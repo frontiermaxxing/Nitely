@@ -199,6 +199,7 @@ mod tests {
             ("crates/nitely-core/src/connect.rs", "CLAUDE_CONFIG_DIR", 1, "removed from an agent's own command (run_in), which gets the agents' home as its home"),
             ("crates/nitely-core/src/connect.rs", "CODEX_HOME", 1, "as CLAUDE_CONFIG_DIR"),
             ("crates/nitely-core/src/install.rs", "dirs::", 0, "`nitely install`, the CLI's; the app never runs it"),
+            ("crates/nitely-core/src/rebase_review.rs", "dirs::", 1, "reads git's global attributes file, only to keep it in force in a land's rebase under `[land] union`; nothing is written there"),
             ("crates/nitely-core/src/mirror.rs", "dirs::", 1, "the home's path as text, kept out of mirrored issues; nothing is read"),
             ("src-tauri/src/lib.rs", "register_all", 0, "skipped under the harness"),
             ("crates/nitely-core/src/tools_install.rs", "Git.Git", 0, "install() refuses under NITELY_HARNESS and in tests: the harness never installs a tool"),

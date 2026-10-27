@@ -207,7 +207,11 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
   const items = { off: "None", advisory: "Without blocking", blocking: "Blocking" };
   const plans = { approve: "Approve each", asked: "Start plans I asked for", all: "Start every plan" };
   const stalled = { fix: "Split the change, tell me", ask: "Ask me about each finding" };
-  return <details className="review-mode-effective"><summary>Saved effective settings by repository</summary>
+  // Review off with review flags in a playbook: every change waits for the person (NIT-701), so
+  // that is said where it is seen, not only inside the folded details.
+  const waits = rows?.filter((r) => r.flags_wait) ?? [];
+  return <>{waits.map((r) => <p key={r.repo} className="settings-hint" role="status">{rows && rows.length > 1 ? <><span className="mono">{r.repo}</span>: </> : null}{r.flags_wait}</p>)}
+    <details className="review-mode-effective"><summary>Saved effective settings by repository</summary>
     {error && <p className="error small">{error}</p>}
     {rows?.length === 0 && <p className="muted small">No connected repositories.</p>}
     {rows?.map((r) => <div key={r.repo}><p className="small mono periodic-repo-name">{r.repo}</p>
@@ -224,7 +228,7 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
         <dt>Audit sampling</dt><dd>{r.options.audit_percent ? `${r.options.audit_percent}% of eligible changes` : "Off"}</dd></dl>
       {r.warnings.map((w, i) => <p key={i} className="settings-hint">{w}</p>)}
     </div>)}
-  </details>;
+  </details></>;
 }
 
 function PeriodicReviewHistory({ project, version }: { project: string; version: number }) {

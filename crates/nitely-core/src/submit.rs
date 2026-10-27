@@ -6,7 +6,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use rusqlite::OptionalExtension;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::db::{now, Db};
 use crate::issues::{Actor, IssueRecord};
@@ -222,6 +222,10 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     pb.approval.check_blocked(&files)?;
     crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
     let mut verification = crate::verification::assess_and_record(db, &worktree, &base, &checked_head, &issue,actor)?;
+    // The review starts as the gate is queued, on the commit it gates (NIT-699), so a round costs
+    // the longer of the two and not their sum.
+    let mut early = start_early_review(db, &root, &issue, &worktree, &branch, &since, &checked_head, &files, quick || opts.skip_review, actor)?;
+    let early_started = early.is_some();
     let gate = playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)?;
     if gate.skipped.is_some() {
         verification.enforcement="Project mode: automatic tests did not run; classification is advice only.".into();
@@ -269,21 +273,34 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             out.next = format!("{said}. {}", out.next);
             out.state = db.issue(&issue.key)?.map(|i| i.state).unwrap_or_default();
         }
+        // The review that ran alongside comes back with the failure, so one round fixes both.
+        if let Some(early) = early.take() {
+            let rules = rules_of(&review_policy(db, &root, &issue)?.0.review);
+            match early.join(&worktree, &out.commit, &rules) {
+                Ok(Some((choice, mut review))) => {
+                    crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
+                    review.note = choice.note.clone();
+                    let changes = review.verdict == "changes";
+                    out.next = format!("{} {}", out.next, crate::submit_rules::beside_failed_gate(changes, &review.reviewer));
+                    out.review = Some(review);
+                    // Recorded so the next round checks its findings first; a passing one is not,
+                    // since a review on record with no passing gate must not carry over.
+                    if changes {
+                        db.record_review(&out)?;
+                        let (pb, _) = review_policy(db, &root, &issue)?;
+                        let diff = diff_id(&worktree, &since, &out.commit).ok();
+                        db.conn.execute("UPDATE review SET rules = ?2, diff_id = ?3 WHERE id = ?1", rusqlite::params![db.conn.last_insert_rowid(), rules_of(&pb.review), diff])?;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review alongside the gate did not finish: {e:#}"))?,
+            }
+        }
         return Ok(out);
     }
 
     // A queued gate may outlive a human settings change. Read the authoritative policy again.
-    let mut pb = Playbook::load(&root)?;
-    crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
-    // A goal item on main still gets the blocking item review its mode asks for, though changes
-    // with no goal land unreviewed (NIT-563).
-    let item_blocking = issue.goal.is_some() && item_review_of(db, &issue.key)? == ItemReview::Blocking;
-    if item_blocking {
-        pb.review.enabled = true;
-    }
-    pb.review.policy_root = Some(root.clone());
-    // Guarded by that item review then, not by the review of changes with no goal (NIT-597 review).
-    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.map(|g| crate::project_yolo::ReviewGuard { item: item_blocking, ..g }).into_iter().collect();
+    let (pb, item_blocking) = review_policy(db, &root, &issue)?;
     crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
@@ -315,41 +332,21 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             let mut rules = pb.review.clone();
             rules.context = review_context(db, &issue, &out.gate)?;
             // Under a mode that reviews in batches, its review waits for its land queue batch
-            // (review_batch.rs): nothing is reviewed now, and land refuses it until it is.
-            if reused.is_none() && waits_for_land_batch(db, &pb, &issue, &worktree, &files, &vendor, &out.reasons, previous.as_ref(), actor)? {
+            // (review_batch.rs): nothing is reviewed now, and land refuses it until it is. One that
+            // started with the gate was found not to.
+            if reused.is_none() && !early_started && waits_for_land_batch(db, &pb, &issue, &worktree, &files, &vendor, &out.reasons, previous.as_ref(), actor)? {
                 out.review_batched = true;
                 return Ok(());
             }
-            // A reviewer that cannot run (not signed in, say) is passed over for the next candidate;
-            // one that ran and did not finish its review stops the submit.
-            let mut failed: Vec<crate::review::CouldNotRun> = vec![];
-            let (choice, mut review) = if let Some(done) = reused { done } else { loop {
-                rules.require_enabled()?;
-                let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, &worktree), &failed)?;
-                let reviewer = choice.reviewer.clone();
-                let started = format!("Review by {reviewer}{} started", noted(&choice.note));
-                db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
-                match rules.run(&reviewer, &worktree, &since, previous.as_ref()) {
-                    Ok(r) => {
-                        db.reviewer_ran(&reviewer)?;
-                        break (choice, r);
-                    }
-                    Err(e) if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() => return Err(e),
-                    Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
-                        Ok(out) => {
-                            db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
-                            // Told once, until it reviews again (NIT-362).
-                            let hint = if out.why == "not signed in" { crate::review::login_hint(&reviewer, &pb.review) } else { String::new() };
-                            db.reviewer_could_not_run(&issue.key, &reviewer, &out.why, &hint)?;
-                            failed.push(out);
-                        }
-                        Err(e) => {
-                            db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
-                            return Err(e);
-                        }
-                    },
-                }
-            } };
+            // The review that ran alongside the gate, when it reviewed the commit the gate passed.
+            let alongside = match early.take() {
+                Some(e) if reused.is_none() => e.join(&worktree, &out.commit, &rules_of(&pb.review))?,
+                _ => None,
+            };
+            let (choice, mut review) = match (reused, alongside) {
+                (Some(done), _) | (None, Some(done)) => done,
+                (None, None) => run_review(db, &pb.review, &rules, &vendor, &worktree, &since, previous.as_ref(), &issue.key, actor)?,
+            };
             crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
             let reviewer = choice.reviewer.clone();
             review.note = choice.note.clone();
@@ -429,12 +426,18 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     // Settings can change while queued reviewers or commands run. Unchecked evidence is usable
     // only while the person still authorizes that bypass.
     crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
+    if let Some(said) = crate::project_modes::looser_since(db, &issue.key, &out.gate.mode_authority)? {
+        db.log_event(actor, Some(&issue.key), Some(&wt), "status", &said)?;
+    }
     if out.yolo && !crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         bail!("YOLO mode was disabled during submit; submit again for normal verification");
     }
     crate::verification::check_gate_authority(db,&root,&worktree,&issue.key,&out.gate)?;
     db.record_review(&out)?;
     let review_id = db.conn.last_insert_rowid();
+    if let Some(r) = &out.review {
+        file_minor_findings(db, &issue.key, r, actor)?;
+    }
     if out.review.is_some() {
         // The commit the gate and review ran on, not what HEAD is now: a commit since was not reviewed.
         let diff = diff_id(&worktree, &since, &out.commit).ok();
@@ -606,6 +609,134 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     Ok(out)
 }
 
+/// The review policy a submit goes by, read now: the playbook under the issue's project mode, with
+/// a goal item's blocking item review and the YOLO guards. Also whether that item review blocks.
+fn review_policy(db: &Db, root: &Path, issue: &IssueRecord) -> Result<(Playbook, bool)> {
+    let mut pb = Playbook::load(root)?;
+    crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
+    // A goal item on main still gets the blocking item review its mode asks for, though changes
+    // with no goal land unreviewed (NIT-563).
+    let item_blocking = issue.goal.is_some() && item_review_of(db, &issue.key)? == ItemReview::Blocking;
+    if item_blocking {
+        pb.review.enabled = true;
+    }
+    pb.review.policy_root = Some(root.to_path_buf());
+    // Guarded by that item review then, not by the review of changes with no goal (NIT-597 review).
+    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.map(|g| crate::project_yolo::ReviewGuard { item: item_blocking, ..g }).into_iter().collect();
+    Ok((pb, item_blocking))
+}
+
+/// A review started as the gate was queued, on the commit the gate runs on (NIT-699).
+struct EarlyReview {
+    head: String,
+    /// The review policy it ran under (`rules_of`), to tell a change made to it meanwhile.
+    rules: String,
+    handle: std::thread::JoinHandle<Result<(crate::review::Choice, Review)>>,
+}
+
+impl EarlyReview {
+    /// Its result, once it finishes, when it is still of the change: the gate ran on the commit it
+    /// reviewed, the worktree has not moved since, and the review policy (`rules`, as now) is the
+    /// one it ran under, so a flag added meanwhile is answered (NIT-711 review). None when it is not.
+    fn join(self, worktree: &Path, gated: &str, rules: &str) -> Result<Option<(crate::review::Choice, Review)>> {
+        let done = self.handle.join().map_err(|_| anyhow::anyhow!("the review stopped unexpectedly"))??;
+        let at = |rev: &str| git(worktree, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")]).map(|c| c.trim().to_string());
+        Ok((at(gated)? == self.head && at("HEAD")? == self.head && rules == self.rules).then_some(done))
+    }
+}
+
+/// Starts the change's review on its own connection, alongside the gate, when it would be reviewed
+/// alone after a passing gate: not under YOLO or with review off, not a pass carried over, and not
+/// one its land queue batch reviews (batched pre-review is unchanged). The gate's result is not
+/// known yet, so the review is not told it.
+#[allow(clippy::too_many_arguments)]
+fn start_early_review(
+    db: &Db,
+    root: &Path,
+    issue: &IssueRecord,
+    worktree: &Path,
+    branch: &str,
+    since: &str,
+    head: &str,
+    files: &[String],
+    no_review: bool,
+    actor: &Actor,
+) -> Result<Option<EarlyReview>> {
+    let Some(path) = db.conn.path().filter(|p| !p.is_empty()).map(PathBuf::from) else { return Ok(None) };
+    if no_review {
+        return Ok(None);
+    }
+    let (pb, item_blocking) = review_policy(db, root, issue)?;
+    if (!item_blocking && crate::project_yolo::enabled_for_issue(db, &issue.key)?) || !pb.review.enabled || pb.review.require_enabled().is_err() {
+        return Ok(None);
+    }
+    let vendor = crate::git::parse_branch(branch).0.unwrap_or_default();
+    if reused_pass(db, &pb.review, &issue.key, &diff_id(worktree, since, head)?, &vendor, &|r| pb.review.is_installed(r, worktree))?.is_some() {
+        return Ok(None);
+    }
+    let previous = previous_round(db, &issue.key, worktree)?;
+    if waits_for_land_batch(db, &pb, issue, worktree, files, &vendor, &pb.human_reasons(files)?, previous.as_ref(), actor)? {
+        return Ok(None);
+    }
+    let not_gated_yet = GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.to_string(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+    let mut rules = pb.review.clone();
+    rules.context = review_context(db, issue, &not_gated_yet)?;
+    let wt = worktree.to_string_lossy().into_owned();
+    db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review starts with the gate, on {}", &head[..head.len().min(7)]))?;
+    let policy = pb.review.clone();
+    let (key, worktree, since, actor) = (issue.key.clone(), worktree.to_path_buf(), since.to_string(), actor.clone());
+    let handle = std::thread::spawn(move || {
+        let db = Db::open(&path)?;
+        run_review(&db, &policy, &rules, &vendor, &worktree, &since, previous.as_ref(), &key, &actor)
+    });
+    Ok(Some(EarlyReview { head: head.to_string(), rules: rules_of(&pb.review), handle }))
+}
+
+/// Runs the change's review: a reviewer that cannot run (not signed in, say) is passed over for the
+/// next candidate; one that ran and did not finish its review stops the submit.
+#[allow(clippy::too_many_arguments)]
+fn run_review(
+    db: &Db,
+    policy: &crate::review::ReviewRules,
+    rules: &crate::review::ReviewRules,
+    vendor: &str,
+    worktree: &Path,
+    since: &str,
+    previous: Option<&PreviousRound>,
+    key: &str,
+    actor: &Actor,
+) -> Result<(crate::review::Choice, Review)> {
+    let wt = worktree.to_string_lossy().into_owned();
+    let mut failed: Vec<crate::review::CouldNotRun> = vec![];
+    loop {
+        rules.require_enabled()?;
+        let choice = policy.choose_after(vendor, &|r| policy.is_installed(r, worktree), &failed)?;
+        let reviewer = choice.reviewer.clone();
+        let started = format!("Review by {reviewer}{} started", noted(&choice.note));
+        db.log_event(actor, Some(key), Some(&wt), "review_started", &started)?;
+        match rules.run(&reviewer, worktree, since, previous) {
+            Ok(r) => {
+                db.reviewer_ran(&reviewer)?;
+                return Ok((choice, r));
+            }
+            Err(e) if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() => return Err(e),
+            Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
+                Ok(out) => {
+                    db.log_event(actor, Some(key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
+                    // Told once, until it reviews again (NIT-362).
+                    let hint = if out.why == "not signed in" { crate::review::login_hint(&reviewer, policy) } else { String::new() };
+                    db.reviewer_could_not_run(key, &reviewer, &out.why, &hint)?;
+                    failed.push(out);
+                }
+                Err(e) => {
+                    db.log_event(actor, Some(key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
+                    return Err(e);
+                }
+            },
+        }
+    }
+}
+
 /// Why `key`'s review rounds stopped converging, with `review` the newest, which asks for changes,
 /// read before it is recorded: the rounds since the person last decided on its findings or handed
 /// it back (their decision to go on starts a new count). Change reviews and item reviews alike.
@@ -692,6 +823,7 @@ fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, b
     };
     db.record_review(&record)?;
     db.close_superseded_requests(&issue.key, &review.findings)?;
+    file_minor_findings(db, &issue.key, &review, actor)?;
     Ok((review, patch, stalled))
 }
 
@@ -847,38 +979,100 @@ fn waits_for_land_batch(
 /// so it checks the change does what was asked first; the gate's result; the author's notes since
 /// the last round, which may answer its findings; and findings the person accepted as trade-offs on
 /// other changes, as examples of what is not a P0/P1 here.
-pub(crate) fn review_context(db: &Db, issue: &IssueRecord, gate: &GateResult) -> Result<String> {
+pub fn review_context(db: &Db, issue: &IssueRecord, gate: &GateResult) -> Result<String> {
+    review_context_sized(db, issue, gate, false)
+}
+
+/// `review_context`, `compact` for one change of a review batch (NIT-501): the same parts, with
+/// shorter caps so a batch of several stays within the reviewer's budget. The issue body and the
+/// author's note are never left out.
+pub(crate) fn review_context_sized(db: &Db, issue: &IssueRecord, gate: &GateResult, compact: bool) -> Result<String> {
+    let (body_chars, note_chars, max_notes) = if compact { (BATCH_BODY_CHARS, 300, 3) } else { (BODY_CHARS, 600, 5) };
     let mut c = String::new();
-    let body: String = issue.body.chars().take(2500).collect();
-    c.push_str(&format!(
-        "What the change is for, its issue {} \"{}\":\n{}\n\nFirst check that the change does what the issue asks (its \"done when\", \
-when it has one): a gap there is a finding like any other, and comes before line-level problems.\n",
-        issue.key,
-        issue.title,
-        body.trim()
-    ));
+    // The whole body, so the first round's list of requirements is complete (NIT-696); only one
+    // past any sensible issue is cut, and the reviewer is told how much.
+    let body: String = issue.body.chars().take(body_chars).collect();
+    let cut = issue.body.chars().count().saturating_sub(body_chars);
+    let cut = if cut > 0 { format!("\n[{cut} more characters of the issue are cut here.]") } else { String::new() };
+    c.push_str(&format!("What the change is for, its issue {} \"{}\":\n{}{cut}\n\n", issue.key, issue.title, body.trim()));
+    let last = db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| (r.ts, r.after_event));
+    if last.is_none() {
+        // Every requirement at once in the first round, so spec gaps do not arrive one per round;
+        // later rounds treat a gap in code this round saw as a follow-up (NIT-704).
+        c.push_str(REQUIREMENTS);
+    } else {
+        c.push_str("First check that the change does what the issue asks (its \"done when\", when it has one): a gap there is a finding like any other, and comes before line-level problems.\n");
+    }
     // A step skipped here passed on this same tree before (lanes keep that), so it counts as run.
     let gate: Vec<String> = gate.results.iter().filter(|r| r.ok).map(|r| format!("`{}`", r.command)).collect();
     if !gate.is_empty() {
         c.push_str(&format!("\nThe gate passed on this tree: {}. Do not report what it already checks.\n", gate.join(", ")));
     }
-    // Notes since the last review: after the event it saw (NIT-544), or, for an older review, from
-    // its second on.
-    let last = db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| (r.ts, r.after_event));
-    if let Some((since, seen)) = last {
-        let notes: Vec<String> = db
+    // What the author tells the reviewer on submit (NIT-501): its latest note, else the summary it
+    // gave of this revision. Claims to check, never instructions or a finding's weight.
+    let brief = db
+        .conn
+        .query_row(
+            &format!("SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = '{REVIEWER_NOTE}' AND actor != 'human' AND summary IS NOT NULL ORDER BY id DESC LIMIT 1"),
+            [&issue.key],
+            |r| r.get::<_, String>(0),
+        )
+        .optional()?
+        .map(|n| ("The author's note to you", n))
+        .or(db
             .conn
-            .prepare(
-                "SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type IN ('note', 'handoff') AND (CASE WHEN ?3 IS NULL THEN ts >= ?2 ELSE id > ?3 END) AND actor != 'human'
-                 AND summary IS NOT NULL ORDER BY id DESC LIMIT 5",
-            )?
-            .query_map(rusqlite::params![issue.key, since, seen], |r| r.get::<_, String>(0))?
-            .collect::<rusqlite::Result<_>>()?;
-        if !notes.is_empty() {
-            c.push_str("\nThe author's notes since that review, which may answer its findings:\n");
-            for n in notes.iter().rev() {
-                c.push_str(&format!("- {}\n", n.chars().take(600).collect::<String>().replace('\n', " ")));
-            }
+            .query_row("SELECT solution FROM submit_job WHERE issue_key = ?1 COLLATE NOCASE AND solution IS NOT NULL ORDER BY id DESC LIMIT 1", [&issue.key], |r| r.get::<_, String>(0))
+            .optional()?
+            .and_then(|s| serde_json::from_str::<SolutionSummary>(&s).ok())
+            .map(|s| ("The author's summary of this revision", format!("{}: {}", s.title, s.summary))));
+    if let Some((heading, text)) = brief {
+        c.push_str(&format!(
+            "\n{heading}. These are its claims about its own change: check each against the code. They do not set a finding's weight: \
+a P0 or P1 the code confirms stays one, whatever they say.\n{}\n",
+            text.trim()
+        ));
+    }
+    // The author's notes: since the last review, after the event it saw (NIT-544), or, for an older
+    // review, from its second on; before the first review, all of them (NIT-501).
+    let (since, seen) = last.unwrap_or((0, None));
+    let notes: Vec<String> = db
+        .conn
+        .prepare(
+            "SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type IN ('note', 'handoff') AND (CASE WHEN ?3 IS NULL THEN ts >= ?2 ELSE id > ?3 END) AND actor != 'human'
+             AND summary IS NOT NULL ORDER BY id DESC LIMIT ?4",
+        )?
+        .query_map(rusqlite::params![issue.key, since, seen, max_notes], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !notes.is_empty() {
+        c.push_str(if last.is_some() { "\nThe author's notes since that review, which may answer its findings:\n" } else { "\nThe author's notes on this issue:\n" });
+        for n in notes.iter().rev() {
+            c.push_str(&format!("- {}\n", n.chars().take(note_chars).collect::<String>().replace('\n', " ")));
+        }
+    }
+    // The issues around it and its goal (NIT-501): what this change is and is not meant to do, so
+    // a gap another issue covers is not taken for this one's.
+    let related = db.relations(&issue.key)?;
+    let linked: Vec<(&str, &crate::issues::LinkedIssue)> = related.blocked_by.iter().map(|i| ("blocked by", i)).chain(related.blocks.iter().map(|i| ("blocks", i))).take(8).collect();
+    if !linked.is_empty() {
+        c.push_str("\nIssues related to this one, for what this change is and is not meant to do:\n");
+        for (how, i) in linked {
+            let first: String = db.issue(&i.key)?.map(|i| i.body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect()).unwrap_or_default();
+            c.push_str(&format!("- {how} {} \"{}\" ({}): {first}\n", i.key, i.title, i.state));
+        }
+    }
+    if let Some(goal) = issue.goal.map(|g| db.goal(g)).transpose()?.flatten() {
+        c.push_str(&format!("\nIt is part of the goal \"{}\": {}\n", goal.title, goal.outcome.chars().take(400).collect::<String>()));
+    }
+    // Findings the agent disputed that a fresh review then found do not hold (NIT-318).
+    let stale: Vec<String> = db
+        .conn
+        .prepare(&format!("SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = '{FINDING_STALE}' AND ts >= ?2 AND summary IS NOT NULL ORDER BY id"))?
+        .query_map(rusqlite::params![issue.key, since], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !stale.is_empty() {
+        c.push_str("\nThe author disputed these findings, and a fresh review without the earlier rounds found they do not hold against the current code. Raise one again only if the code shows it still does, and then say what that review missed:\n");
+        for s in &stale {
+            c.push_str(&format!("- {}\n", s.chars().take(note_chars * 2).collect::<String>().replace('\n', " ")));
         }
     }
     // Findings the person is deciding now: a round that still sees one says it in the same words,
@@ -964,6 +1158,64 @@ fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &
     };
     Ok(db.create_issue(&new, actor)?.key)
 }
+
+/// Files a review round's P2 findings, passing or not, in the change's one follow-up for them
+/// (NIT-695): the open one from an earlier round with the new ones added, else a new one, outside
+/// any goal so minor work holds no checkpoint. Says so on the change when it added any, and
+/// returns the follow-up's key.
+pub(crate) fn file_minor_findings(db: &mut Db, key: &str, review: &Review, actor: &Actor) -> Result<Option<String>> {
+    let minor = crate::submit_rules::minor(&review.findings);
+    let Some(issue) = db.issue(key)?.filter(|_| !minor.is_empty()) else { return Ok(None) };
+    let evidence = crate::submit_rules::minor_follow_up_evidence(key);
+    let follow_up = match db.list_issues(issue.project.as_deref(), false)?.into_iter().find(|i| i.evidence == evidence) {
+        Some(existing) => {
+            let Some(body) = crate::submit_rules::follow_up_with(&existing.body, &minor) else { return Ok(Some(existing.key)) };
+            db.edit_issue(&existing.key, None, Some(&body), actor)?;
+            existing.key
+        }
+        None => {
+            let new = crate::issues::NewIssue {
+                project: issue.project.clone().unwrap_or_default(),
+                title: format!("Minor review findings of {key}: {}", issue.title),
+                body: crate::submit_rules::minor_follow_up_body(key, &minor),
+                kind: "bug".into(),
+                source: issue.source.clone().unwrap_or_else(|| "nitely".into()),
+                evidence,
+                priority: 3,
+                allow_similar: true,
+                ..Default::default()
+            };
+            db.create_issue(&new, actor)?.key
+        }
+    };
+    db.add_note(key, &format!("The review's P2 findings do not hold this change; they are in [{follow_up}]({}).", crate::links::issue_url(&follow_up)), "note", actor)?;
+    Ok(Some(follow_up))
+}
+
+/// How much of an issue's body the reviewer is given: all of any ordinary issue (NIT-696).
+const BODY_CHARS: usize = 20_000;
+/// The same for one change of a review batch (NIT-501).
+const BATCH_BODY_CHARS: usize = 4_000;
+
+/// The event a disputed finding is recorded as when a fresh review finds it does not hold
+/// (NIT-318): the next review of the issue is told.
+pub const FINDING_STALE: &str = "finding_stale";
+
+/// The event an author's note to the reviewer is recorded as (`submit` with `reviewer_note`,
+/// NIT-501): the latest one goes to every review of the issue after it.
+pub const REVIEWER_NOTE: &str = "reviewer_note";
+
+/// Records what the author tells the reviewer on submit (NIT-501).
+pub fn brief_reviewer(db: &Db, key: &str, note: &str, actor: &Actor) -> Result<()> {
+    db.add_note(key, note, REVIEWER_NOTE, actor)
+}
+
+/// What the first review of a change does before anything else (NIT-696): checks every requirement
+/// of the issue at once, each one not met a finding in that round.
+pub(crate) const REQUIREMENTS: &str = "This is the change's first review. Before anything else, list every requirement the issue \
+states (each thing it says is wanted or must hold, its \"done when\" included), one per line, as `REQUIREMENT <n>: met <file>, \
+<symbol>` or `REQUIREMENT <n>: not met: <what is missing>`. Report each one not met as a finding too, in this round, graded \
+like any other: later rounds treat a gap in code this round already saw as a follow-up, not a blocker.\n";
 
 /// The note on a review run fresh, without the rounds before it, before stalled rounds escalate.
 const FRESH: &str = "fresh, without the earlier rounds";
@@ -1410,6 +1662,25 @@ mod tests {
     use crate::test_repo::git as sh;
     use std::path::PathBuf;
 
+    /// A review that started with the gate counts only under the review policy as it is when the
+    /// gate passed: a flag added meanwhile was never answered (NIT-711 review).
+    #[test]
+    fn an_early_review_under_a_policy_changed_since_is_not_used() {
+        let dir = crate::test_repo::copy("submit-early-policy", |p| crate::test_repo::init(p, &[("a.txt", "a")]));
+        let head = sh(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        let early = |rules: &str| EarlyReview {
+            head: head.clone(),
+            rules: rules.to_string(),
+            handle: std::thread::spawn(|| {
+                let review: Review = serde_json::from_value(serde_json::json!({"reviewer": "fake", "verdict": "pass", "findings": [], "flagged": [], "summary": "", "seconds": 1})).unwrap();
+                Ok((crate::review::Choice { reviewer: "fake".into(), independent: true, note: String::new() }, review))
+            }),
+        };
+        assert!(early("before").join(&dir, &head, "before").unwrap().is_some());
+        assert!(early("before").join(&dir, &head, "a flag added").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
     /// A review and a decision in the same second are told apart by the event the review saw
     /// (NIT-544); an older review, recorded before that was kept, is ordered by whole seconds.
     #[test]
@@ -1544,6 +1815,7 @@ case "$prompt" in
        *) echo "PREVIOUS 1: open edge.txt:1 \`let edge = 2;\` still skips the empty line"; echo "VERDICT: clean";;
      esac;;
   *) case "$files" in
+       *together*) touch ../review-ran; echo "- [P1] Together: together.txt, the x is never read"; echo "VERDICT: findings";;
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
        *stuck*) echo "- [P1] Stuck: stuck.txt, the x is never read"; echo "VERDICT: findings";;
        *stale*) if [ -f ../stale-seen ]; then echo "Fine."; echo "VERDICT: clean"; else touch ../stale-seen; echo "- [P1] Stale: stale.txt, the x is never read"; echo "VERDICT: findings"; fi;;
@@ -1642,6 +1914,28 @@ reason = "money logic"
             .unwrap();
     }
 
+
+    /// A P2 holds nothing (NIT-695): the change passes, and its P2 findings, from this round and
+    /// any later one, go to one follow-up outside the goal.
+    #[test]
+    fn p2_findings_pass_and_go_to_one_follow_up_across_rounds() {
+        let mut f = fixture();
+        let (issue, wt) = f.committed("Count the rows", "edge.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert_eq!(s.review.as_ref().unwrap().verdict, "pass", "{s:?}");
+        let evidence = crate::submit_rules::minor_follow_up_evidence(&issue.key);
+        let follow_ups = |f: &Fixture| f.db.list_issues(Some("NIT"), false).unwrap().into_iter().filter(|i| i.evidence == evidence).collect::<Vec<_>>();
+        let first = follow_ups(&f);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].body.contains("- [P2] Edge case: edge.txt, the empty line") && first[0].goal.is_none() && first[0].priority == 3, "{:?}", first[0]);
+        // A later round that still finds it files nothing new.
+        std::fs::write(wt.join("more.txt"), "y").unwrap();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "more"]);
+        f.submit(&wt, true).unwrap();
+        let again = follow_ups(&f);
+        assert_eq!((again.len(), again[0].key.as_str(), again[0].body.matches("Edge case").count()), (1, first[0].key.as_str(), 1));
+    }
 
     #[test]
     fn basic_submission_and_land_run_only_basic_checks_and_enqueue_an_audit() {
@@ -1817,6 +2111,31 @@ reason = "money logic"
             assert_eq!(f.db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
             assert!(describe(&issue, &s, Default::default()).contains(&format!("patch={}", s.patch_id)));
         }
+    }
+
+    #[test]
+    fn a_review_runs_with_its_gate_and_comes_back_with_its_failure() {
+        let mut f = fixture();
+        // The gate fails only once the review has started, so it passes when they run one after the other.
+        let gate = format!("commands = ['\"{}\" gate.sh']", playbook::posix_sh());
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("commands = [\"exit 0\"]", &gate)).unwrap();
+        std::fs::write(f.repo.join("gate.sh"), "i=0
+while [ ! -f ../review-ran ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+[ -f ../review-ran ] && exit 3
+exit 0
+").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "a gate that waits for the review"]);
+        let (issue, wt) = f.committed("Together", "together.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert!(!s.gate.passed, "{s:?}");
+        let review = s.review.as_ref().expect("the review's findings come back with the failed gate");
+        assert!(review.verdict == "changes" && review.findings.iter().any(|f| f.text.contains("Together")), "{review:?}");
+        assert_eq!(s.state, "In Progress");
+        // On record for its patch, so the next round checks its findings first and nothing lands on it.
+        let recorded = &f.db.reviews(&issue.key).unwrap()[0];
+        assert_eq!((recorded.verdict.as_str(), recorded.patch_id.as_str()), ("changes", s.patch_id.as_str()));
+        assert!(previous_round(&f.db, &issue.key, &wt).unwrap().is_some_and(|p| p.findings.iter().any(|f| f.text.contains("Together"))));
     }
 
     #[test]
@@ -2028,6 +2347,67 @@ reason = "money logic"
         let c = review_context(&f.db, &issue, &gate).unwrap();
         assert!(c.contains("report it in exactly these words") && c.contains(&format!("- [P1] {words}\n")), "{c}");
         assert!(!c.contains("The agent's reasoning."), "{c}");
+    }
+
+    /// The author briefs the reviewer (NIT-501): its notes from before the first review, its note on
+    /// submit (else its summary of the revision), and the issues around this one.
+    #[test]
+    fn the_reviewer_hears_the_authors_note_notes_and_related_issues() {
+        let mut f = fixture();
+        let gate = GateResult { mode_authority: None, plan: None, skipped: None, passed: true, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+        let issue = f.db.create_issue(&new("Export rows"), &f.actor).unwrap();
+        let screen = f.db.create_issue(&NewIssue { body: "The Exports screen that starts a large export.".into(), ..new("Exports screen") }, &f.actor).unwrap();
+        f.db.add_blocker(&screen.key, &issue.key, &f.actor).unwrap();
+        f.db.add_note(&issue.key, "Kept the old CSV header on purpose.", "note", &f.actor).unwrap();
+        let c = review_context(&f.db, &issue, &gate).unwrap();
+        assert!(c.contains("- Kept the old CSV header on purpose."), "notes before the first review count: {c}");
+        assert!(c.contains(&format!("- blocks {} \"Exports screen\" (Todo): The Exports screen that starts a large export.", screen.key)), "{c}");
+        assert!(!c.contains("note to you"), "{c}");
+        f.db.conn
+            .execute(
+                "INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, solution) VALUES (?1, 'w', 'b', 'h', 'x', 0, 0, 'done', 1, ?2)",
+                rusqlite::params![issue.key, serde_json::json!({ "title": "Export in pages", "summary": "Rows go out 500 at a time." }).to_string()],
+            )
+            .unwrap();
+        let c = review_context(&f.db, &issue, &gate).unwrap();
+        assert!(c.contains("The author's summary of this revision.") && c.contains("Export in pages: Rows go out 500 at a time."), "{c}");
+        brief_reviewer(&f.db, &issue.key, "The Exports screen is the screen's own issue, blocked by this one.", &f.actor).unwrap();
+        let c = review_context(&f.db, &issue, &gate).unwrap();
+        assert!(c.contains("The author's note to you.") && c.contains("a P0 or P1 the code confirms stays one") && !c.contains("Rows go out 500"), "{c}");
+        // A batch gets the same, shorter, never without the body or the note.
+        let long = f.db.create_issue(&NewIssue { body: "y".repeat(BATCH_BODY_CHARS + 5), ..new("Long") }, &f.actor).unwrap();
+        brief_reviewer(&f.db, &long.key, "Left the old path in.", &f.actor).unwrap();
+        let c = review_context_sized(&f.db, &long, &gate, true).unwrap();
+        assert!(c.contains("[5 more characters of the issue are cut here.]") && c.contains("Left the old path in."), "{c}");
+    }
+
+    /// The first review is given the whole issue and checks every requirement in it at once; a
+    /// later round is not asked again (NIT-696).
+    #[test]
+    fn the_first_review_checks_every_requirement_of_the_whole_issue() {
+        let mut f = fixture();
+        let body = format!("Wanted:
+- Rows are counted.
+{}
+- The last requirement: totals are shown.", "Background. ".repeat(400));
+        let issue = f.db.create_issue(&NewIssue { body, ..new("Totals") }, &f.actor).unwrap();
+        let gate = GateResult { mode_authority: None, plan: None, skipped: None, passed: true, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+        let c = review_context(&f.db, &issue, &gate).unwrap();
+        assert!(c.contains("The last requirement: totals are shown.") && c.contains(REQUIREMENTS), "{c}");
+        let long = f.db.create_issue(&NewIssue { body: "x".repeat(BODY_CHARS + 10), ..new("Long") }, &f.actor).unwrap();
+        assert!(review_context(&f.db, &long, &gate).unwrap().contains("[10 more characters of the issue are cut here.]"));
+        // Its reply's requirement lines are not taken for its summary.
+        let r = crate::review::ReviewRules::default()
+            .parse("codex", "REQUIREMENT 1: met src/a.rs, count
+REQUIREMENT 2: not met: no totals
+Totals are missing.
+- [P1] No totals: src/a.rs:3, show: nothing is shown
+VERDICT: findings
+", 1, None, None)
+            .unwrap();
+        assert_eq!((r.summary.as_str(), r.verdict.as_str()), ("Totals are missing.", "changes"));
+        f.db.conn.execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, ts) VALUES (?1, 'p', 'c', 'codex', 'changes', 'agent', 1)", [&issue.key]).unwrap();
+        assert!(!review_context(&f.db, &issue, &gate).unwrap().contains(REQUIREMENTS));
     }
 
     #[test]

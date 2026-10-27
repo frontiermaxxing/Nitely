@@ -257,24 +257,36 @@ fn land_into_goal(db: &mut Db, root: &Path, issue: &IssueRecord, opts: &LandOpti
     let mut report = Landed { issue: issue.key.clone(), base: gb.branch.clone(), goal_branch: Some(gb.branch.clone()), ..Default::default() };
     // A checkpoint's main merge or another item's land holds the goal branch for minutes: the item
     // waits its turn instead of failing its submit (NIT-578). A lock whose land is gone is taken over.
+    // Items take it in the order they came, and wait on while it moves from land to land: only one
+    // land holding it the whole wait gives up (NIT-709).
     let path = crate::goal_branch::lock_path(root, gb.goal)?;
-    let began = std::time::Instant::now();
+    let turn = Turn::join(&path, &issue.key)?;
+    let mut holder = String::new();
+    let mut held_since = std::time::Instant::now();
     let mut said = false;
     let lock = loop {
-        if let Some(lock) = Lock::try_take(&path, &issue.key, opts.break_lock)? {
-            break lock;
+        if opts.break_lock || turn.first() {
+            if let Some(lock) = Lock::try_take(&path, &issue.key, opts.break_lock)? {
+                break lock;
+            }
         }
-        if !goal_lock_wait(began.elapsed()) {
+        let now_held = std::fs::read_to_string(&path).unwrap_or_default();
+        if now_held != holder {
+            holder = now_held;
+            held_since = std::time::Instant::now();
+        }
+        if !goal_lock_wait(held_since.elapsed()) {
             // Long enough: the take says who holds it.
             break Lock::take(&path, &issue.key, opts.break_lock)?;
         }
         if !said {
-            let holder = std::fs::read_to_string(&path).unwrap_or_default();
-            db.log_event(actor, Some(&issue.key), None, "status", &format!("Waiting for {} to be free: {}", gb.branch, holder.trim()))?;
+            let ahead = if holder.trim().is_empty() { "the items ahead of it".to_string() } else { holder.trim().to_string() };
+            db.log_event(actor, Some(&issue.key), None, "status", &format!("Waiting for {} to be free: {ahead}", gb.branch))?;
             said = true;
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
     };
+    drop(turn);
     if let Some(before) = &lock.took_over {
         report.warnings.push(format!("took over the lock of {} that {before} left", gb.branch));
     }
@@ -852,8 +864,9 @@ pub(crate) fn in_background(exe: Option<&str>, inline: bool) -> bool {
     !inline && exe == Some("nitely")
 }
 
-/// How long an item's land waits for its goal branch's lock before it gives up and says who holds
-/// it (NIT-578): a few item lands and a checkpoint's main merge, each a few minutes.
+/// How long an item's land waits while one land holds its goal branch's lock before it gives up
+/// and says who holds it (NIT-578): longer than any item land or checkpoint main merge. A lock
+/// that moves on starts the count again (NIT-709).
 const GOAL_LOCK_WAIT_AT_MOST: std::time::Duration = std::time::Duration::from_secs(30 * 60);
 
 /// Whether an item's land, its goal branch's lock held by a live land for `waited`, waits on.
@@ -1027,7 +1040,7 @@ pub fn after_steps_running(root: &Path) -> bool {
 /// a land on main checks its review and approval, runs the gate, and fast-forwards the main
 /// checkout.
 #[allow(clippy::too_many_arguments)]
-fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed, goal: Option<&crate::goal_branch::GoalBranch>) -> Result<()> {
+fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed, goal: Option<&crate::goal_branch::GoalBranch>) -> Result<()> {
     let base = report.base.clone();
     // A repo with no origin is local: what lands stays in it.
     let push = opts.push && playbook::has_origin(root);
@@ -1079,7 +1092,8 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         }
     } else if git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Rebasing {branch} onto {base}"))?;
-        let rebased = crate::submodules::rebase_repo(&worktree, &base, &moving);
+        let union = crate::rebase_review::union_args(pb, &worktree)?;
+        let rebased = crate::submodules::rebase_repo(&worktree, &base, &moving, &union);
         if let Err(e) = rebased {
             if !crate::test_command_merge::finish_rebase(&worktree).unwrap_or(false) {
                 report.conflicts = git(&worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
@@ -1089,7 +1103,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
                 }
                 bail!(
                     "the rebase of {branch} onto {base} stopped on conflicts in {}; it is left in progress in {wt}. \
-                     Resolve each file, git add it, git rebase --continue, then submit and land again",
+                     Resolve each file, git add it, git rebase --continue, then land again (a resolution that only combines the two sides keeps the review; anything more is reviewed at the land)",
                     report.conflicts.join(", ")
                 );
             }
@@ -1098,6 +1112,11 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
 
     crate::submodules::point(&worktree, &moving)?;
     crate::submodules::follow(pb, &worktree, &moving)?;
+    // A passing review the rebase changed more than conflicts in is brought up to date here, at
+    // the land, not in a new submit round (NIT-700). A checkpoint merges its base instead.
+    if goal.is_none() && !checkpoint {
+        crate::rebase_review::review_at_land(db, root, pb, key, &worktree, &base, &branch, actor)?;
+    }
     let head = rev(root, &branch)?;
     report.approval = Some(match goal {
         Some(gb) => check_item(db, key, pb, &worktree, &base, gb)?,
@@ -1357,7 +1376,7 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
     let pb = &current;
     let patch = crate::submit::patch_id_range(worktree, base, head)?;
     let review = db.reviews(key)?.into_iter().next().with_context(|| format!("{key} has no review; submit it first"))?;
-    if review.patch_id != patch && !crate::test_command_merge::equivalent(worktree, base, head, &review).unwrap_or(false) {
+    if review.patch_id != patch && !crate::rebase_review::covers(pb, worktree, base, head, &review)? {
         bail!(
             "the branch changed since its review (reviewed {}, now {}); submit again",
             short(&review.patch_id),
@@ -1688,6 +1707,52 @@ impl Drop for Lock {
     }
 }
 
+/// An item's place in line for its goal branch's lock (NIT-709): items take the lock in the order
+/// they came, so one that waited is not passed over each time the lock frees. Its ticket is a file
+/// in a folder beside the lock, removed when the turn is dropped; the ticket of a process that is
+/// gone stands in no one's way.
+struct Turn {
+    path: PathBuf,
+}
+
+impl Turn {
+    fn join(lock: &Path, key: &str) -> Result<Turn> {
+        let dir = lock.with_extension("line");
+        std::fs::create_dir_all(&dir).with_context(|| format!("making {}", dir.display()))?;
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH)?.as_nanos();
+        let path = dir.join(format!("{nanos:024}-{}-{key}", std::process::id()));
+        std::fs::write(&path, "").with_context(|| format!("writing {}", path.display()))?;
+        Ok(Turn { path })
+    }
+
+    /// Whether no live ticket came before this one. Dead ones are removed.
+    fn first(&self) -> bool {
+        let (Some(dir), Some(mine)) = (self.path.parent(), self.path.file_name().and_then(|n| n.to_str())) else { return true };
+        let names: Vec<String> = std::fs::read_dir(dir).map(|d| d.flatten().filter_map(|e| e.file_name().to_str().map(str::to_string)).collect()).unwrap_or_default();
+        for dead in names.iter().filter(|n| ticket_pid(n).is_some_and(|p| !crate::procs::alive(p))) {
+            std::fs::remove_file(dir.join(dead)).ok();
+        }
+        first_in_line(mine, &names, crate::procs::alive)
+    }
+}
+
+impl Drop for Turn {
+    fn drop(&mut self) {
+        std::fs::remove_file(&self.path).ok();
+    }
+}
+
+/// The process a line ticket (`<nanos>-<pid>-<key>`) is for.
+fn ticket_pid(name: &str) -> Option<u32> {
+    name.split('-').nth(1)?.parse().ok()
+}
+
+/// Whether ticket `mine` is first among `tickets`: every one named before it is of a process
+/// that is gone, or no ticket at all.
+pub(crate) fn first_in_line(mine: &str, tickets: &[String], alive: impl Fn(u32) -> bool) -> bool {
+    tickets.iter().filter(|t| t.as_str() < mine).all(|t| ticket_pid(t).is_none_or(|p| !alive(p)))
+}
+
 /// Whether the lock at `path` names a process that is gone. A lock that cannot be read, or names
 /// no pid, is not.
 fn held_by_dead(path: &Path) -> bool {
@@ -1820,6 +1885,12 @@ mod tests {
         // NIT-578: an item waits for its goal branch's lock, for a bound.
         assert!(goal_lock_wait(Duration::from_secs(5)), "a main merge holds it for seconds");
         assert!(!goal_lock_wait(GOAL_LOCK_WAIT_AT_MOST), "then it gives up and says who holds it");
+        // NIT-709: items take the goal lock in the order they came; a gone process holds no place.
+        let line = |t: &[&str]| t.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let tickets = line(&["000000000000000000000001-7-NIT-1", "000000000000000000000002-8-NIT-2", "000000000000000000000003-9-NIT-3"]);
+        assert!(first_in_line(&tickets[0], &tickets, |_| true));
+        assert!(!first_in_line(&tickets[2], &tickets, |_| true), "behind two that wait");
+        assert!(first_in_line(&tickets[2], &tickets, |p| p == 9), "the two ahead are gone");
         assert_eq!(after_next(false, true, Duration::from_secs(30)), AfterNext::Wait, "changes wait in the queue");
         assert_eq!(after_next(true, true, QUIET_AT_MOST), AfterNext::Run, "never waits for ever");
     }
@@ -2736,6 +2807,58 @@ when_changed = ["billing"]
         assert!(r.tidied.iter().any(|t| t.contains(&p)), "{r:?}");
         assert_eq!(r.tidied.len(), 5, "{r:?}");
         assert!(f.db.timeline(&p).unwrap().iter().any(|t| t.kind == "worktree_removed"));
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A conflict resolved by combining the two sides keeps the review; a resolution that adds
+    /// something is reviewed at the land, with no submit; a `[land] union` file does not conflict
+    /// (NIT-700).
+    #[test]
+    fn a_rebase_that_only_resolves_conflicts_keeps_its_review() {
+        let mut f = fixture();
+        let reviews = |f: &Fixture, key: &str| f.db.reviews(key).unwrap().len();
+        // Main adds a line where the change adds its own: the land stops on the conflict.
+        let conflict = |f: &mut Fixture, title: &str, line: &str| -> (String, PathBuf) {
+            std::fs::write(f.repo.join("list.txt"), "a\n").unwrap();
+            sh(&f.repo, &["add", "list.txt"]);
+            sh(&f.repo, &["commit", "-q", "-m", "list"]);
+            let (key, wt) = f.reviewed(title, "list.txt", &format!("a\n{line}\n"));
+            std::fs::write(f.repo.join("list.txt"), format!("a\nmain {line}\n")).unwrap();
+            sh(&f.repo, &["commit", "-q", "-am", "main's line"]);
+            (key, wt)
+        };
+        let resolve = |wt: &Path, content: &str| {
+            std::fs::write(wt.join("list.txt"), content).unwrap();
+            sh(wt, &["add", "list.txt"]);
+            sh(wt, &["-c", "core.editor=true", "rebase", "--continue"]);
+        };
+
+        let (a, wt) = conflict(&mut f, "Add b", "b");
+        assert_eq!(f.land(&a).conflicts, vec!["list.txt"]);
+        resolve(&wt, "a\nmain b\nb\n");
+        let r = f.land(&a);
+        assert!(r.landed, "{r:?}");
+        assert_eq!(reviews(&f, &a), 1, "kept: no review ran");
+
+        // A resolution with a line neither side has is the author's new code: reviewed at the land.
+        let (b, wt) = conflict(&mut f, "Add c", "c");
+        assert_eq!(f.land(&b).conflicts, vec!["list.txt"]);
+        resolve(&wt, "a\nmain c\nc\nmore\n");
+        let r = f.land(&b);
+        assert!(r.landed, "{r:?}");
+        assert_eq!(reviews(&f, &b), 2, "reviewed once more, at the land");
+        assert!(f.db.timeline(&b).unwrap().iter().any(|e| e.summary.as_deref().is_some_and(|s| s.contains("at its land passed"))));
+
+        // Named in `[land] union`, the list takes both lines and stops conflicting.
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&pb_path).unwrap().replacen("[[land.after]]", "[land]\nunion = [\"list.txt\"]\n[[land.after]]", 1);
+        std::fs::write(&pb_path, pb).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", "list.txt is append-only"]);
+        let (c, _) = conflict(&mut f, "Add d", "d");
+        let r = f.land(&c);
+        assert!(r.landed, "{r:?}");
+        assert_eq!(reviews(&f, &c), 1);
+        assert_eq!(std::fs::read_to_string(f.repo.join("list.txt")).unwrap().replace('\r', ""), "a\nmain d\nd\n");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

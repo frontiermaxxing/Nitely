@@ -137,10 +137,11 @@ fn for_client(vendor: &str) {
     CLIENT_WAIT.store(cap_for(vendor), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// The wait cap for a client (NIT-314): Claude Code gives a call 30 minutes without a word; Codex
-/// gives one 60 seconds by default, and other clients are not known to give more.
+/// The wait cap for a client (NIT-314): Claude Code gives a call 30 minutes without a word, so it
+/// gets the 10 minutes the tools promise (NIT-697); Codex gives one 60 seconds by default, and
+/// other clients are not known to give more.
 fn cap_for(vendor: &str) -> u64 {
-    if vendor == "claude" { 300 } else { 50 }
+    if vendor == "claude" { 600 } else { 50 }
 }
 
 /// A lock that another thread's panic does not poison for the rest.
@@ -456,6 +457,15 @@ fn tools() -> Value {
     let states: Vec<&str> = STATES.iter().map(|(n, _)| *n).filter(|n| *n != "Approved").collect();
     json!([
         {
+            "name": "pipeline",
+            "description": "How the project's pipeline performed per week, oldest first (NIT-703): reviews per landed issue, the changes rate and new blocking findings per review by round; blocking findings the person accepted or split to a follow-up; lane wait against run time per kind; land stops by cause; questions to the person per landing; per issue, claim to first submit, submit rounds, fixing between rounds and last submit to landed (medians); tokens per landed issue and the median context per model call. Issues run in parallel, so their times overlap.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string" },
+                "weeks": { "type": "integer", "minimum": 1, "maximum": 52, "description": "How many weeks back, this one included; default 4." },
+                "tokens": { "type": "boolean", "description": "Read the agents' session files for the token figures; default true." }
+            } }
+        },
+        {
             "name": "performance",
             "description": "Read cached machine health (now), bounded history, or sustained pressure episodes. Never starts a collector. Reports freshness, units, gaps and measured contributors; temporal overlap is not proof of cause. Before expensive work, inspect current health and admission constraints; do not bypass Nitely build lanes. before_last_restart selects ten minutes ending at the previous boot's last retained sample.",
             "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
@@ -534,22 +544,25 @@ fn tools() -> Value {
         },
         {
             "name": "submit",
-            "description": "Hand in a finished branch and move on. It returns at once with a job id; in the background Nitely runs the gate, has another vendor review it, decides whether the human must approve, pushes, opens or updates the pull request, and moves the issue (In Review, Needs You, or back to In Progress when the review finds P0/P1 problems). The result comes back through next_task, submit_status, or a notice on your next nitely call. Commit everything first. Supply solution_title and solution_summary explaining the implemented outcome, behavior, validation and remaining limits for this exact revision; the person sees these when approving the change. With wait: true it blocks until the result instead (minutes), as before.",
+            "description": "Hand in a finished branch and move on. It returns at once with a job id; in the background Nitely runs the gate, has another vendor review it, decides whether the human must approve, pushes, opens or updates the pull request, and moves the issue (In Review, Needs You, or back to In Progress when the review finds P0/P1 problems). The result comes back through next_task, submit_status, or a notice on your next nitely call. Commit everything first. Supply solution_title and solution_summary explaining the implemented outcome, behavior, validation and remaining limits for this exact revision; the person sees these when approving the change. The reviewer reads the issue, the issues it blocks and is blocked by, and your notes: put what the change deliberately leaves out, scope split with other issues and decisions already made in reviewer_note, and on a resubmit answer there any finding you dispute before you call request_acceptance. With wait: true it blocks until the result instead (minutes), as before.",
             "inputSchema": { "type": "object", "properties": {
                 "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
                 "worktree": { "type": "string", "description": "Defaults to the worktree you are in." },
                 "solution_title": { "type": "string", "description": "Concrete implementation/outcome title for this revision. Supply with solution_summary." },
                 "solution_summary": { "type": "string", "description": "What changed in this revision, in your words. Shown to the person approving it; never copy the original problem statement as the solution." },
-                "wait": { "type": "boolean", "description": "Wait for the gate and review (up to 5 minutes) and return the full result; past that, the job goes on and submit_status gives its result." }
+                "reviewer_note": { "type": "string", "description": "For the reviewer: what this change deliberately leaves out and why, scope split with other issues, decisions already made, answers to findings you dispute. Read as your claims to check against the code; it never lowers a finding the code confirms. Without it the reviewer gets solution_summary." },
+                "wait": { "type": "boolean", "description": "Wait for the gate and review (up to 10 minutes) and return the result; past that, the job goes on and submit_status gives its result." },
+                "detail": { "type": "boolean", "description": "With wait: the full record (gate output of every step, verification, solution) instead of the short result." }
             } }
         },
         {
             "name": "submit_status",
-            "description": "The result of a submit: the job's state, and once it finished, what submit returned (the issue's new state and `next`). Pass the job id from submit, or the issue key for its latest submit. wait_seconds (up to 600) waits for it to finish.",
+            "description": "The result of a submit: one line while it runs; once it finished, the issue's new state, the review's verdict and findings, `next`, and for a failed gate the failing step with the end of its output. Pass the job id from submit, or the issue key for its latest submit. wait_seconds (up to 600) waits for it to finish: each call costs a model call over your whole context, so one long wait is cheaper than many short ones.",
             "inputSchema": { "type": "object", "properties": {
                 "job": { "type": "integer" },
                 "key": { "type": "string" },
-                "wait_seconds": { "type": "integer" }
+                "wait_seconds": { "type": "integer" },
+                "detail": { "type": "boolean", "description": "The full record: every gate step's output, verification, solution, the review's summary." }
             } }
         },
         {
@@ -558,6 +571,7 @@ fn tools() -> Value {
             "inputSchema": { "type": "object", "required": ["key"], "properties": {
                 "key": { "type": "string" },
                 "break_lock": { "type": "boolean", "description": "Take over the land lock even though the process that took it still runs (a land that hangs, or another program with its old number)." },
+                "detail": { "type": "boolean", "description": "The full record, with every gate step's output, instead of the short result." },
                 "after": { "type": "array", "items": { "type": "string" }, "description": "Issues to wait for: the land returns at once, waits in a job of its own until every one is Done, then rebases, gates and lands by itself, and you hear how on your next nitely call. Left out, it waits for the issue's own open blockers, if any; [] lands now." }
             } }
         },
@@ -797,7 +811,7 @@ fn tools() -> Value {
         },
         {
             "name": "request_acceptance",
-            "description": "Ask the human to accept one P0 or P1 finding of the issue's latest review as it is: a trade-off they decided or should decide, not a defect you can fix (for example a reviewer asking again for a migration they ruled out). It shows in their inbox and on their phone as one decision, the finding with your reasoning, Accept or Send back. The question holds the land, not you: the issue stays with you, so go on with the other findings or other work meanwhile. A later review that no longer raises the finding closes the question by itself. Check the answer with get_answer: \"Accepted: ...\" means stop working on that finding (land honors it and the next review round is told); \"Not accepted: ...\" means fix it. Do not use it for a finding you can fix.",
+            "description": "Ask the human to accept one P0 or P1 finding of the issue's latest review as it is: a trade-off they decided or should decide, not a defect you can fix (for example a reviewer asking again for a migration they ruled out). It shows in their inbox and on their phone as one decision, the finding with your reasoning, Accept or Send back. The question holds the land, not you: the issue stays with you, so go on with the other findings or other work meanwhile. A later review that no longer raises the finding closes the question by itself. Check the answer with get_answer: \"Accepted: ...\" means stop working on that finding (land honors it and the next review round is told); \"Not accepted: ...\" means fix it. Do not use it for a finding you can fix. A fresh review, without the earlier rounds and by another vendor when one is installed, checks the finding first: if it no longer holds, you are told and it never reaches the person; if it holds, the request goes to them with what that review said. It returns a triage id at once: the outcome comes as a notice on your next nitely call, or from get_triage, and once it reached the person, get_answer with its ask id.",
             "inputSchema": { "type": "object", "required": ["key", "finding", "why"], "properties": {
                 "key": { "type": "string", "description": "The issue." },
                 "finding": { "type": "string", "description": "The finding: its number in the latest review's findings (from 1) or its exact text." },
@@ -1244,6 +1258,11 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         None
     };
     let mut out = match name {
+        "pipeline" => {
+            let weeks = args.get("weeks").and_then(Value::as_u64).unwrap_or(4) as usize;
+            let tokens = args.get("tokens").and_then(Value::as_bool).unwrap_or(true) && server.remote.is_none();
+            json!(nitely_crew::pipeline::read(&db, tokens.then_some(&config), &project(&db)?, weeks, nitely_core::db::now())?)
+        }
         "performance" => json!(nitely_crew::performance_query::query(&nitely_core::performance::directory(), &serde_json::from_value(args.clone())?)?),
         "next_task" if returned.is_some() => {
             let job = returned.as_ref().unwrap();
@@ -1433,24 +1452,23 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false, solution: solution.as_ref(), solution_commit: None, solution_patch_id: None };
             let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
             let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &actor, &runner)?;
+            if let Some(note) = str_arg(args, "reviewer_note").filter(|n| !n.trim().is_empty()) {
+                nitely_core::submit::brief_reviewer(&db, &job.issue, note, &actor)?;
+            }
             if args.get("wait").and_then(Value::as_bool).unwrap_or(false) {
                 // The job runs in a process of its own, so it outlives this call and this server;
                 // waiting on it here is only waiting.
                 let job = nitely_core::submit_job::wait(&db, job.id, wait_cap())?;
-                match (&job.result, job.finished()) {
-                    (Some(result), true) => {
-                        job_json(&db, &job, &actor)?;
-                        result.clone()
-                    }
-                    (_, true) => job_json(&db, &job, &actor)?,
-                    (_, false) => {
-                        let mut v = job_json(&db, &job, &actor)?;
-                        v["next"] = json!(format!("Still {} after {}s: call submit_status with id {} (and wait_seconds) for the result.", job.state, wait_cap().as_secs(), job.id));
-                        v
-                    }
-                }
+                job_json(&db, &job, &actor, detail(args))?
+            } else if !job.finished() {
+                json!(format!(
+                    "Handed in as submit job {}: the gate and the review run in the background. Pick up other work (next_task) or stop; the result comes as a notice on your next nitely call, or from submit_status with job {} and wait_seconds {}.",
+                    job.id,
+                    job.id,
+                    wait_cap().as_secs()
+                ))
             } else {
-                job_json(&db, &job, &actor)?
+                job_json(&db, &job, &actor, false)?
             }
         }
         "submit_status" => {
@@ -1461,7 +1479,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             };
             let seconds = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600).min(wait_cap().as_secs());
             let job = nitely_core::submit_job::wait(&db, job.id, std::time::Duration::from_secs(seconds))?;
-            job_json(&db, &job, &actor)?
+            job_json(&db, &job, &actor, detail(args))?
         }
         "land" => {
             let key = req(args, "key")?;
@@ -1495,7 +1513,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             } else if detached.is_some() {
                 let break_lock = args.get("break_lock").and_then(Value::as_bool).unwrap_or(false);
                 let opts = nitely_core::land::LandOptions { dir: &server.cwd, issue_key: key, push: true, keep: false, break_lock };
-                json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?)
+                let landed = json!(nitely_core::land::land(&mut db, &config, &opts, &actor)?);
+                if detail(args) { landed } else { brief(&landed) }
             } else {
                 run_apart(server, session, params, |log, _| {
                     Ok(json!({ "still_running": true, "log": log.to_string_lossy(), "next": format!("The land of {key} is still running after {}s, in a process of its own that goes on without this call. get_issue {key} shows when it landed or why it stopped.", wait_cap().as_secs()) }))
@@ -1840,17 +1859,25 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             out
         }
         "request_acceptance" => {
-            let ask = db.request_acceptance(req(args, "key")?, req(args, "finding")?, req(args, "why")?, Some(&server.place()), &actor)?;
+            // A fresh review checks it first, in the background (NIT-318); the request reaches the
+            // person only if the finding still holds.
+            let q = nitely_crew::triage::dispute(&db, req(args, "key")?, req(args, "finding")?, req(args, "why")?, Some(&server.place()), &actor)?;
+            let q = nitely_crew::triage::start(&mut db, &config, &q, &std::env::current_exe()?)?;
+            let f = q.finding.clone().context("a disputed finding's record lost its finding")?;
             db.record(&NewEvent {
                 session_id: session.to_string(),
                 vendor: server.vendor.clone(),
                 cwd: server.place(),
                 kind: "ask".into(),
-                summary: Some(format!("Asked to accept a finding: {}", ask.finding.as_ref().map(|f| f.text.as_str()).unwrap_or(""))),
+                summary: Some(format!("Asked to accept a finding: {}", f.text)),
                 // The question holds the land, not the agent (NIT-568).
                 state: "working".into(),
             })?;
-            json!(ask)
+            let mut v = triage_json(&db, &q, &actor)?;
+            if !q.finished() {
+                v["next"] = json!(nitely_crew::triage::DISPUTED_NEXT);
+            }
+            v
         }
         "updates" => {
             let project = project(&db)?;
@@ -1942,9 +1969,82 @@ fn triage_json(db: &Db, q: &nitely_crew::triage::Question, actor: &nitely_core::
 
 /// A submit job as submit and submit_status return it. A finished one is told to its submitter
 /// here, so it is not repeated as a notice.
-fn job_json(db: &Db, job: &nitely_core::submit_job::Job, actor: &nitely_core::issues::Actor) -> Result<Value> {
+/// Whether the call asked for the full record (`detail`) rather than the short result (NIT-697).
+fn detail(args: &Value) -> bool {
+    args.get("detail").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// How many lines of a failed gate step's output the short result keeps.
+const FAILED_TAIL: usize = 40;
+
+/// A submit's or a land's result as the agent acts on it (NIT-697): its state, the review's
+/// verdict and every finding in full, `next`, and of the gate only whether it passed, or the step
+/// that failed with the end of its output. A land inside a submit gets the same, without the
+/// issue again. Each poll's answer is added to the agent's context, so nothing is said twice:
+/// `detail` gives the full record.
+fn brief(result: &Value) -> Value {
+    let mut out = serde_json::Map::new();
+    for key in ["issue", "state", "landed", "head", "pushed", "pr_url", "pr_error", "error", "conflicts", "warnings", "unblocked", "next"] {
+        match result.get(key) {
+            None | Some(Value::Null) => {}
+            Some(Value::Array(a)) if a.is_empty() => {}
+            Some(v) => {
+                out.insert(key.into(), v.clone());
+            }
+        }
+    }
+    if let Some(review) = result.get("review").filter(|r| r.is_object()) {
+        let mut r = serde_json::Map::new();
+        for key in ["reviewer", "verdict", "findings", "outside"] {
+            if let Some(v) = review.get(key).filter(|v| !v.is_null() && v.as_array().is_none_or(|a| !a.is_empty())) {
+                r.insert(key.into(), v.clone());
+            }
+        }
+        out.insert("review".into(), Value::Object(r));
+    }
+    if let Some(gate) = result.get("gate").filter(|g| g.is_object()) {
+        out.insert("gate".into(), brief_gate(gate));
+    }
+    if let Some(land) = result.get("land").filter(|l| l.is_object()) {
+        let mut land = brief(land);
+        land.as_object_mut().map(|l| l.remove("issue"));
+        out.insert("land".into(), land);
+    }
+    Value::Object(out)
+}
+
+/// A gate as `brief` tells it: passed (with how many steps flaked, if any), skipped and why, or
+/// the first step that failed with the last `FAILED_TAIL` lines of its output.
+fn brief_gate(gate: &Value) -> Value {
+    if let Some(why) = gate["skipped"].as_str() {
+        return json!({ "passed": false, "skipped": why });
+    }
+    let flaked = gate["flaked"].as_array().map_or(0, Vec::len);
+    if gate["passed"].as_bool().unwrap_or(false) {
+        return if flaked > 0 { json!({ "passed": true, "flaked": flaked }) } else { json!({ "passed": true }) };
+    }
+    let results = gate["results"].as_array().map(Vec::as_slice).unwrap_or_default();
+    let Some(failed) = results.iter().find(|r| !r["ok"].as_bool().unwrap_or(true) && !r["skipped"].as_bool().unwrap_or(false)) else {
+        return json!({ "passed": false });
+    };
+    let output = failed["output"].as_str().unwrap_or("");
+    let lines: Vec<&str> = output.lines().collect();
+    let tail = lines[lines.len().saturating_sub(FAILED_TAIL)..].join("\n");
+    let mut out = json!({ "passed": false, "failed": failed["step"].as_str().or(failed["command"].as_str()), "output": tail });
+    if failed["timed_out"].as_bool().unwrap_or(false) {
+        out["timed_out"] = json!(true);
+    }
+    out
+}
+
+/// A submit job for the agent (NIT-697): one line while it is queued or running; once it finished,
+/// `brief` of what submit returned, or why it stopped. `detail` gives the full record.
+fn job_json(db: &Db, job: &nitely_core::submit_job::Job, actor: &nitely_core::issues::Actor, detail: bool) -> Result<Value> {
     if job.finished() && job.requested_by == actor.id() {
         db.mark_submit_jobs_delivered(&[job.id])?;
+    }
+    if !detail {
+        return Ok(short_job(job, nitely_core::db::now(), wait_cap().as_secs()));
     }
     let mut v = json!(job);
     v["outcome"] = json!(job.outcome());
@@ -1955,6 +2055,34 @@ fn job_json(db: &Db, job: &nitely_core::submit_job::Job, actor: &nitely_core::is
     };
     v["log"] = json!(nitely_core::submit_job::log_path(job.id).to_string_lossy());
     Ok(v)
+}
+
+/// `job_json`'s short form, at time `now`.
+fn short_job(job: &nitely_core::submit_job::Job, now: i64, cap: u64) -> Value {
+    if !job.finished() {
+        let since = now - job.started_at.unwrap_or(job.queued_at);
+        return json!(format!(
+            "Submit job {} of {} is {} ({} s so far). The result comes as a notice on your next nitely call, or call submit_status with job {} and wait_seconds {cap}: one long wait costs less than many short ones.",
+            job.id, job.issue, job.state, since.max(0), job.id
+        ));
+    }
+    let log = nitely_core::submit_job::log_path(job.id).to_string_lossy().into_owned();
+    match &job.result {
+        Some(result) => {
+            let mut v = brief(result);
+            v["job"] = json!(job.id);
+            v["log"] = json!(log);
+            v
+        }
+        None => json!({
+            "job": job.id,
+            "issue": job.issue,
+            "state": job.state,
+            "error": job.error,
+            "next": if job.state == "superseded" { "A newer submit of this issue replaced it." } else { "Fix what stopped it, commit, and submit again." },
+            "log": log,
+        }),
+    }
 }
 
 #[cfg(test)]
@@ -2051,7 +2179,63 @@ mod tests {
     fn a_call_answers_within_the_timeout_its_client_gives_it() {
         // Codex's default tool timeout is 60 s; Claude Code's idle timeout is 30 minutes (NIT-314).
         assert!(cap_for("codex") < 60 && cap_for("cursor") < 60 && cap_for("agent") < 60);
-        assert_eq!(cap_for("claude"), 300);
+        assert_eq!(cap_for("claude"), 600);
+    }
+
+    /// NIT-697: a finished submit says each thing once: its state, every finding in full, `next`,
+    /// and for a failed gate only the failing step's last 40 lines; the land inside it too.
+    #[test]
+    fn a_finished_submit_answers_short_and_says_nothing_twice() {
+        let long: String = (1..=100).map(|i| format!("line {i}\n")).collect();
+        let gate = json!({ "passed": false, "commit": "abc", "flaked": [], "results": [
+            { "command": "cargo build", "ok": true, "seconds": 9, "output": "x".repeat(5000), "skipped": false },
+            { "command": "cargo test --jobs 8", "step": "cargo test --jobs {jobs}", "ok": false, "seconds": 9, "output": long, "skipped": false },
+            { "command": "npm test", "ok": false, "seconds": 0, "output": "skipped", "skipped": true }
+        ] });
+        let finding = json!({ "priority": 1, "text": "y".repeat(900), "carried": false });
+        let result = json!({
+            "issue": "APP-1", "state": "In Progress", "next": "Fix it.", "pr_url": null, "pr_error": null,
+            "verification": { "big": "z".repeat(3000) }, "solution": { "summary": "s".repeat(1500) },
+            "review": { "reviewer": "codex", "verdict": "fail", "findings": [finding.clone()], "outside": [], "summary": "y".repeat(900), "tokens": 9 },
+            "gate": gate.clone(),
+            "land": { "issue": "APP-1", "landed": false, "conflicts": [], "warnings": [], "gate": gate, "error": "the gate failed" }
+        });
+        let b = brief(&result);
+        assert_eq!(b["review"]["findings"][0], finding);
+        assert!(b["review"].get("summary").is_none() && b["review"].get("outside").is_none());
+        assert_eq!(b["gate"]["failed"], "cargo test --jobs {jobs}");
+        let out = b["gate"]["output"].as_str().unwrap();
+        assert!(out.starts_with("line 61\n") && out.ends_with("line 100"), "{out}");
+        assert_eq!(b["land"]["error"], "the gate failed");
+        assert!(b["land"].get("issue").is_none() && b.get("verification").is_none() && b.get("solution").is_none() && b.get("pr_url").is_none());
+        assert!(b.to_string().len() < 2000 + 900 + 2 * 400, "{}", b.to_string().len());
+        assert_eq!(brief_gate(&json!({ "passed": true, "flaked": [{}], "results": [] })), json!({ "passed": true, "flaked": 1 }));
+
+        let job = |state: &str| nitely_core::submit_job::Job {
+            id: 7,
+            issue: "APP-1".into(),
+            state: state.into(),
+            queued_at: 100,
+            started_at: Some(160),
+            result: (state == "done").then(|| result.clone()),
+            worktree: String::new(),
+            branch: String::new(),
+            head: String::new(),
+            solution: None,
+            solution_patch_id: None,
+            requested_by: String::new(),
+            skip_review: false,
+            local_only: false,
+            ended_at: None,
+            pid: None,
+            detached: true,
+            error: None,
+            delivered_at: None,
+        };
+        let running = short_job(&job("running"), 400, 600);
+        assert!(running.as_str().is_some_and(|s| !s.contains('\n') && s.contains("240 s") && s.contains("wait_seconds 600")), "{running}");
+        let done = short_job(&job("done"), 400, 600);
+        assert_eq!((done["job"].as_i64(), done["state"].as_str()), (Some(7), Some("In Progress")));
     }
 
     #[test]

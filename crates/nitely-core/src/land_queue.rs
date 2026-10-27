@@ -200,11 +200,27 @@ pub fn lands_alone(db: &Db, root: &Path, pb: &Playbook, key: &str) -> Result<Opt
             needs_signature: review.approver == "human" || !review.reasons.is_empty() || db.issue(key)?.is_some_and(|i| i.state == "Approved"),
         }))
     };
+    // A change rebased past its passing review is reviewed again at a land of its own (NIT-700).
+    if rebased_past_review(db, root, pb, key).unwrap_or(false) {
+        return Ok(Some("its branch was rebased past its review, which its land brings up to date".into()));
+    }
     let signed = || -> Result<bool> {
         let patch = db.reviews(key)?.into_iter().next().map(|r| r.patch_id).unwrap_or_default();
         Ok(db.standing_approval(key)?.is_some_and(|at| db.check_signed_approval(key, &patch, at).is_ok()))
     };
     Ok(land_rules::alone_reason(batching, submodules_unchanged, reviewed, signed)?.map(str::to_string))
+}
+
+/// Whether `key`'s branch sits on the integration branch already, rebased there by its agent, and
+/// its passing review no longer covers it: a stack cannot review it, a land of its own does.
+fn rebased_past_review(db: &Db, root: &Path, pb: &Playbook, key: &str) -> Result<bool> {
+    let Some(last) = db.reviews(key)?.into_iter().next() else { return Ok(false) };
+    let (branch, _) = land::branch_of(root, key)?;
+    let base = pb.integration_branch();
+    if git(root, &["merge-base", "--is-ancestor", base, &branch]).is_err() {
+        return Ok(false);
+    }
+    crate::rebase_review::rebased_past(pb, root, base, &branch, &last)
 }
 
 /// A batch never updates a managed submodule or adopts a new baseline during rebase. Its original
@@ -699,13 +715,15 @@ fn stack_one(db: &Db, root: &Path, pb: &Playbook, stack: &Path, entry: &Entry, o
         checkout(stack, &head)?;
         // Already on top of what is below it, or rebased there as land would.
         let on_top = git(root, &["merge-base", "--is-ancestor", onto, &head]).is_ok();
-        if !on_top && git(stack, &["rebase", "--quiet", onto]).is_err()
+        let union = crate::rebase_review::union_args(pb, stack)?;
+        let rebase: Vec<&str> = union.iter().map(String::as_str).chain(["rebase", "--quiet", onto]).collect();
+        if !on_top && git(stack, &rebase).is_err()
             && !crate::test_command_merge::finish_rebase(stack).unwrap_or(false) {
             let conflicts: Vec<String> = git(stack, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default().lines().map(str::to_string).collect();
             git(stack, &["rebase", "--abort"]).ok();
             let with = if below.is_empty() { base.to_string() } else { format!("{base} or with {}, landing just before it", below.join(", ")) };
             let files = if conflicts.is_empty() { String::new() } else { format!(" in {}", conflicts.join(", ")) };
-            bail!("{branch} conflicts with {with}{files}; nothing was changed on your branch. Rebase it onto {base}, resolve, submit, and land again");
+            bail!("{branch} conflicts with {with}{files}; nothing was changed on your branch. Rebase it onto {base}, resolve, and land again: a resolution that only combines the two sides keeps the review, and anything more is reviewed at the land");
         }
         let tip = land::rev(stack, "HEAD")?;
         let approval = land::check_approval(db, pb, key, stack, onto, &branch)?;

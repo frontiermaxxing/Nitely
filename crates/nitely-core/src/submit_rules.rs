@@ -100,6 +100,29 @@ pub fn follow_up_with(body: &str, open: &[String]) -> Option<String> {
     (!new.is_empty()).then(|| format!("{}\n{}", body.trim_end(), new.join("\n")))
 }
 
+/// What the follow-up for `key`'s P2 findings carries as its evidence (NIT-695): how every later
+/// round of the same change finds it again, passing or not, instead of filing another.
+pub fn minor_follow_up_evidence(key: &str) -> String {
+    format!("The P2 review findings of {key}, which do not hold the change.")
+}
+
+/// The P2 follow-up's body: each finding (`[P2] text`), one per line as `follow_up_body` writes
+/// them, so `follow_up_with` adds a later round's.
+pub fn minor_follow_up_body(key: &str, minor: &[String]) -> String {
+    format!(
+        "The reviews of [{key}]({}) found these. They are real but minor (P2), so they did not hold the change; fix the ones that still apply:\n\n{}",
+        crate::links::issue_url(key),
+        minor.iter().map(|f| format!("- {f}")).collect::<Vec<_>>().join("\n")
+    )
+}
+
+/// A review's new P2 findings, as the follow-up lists them: not one carried from an earlier round,
+/// which that round filed (its wording may have changed since), nor a P1 carried lower because the
+/// code it cited was gone.
+pub fn minor(findings: &[Finding]) -> Vec<String> {
+    findings.iter().filter(|f| f.priority == 2 && !f.carried).map(|f| format!("[P2] {}", f.text)).collect()
+}
+
 /// What the agent is told to do under `fix` once Nitely filed the follow-up itself.
 pub fn split_into(follow_up: &str) -> String {
     format!("The review rounds are not converging, so split the change: keep what the reviews agree on and take out what the open P0/P1 findings are about. Nitely filed those findings as {follow_up} in the same goal ({}); do not file them again. Then commit and submit the smaller change. The person is told, and nothing waits on them.", crate::links::issue_url(follow_up))
@@ -280,6 +303,15 @@ pub fn solution_applies(gate_ran_on_it: bool, explained_patch: Option<&str>, sub
 /// None when it cannot be read.
 pub fn job_abandoned(process_runs: bool, age_secs: i64, pid_check_after: i64, runs_this_job: impl FnOnce() -> Option<bool>) -> bool {
     !process_runs || (age_secs > pid_check_after && runs_this_job() == Some(false))
+}
+
+/// What a failed gate's result says of the review that ran alongside it (NIT-699).
+pub fn beside_failed_gate(changes: bool, reviewer: &str) -> String {
+    if changes {
+        format!("Its review by {reviewer}, which ran with the gate, asked for changes too: fix its findings in the same round.")
+    } else {
+        format!("Its review by {reviewer}, which ran with the gate, found nothing to change.")
+    }
 }
 
 #[cfg(test)]

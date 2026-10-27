@@ -87,4 +87,4 @@ export interface PeriodicStatus {
   observed_head: string; pending_landings: number; pending_since: number | null;
   last_success_at: number | null; error: string | null; jobs: PeriodicJob[];
 }
-export interface EffectiveRepository { repo: string; options: ModeOptions; warnings: string[]; backstop_off: boolean }
+export interface EffectiveRepository { repo: string; options: ModeOptions; warnings: string[]; backstop_off: boolean; flags_wait?: string }

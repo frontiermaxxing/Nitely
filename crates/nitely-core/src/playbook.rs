@@ -81,6 +81,11 @@ pub struct LandRules {
     /// Changes per queue run (default 5).
     #[serde(default)]
     pub batch_max: Option<u32>,
+    /// Append-only files every change adds to (fixture registries, pending-work lists), as
+    /// gitattributes patterns: the land's rebase merges them with git's union driver, keeping the
+    /// lines of both sides, so they do not conflict (NIT-700).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub union: Vec<String>,
 }
 
 /// How a project lands reviewed changes: one at a time, or together in a queue.
@@ -720,6 +725,21 @@ impl Playbook {
         let root = crate::paths::normalize(&repo_root.to_string_lossy());
         let repo = config.repos.iter().find(|r| crate::paths::normalize(&r.root) == root)?;
         Some(Playbook::stored_path(&repo.name)).filter(|p| p.exists())
+    }
+
+    /// The playbook a repo with none committed lands by: the one Nitely keeps for it, or the
+    /// defaults when it keeps none, with its text ("" for the defaults) (NIT-702).
+    pub(crate) fn stored_policy(repo_root: &Path) -> Result<(Playbook, String)> {
+        let config = crate::Config::load().ok();
+        let text = match Playbook::stored_path_for(repo_root, config.as_ref()) {
+            Some(path) => std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?,
+            None => String::new(),
+        };
+        let none = crate::rules::RuleDefaults::default();
+        let defaults = if cfg!(test) { &none } else { config.as_ref().map(|c| &c.rule_defaults).unwrap_or(&none) };
+        let mut pb = Playbook::parse(&text)?;
+        crate::rules::apply_defaults(&mut pb, &text, defaults);
+        Ok((pb, text))
     }
 
     /// The playbook Nitely keeps for a connected repo that has none of its own.
@@ -1732,6 +1752,11 @@ pub(crate) fn leave_full_suites_to_land(steps: &mut [(String, Option<String>)], 
 }
 
 pub(crate) fn run_automatic_gate(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
+    // Planned and queued again, in its place, when a stricter mode overtakes it (NIT-487).
+    crate::project_modes::again_under_a_stricter_mode(db, keys, actor, &mut || automatic_gate_once(db, repo_root, worktree, keys, actor, kind))
+}
+
+fn automatic_gate_once(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
     let authority=keys.first().map(|k|crate::project_modes::authority_for_issue(db,k)).transpose()?.flatten();
     for key in keys {if crate::project_modes::authority_for_issue(db,key)?!=authority {bail!("batch members have incompatible project review modes; land individually");}}
     let plan=if !crate::project_yolo::all_enabled(db,keys)? && keys.len()==1 {crate::verification::execution_plan(db,repo_root,worktree,keys[0])?}else{None};
