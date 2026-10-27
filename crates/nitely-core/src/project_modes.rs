@@ -303,19 +303,72 @@ pub fn apply_issue(db:&Db,key:&str,pb:&mut Playbook)->Result<()> {
 /// A change of mode fails a checked gate only when the new mode asks for more than it checked.
 pub fn check_gate_authority(db:&Db,keys:&[&str],gate:&GateResult)->Result<()> {
  for key in keys {
-  if !covers_issue(db,key,&gate.mode_authority)? {bail!("project review mode changed; submit again with current settings");}
+  if !covers_issue(db,key,&gate.mode_authority)? {bail!("project review mode changed after this change was checked, to {}, which asks for more than it ran; submit again to have it checked under it",now_named(db,key)?);}
   if gate.skipped.is_some()&&!tests_off(db,key)? {bail!("automatic tests are now required; submit again");}
  }Ok(())
 }
 pub fn check_playbook_authority(db:&Db,keys:&[&str],pb:&Playbook)->Result<()> {
- if let Some(project)=&pb.mode_project {if !covers_authority(&db.conn,project,&pb.mode_authority)? {bail!("project review mode changed while queued; retry with current settings");}}
- for key in keys {if !covers_issue(db,key,&pb.mode_authority)? {bail!("project review mode changed while queued; submit again");}}Ok(())
+ if let Some(project)=&pb.mode_project {if !covers_authority(&db.conn,project,&pb.mode_authority)? {bail!(ChangedWhileQueued{queued_at:None});}}
+ for key in keys {if !covers_issue(db,key,&pb.mode_authority)? {bail!(ChangedWhileQueued{queued_at:None});}}Ok(())
+}
+/// The project's review mode changed, while work waited, to one that asks for more than it was
+/// planned under (NIT-487). An automatic gate that has not finished is planned again under the new
+/// mode (`again_under_a_stricter_mode`); `queued_at` is the place it had in the lane queue.
+#[derive(Debug)]
+pub struct ChangedWhileQueued{pub queued_at:Option<i64>}
+impl std::fmt::Display for ChangedWhileQueued {
+ fn fmt(&self,f:&mut std::fmt::Formatter<'_>)->std::fmt::Result {f.write_str("project review mode changed while queued, to one that asks for more; submit again")}
+}
+impl std::error::Error for ChangedWhileQueued {}
+/// What a gate says on its issue when it is planned again under a stricter mode.
+pub const PLANNED_AGAIN:&str="The review mode changed while this gate waited, to one that asks for more: it is planned again under the new mode and keeps its place in the queue.";
+/// Runs an automatic gate through `gate`, and again, in the place it had in the lane queue, when
+/// the review mode changed to a stricter one before it finished (NIT-487): a queued submit or land
+/// goes on under the new mode instead of failing. A few times at most, so a mode switched back and
+/// forth cannot hold it forever.
+pub(crate) fn again_under_a_stricter_mode(db:&Db,keys:&[&str],actor:&Actor,gate:&mut dyn FnMut()->Result<GateResult>)->Result<GateResult> {
+ let mut place=None;
+ for attempt in 0.. {
+  let _kept=place.map(crate::lanes::keep_place);
+  match gate() {
+   Err(e) if attempt<3 && e.is::<ChangedWhileQueued>() => {
+    place=e.downcast_ref::<ChangedWhileQueued>().and_then(|c|c.queued_at).or(place);
+    for key in keys {db.log_event(actor,Some(key),None,"status",PLANNED_AGAIN)?;}
+   }
+   done=>return done,
+  }
+ }
+ unreachable!()
+}
+/// The project's mode, by name, for what a change is told.
+fn now_named(db:&Db,key:&str)->Result<String> {Ok(for_issue(db,key)?.map(|m|format!("{:?}",m.mode)).unwrap_or_else(||"another mode".into()))}
+/// When the review mode changed since `key` was checked under `past` to one that asks no more, what
+/// its issue is told: it goes on under the new mode (NIT-487). None when the mode is the same, or
+/// asks for more (that fails `check_gate_authority`).
+pub fn looser_since(db:&Db,key:&str,past:&Option<String>)->Result<Option<String>> {
+ if authority_for_issue(db,key)?==*past || !covers_issue(db,key,past)? {return Ok(None);}
+ let mode=now_named(db,key)?;
+ Ok(Some(format!("The review mode changed to {mode} while this ran. {mode} asks for no more than this change was checked under, so it goes on under {mode}.")))
 }
 
 #[derive(Debug,Clone,Serialize)]
 pub struct EffectiveRepository {pub repo:String,pub options:Options,pub warnings:Vec<String>,
  /// Nothing runs the full suite on main: only Custom can choose this, and the app shows it in red.
- pub backstop_off:bool}
+ pub backstop_off:bool,
+ /// With review off, why each change will wait for the person: the playbook's review flags, which
+ /// no reviewer is there to answer (NIT-701). Shown where the mode is chosen, not folded away.
+ #[serde(skip_serializing_if="Option::is_none")]
+ pub flags_wait:Option<String>}
+
+/// With review off, each of the playbook's `[[review.flags]]` questions goes unanswered and sends
+/// every change to the person for approval (`ReviewRules::unevaluated_reasons`). Says so, naming
+/// them, with the ways out; None while review is on or there are no flags.
+pub fn flags_wait(options:&Options,pb:&Playbook)->Option<String> {
+ if options.pre_review!=Some(PreReview::Off)||pb.review.flags.is_empty() {return None;}
+ let names:Vec<&str>=pb.review.flags.iter().map(|f|f.name.as_str()).collect();
+ let (them,it)=if names.len()==1 {("this review flag","it")} else {("these review flags","them")};
+ Some(format!("Review is off, but the playbook asks the reviewer {them}: {}. With no reviewer to answer {it}, each change will wait for you to approve it. To go without approving each one, propose a playbook change that drops {it}, or turn a flag into an [[approval.human_paths]] rule on the paths it is about.",names.join(", ")))
+}
 pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result<Vec<EffectiveRepository>> {
  let settings=db.project_review_mode(project)?;
  config.repos.iter().filter(|r|r.project.as_deref().is_some_and(|p|p.eq_ignore_ascii_case(project))).map(|repo| {
@@ -332,13 +385,29 @@ pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result
   if options.test_depth==Some(TestDepth::Risk) {warnings.push("Risk-based verification falls back to Full for missing mappings, protected changes or an unhealthy enabled backstop.".into());}
   if options.full_backstop.as_ref().is_some_and(|b|!b.enabled) {warnings.push("The full suite on main is off: nothing checks main after reduced checks land.".into());}
   let backstop_off=options.full_backstop.as_ref().is_some_and(|b|!b.enabled);
-  Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings,backstop_off})
+  let flags_wait=flags_wait(&options,&pb);
+  Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings,backstop_off,flags_wait})
  }).collect()
 }
 
 #[cfg(test)]
 mod tests {
  use super::*;
+ /// NIT-701: review off with flags in the playbook means every change waits for the person; the
+ /// settings say so, naming the flags. Review on, or no flags, says nothing.
+ #[test]
+ fn review_off_with_review_flags_says_each_change_waits_for_the_person() {
+  let mut pb=Playbook::default();
+  let off=Options{pre_review:Some(PreReview::Off),..Default::default()};
+  assert_eq!(flags_wait(&off,&pb),None);
+  for name in ["MONEY","RELEASE"] {pb.review.flags.push(crate::review::Flag{name:name.into(),question:"Does it touch money?".into(),reason:String::new()});}
+  let said=flags_wait(&off,&pb).unwrap();
+  assert!(said.contains("MONEY, RELEASE")&&said.contains("each change will wait for you"),"{said}");
+  assert_eq!(flags_wait(&Options{pre_review:Some(PreReview::Individual),..Default::default()},&pb),None);
+  // What submit then reasons with: one unanswered question per flag.
+  pb.review.enabled=false;
+  assert_eq!(pb.review.unevaluated_reasons().len(),2);
+ }
  /// Which plans start by themselves decides nothing about checking a change: it never moves a
  /// gate's authority, and the presets keep it to plans the person asked for (NIT-550).
  #[test]
@@ -427,9 +496,37 @@ mod tests {
   check_gate_authority(&db,&[&issue.key],&checked).expect("a full gate and a review cover Fast");
   let mut pb=Playbook::default();pb.mode_project=Some("APP".into());pb.mode_authority=checked.mode_authority.clone();
   check_playbook_authority(&db,&[&issue.key],&pb).expect("work queued under Release lands under Fast");
+  assert!(looser_since(&db,&issue.key,&checked.mode_authority).unwrap().is_some_and(|n|n.contains("goes on under Fast")),"and its issue says so");
+  assert_eq!(looser_since(&db,&issue.key,&fast.authority().unwrap()).unwrap(),None,"nothing changed for work checked under Fast");
+  let pb2=|m:&ProjectReviewMode|{let mut pb=Playbook::default();pb.mode_project=Some("APP".into());pb.mode_authority=m.authority().unwrap();pb};
   db.set_project_review_mode("APP",Mode::Release,Options::default(),2,&Actor::Human).unwrap();
-  assert!(check_gate_authority(&db,&[&issue.key],&gate(fast.authority().unwrap())).is_err(),"Release asks for more than Fast checked");
+  let stricter=check_gate_authority(&db,&[&issue.key],&gate(fast.authority().unwrap())).unwrap_err().to_string();
+  assert!(stricter.contains("Release, which asks for more"),"past its gate, it is sent back with the reason: {stricter}");
+  assert!(check_playbook_authority(&db,&[&issue.key],&pb2(&fast)).unwrap_err().is::<ChangedWhileQueued>(),"a gate still queued is planned again, not failed");
   assert!(check_gate_authority(&db,&[&issue.key],&gate(None)).is_err(),"an unknown policy is never assumed to cover");
+  drop(db);std::fs::remove_file(file).ok();
+ }
+ #[test]
+ fn a_gate_a_stricter_mode_overtook_in_the_queue_runs_again_in_its_place() {
+  let file=crate::paths::unique_temp("mode-again",".sqlite");let mut db=Db::open(&file).unwrap();db.create_project("APP","Example").unwrap();
+  let issue=db.create_issue(&crate::NewIssue{project:"APP".into(),title:"Queued change".into(),body:"Waits in the lane queue".into(),evidence:"none".into(),source:"codex".into(),kind:"feature".into(),..Default::default()},&Actor::Human).unwrap();
+  let passed=GateResult{mode_authority:None,passed:true,plan:None,skipped:None,commit:"abc".into(),results:vec![],warnings:vec![],flaked:vec![],lane_run:None};
+  let mut places=vec![];
+  let gate=again_under_a_stricter_mode(&db,&[&issue.key],&Actor::Human,&mut ||{
+   places.push(crate::lanes::kept_place());
+   if places.len()<3 {Err(anyhow::Error::new(ChangedWhileQueued{queued_at:(places.len()==1).then_some(42)}))} else {Ok(passed.clone())}
+  }).unwrap();
+  assert!(gate.passed);
+  assert_eq!(places,vec![None,Some(42),Some(42)],"planned again in the place it first had");
+  assert_eq!(crate::lanes::kept_place(),None,"and only while it runs");
+  let said:i64=db.conn.query_row("SELECT count(*) FROM event WHERE issue_key=?1 AND summary=?2",params![issue.key,PLANNED_AGAIN],|r|r.get(0)).unwrap();
+  assert_eq!(said,2);
+  let mut tries=0;
+  let other=again_under_a_stricter_mode(&db,&[&issue.key],&Actor::Human,&mut ||{tries+=1;bail!("the lane's disk is full")}).unwrap_err();
+  assert_eq!((tries,other.to_string()),(1,"the lane's disk is full".to_string()),"any other failure is not run again");
+  let mut forever=0;
+  assert!(again_under_a_stricter_mode(&db,&[&issue.key],&Actor::Human,&mut ||{forever+=1;bail!(ChangedWhileQueued{queued_at:None})}).is_err());
+  assert_eq!(forever,4,"a mode switched back and forth does not hold it forever");
   drop(db);std::fs::remove_file(file).ok();
  }
  #[test]

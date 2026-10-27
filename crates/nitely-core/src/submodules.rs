@@ -409,8 +409,13 @@ pub fn rebase(root: &Path, pb: &Playbook, worktree: &Path, base: &str) -> Result
 /// Rebases the task branch in `worktree` onto `base`. A stop whose only conflicts are pointers of
 /// submodules being moved is resolved by pointing them at their rebased commit; any other conflict
 /// is the caller's, as from a plain `git rebase`.
-pub fn rebase_repo(worktree: &Path, base: &str, moving: &[Moving]) -> Result<()> {
-    let mut result = git(worktree, &["rebase", base]).map(|_| ());
+pub fn rebase_repo(worktree: &Path, base: &str, moving: &[Moving], config: &[String]) -> Result<()> {
+    let with = |args: &[&str]| -> Vec<String> { config.iter().cloned().chain(args.iter().map(|a| a.to_string())).collect() };
+    let run = |args: &[&str]| -> Result<String> {
+        let args = with(args);
+        git(worktree, &args.iter().map(String::as_str).collect::<Vec<_>>())
+    };
+    let mut result = run(&["rebase", base]).map(|_| ());
     // Each stop is one commit; a branch has far fewer than this.
     for _ in 0..1000 {
         let Err(e) = result else { return Ok(()) };
@@ -422,10 +427,10 @@ pub fn rebase_repo(worktree: &Path, base: &str, moving: &[Moving]) -> Result<()>
         for m in pins {
             git(worktree, &["update-index", "--cacheinfo", &format!("160000,{},{}", m.head, m.path)])?;
         }
-        result = git(worktree, &["-c", "core.editor=true", "rebase", "--continue"]).map(|_| ());
+        result = run(&["-c", "core.editor=true", "rebase", "--continue"]).map(|_| ());
         // A commit that only moved the pointer, to where it points now, is empty: drop it.
         if result.is_err() && git(worktree, &["diff", "--cached", "--quiet"]).is_ok() && git(worktree, &["diff", "--name-only", "--diff-filter=U"])?.trim().is_empty() {
-            result = git(worktree, &["rebase", "--skip"]).map(|_| ());
+            result = run(&["rebase", "--skip"]).map(|_| ());
         }
     }
     result

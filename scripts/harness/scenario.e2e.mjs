@@ -306,9 +306,16 @@ test("one scenario through the app: connect, setup, crew, submit, review alone a
     assert.equal(l1.run.gates, 1, "on one gate");
     for (const key of [B, D]) assert.equal(await state(key), "Done");
 
-    // 6. The agent asks the person to accept the finding: a decision, told as a notification
-    // (the app is not in front), and decided in the Inbox with a signed Accept.
-    const asked = await agent.call("request_acceptance", { key: C, finding: "1", why: "The default greeting is the person's call; the reviewer cannot know it." });
+    // 6. The agent asks the person to accept the finding: a fresh review checks it first, then it
+    // is a decision, told as a notification (the app is not in front), and decided in the Inbox
+    // with a signed Accept.
+    const disputed = await agent.call("request_acceptance", { key: C, finding: "1", why: "The default greeting is the person's call; the reviewer cannot know it." });
+    const checked = await until("the fresh review of the finding", async () => {
+      const t = await agent.call("get_triage", { id: disputed.id });
+      return t.state === "open" ? null : t;
+    });
+    assert.equal(checked.state, "escalated", JSON.stringify(checked));
+    const asked = { id: checked.ask_id };
     await until("the decision's notification", async () => notifications(home).find((n) => `${n.title} ${n.body}`.includes(C)));
     await page.open("#inbox");
     // The Accept is the behaviour: the app signs it. Its controls are found by their hooks.
