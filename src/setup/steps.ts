@@ -151,4 +151,3 @@ export function reviewPairing(tools: Tool[] | null): { kind: "both" | "one" | "n
   }
   return { kind: "none", text: "Neither Claude Code nor Codex is here: at least one is required, to work and to review." };
 }
-

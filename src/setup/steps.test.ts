@@ -80,4 +80,3 @@ test("NIT-694: the line on reviews follows the agent CLIs installed", () => {
   // git and the GitHub CLI are not reviewers.
   assert.equal(reviewPairing(nothing.map((t) => (t.command === "git" || t.command === "gh" ? { ...t, path: "/x" } : t)))?.kind, "none");
 });
-
