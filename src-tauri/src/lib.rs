@@ -612,12 +612,13 @@ async fn first_commit_preview(path: String) -> Result<nitely_core::first_commit:
     nitely_core::first_commit::preview(std::path::Path::new(&path)).map_err(err)
 }
 
-/// Makes that first commit: the .gitignore lines the person kept, the paths they left out, and a
+/// Makes that first commit: the .gitignore lines the person kept, the flagged paths they chose to
+/// commit after all, and a
 /// git identity for this repo when git has none. Never pushed.
 #[tauri::command]
-async fn first_commit(path: String, gitignore: Option<Vec<String>>, exclude: Vec<String>, name: Option<String>, email: Option<String>) -> Result<String, String> {
+async fn first_commit(path: String, gitignore: Option<Vec<String>>, include: Vec<String>, name: Option<String>, email: Option<String>) -> Result<String, String> {
     let identity = name.as_deref().zip(email.as_deref());
-    nitely_core::first_commit::make(std::path::Path::new(&path), gitignore.as_deref(), &exclude, identity).map_err(err)
+    nitely_core::first_commit::make(std::path::Path::new(&path), gitignore.as_deref(), &include, identity).map_err(err)
 }
 
 /// Adds the repo. The plan is recomputed here rather than taken from the page, so what is written

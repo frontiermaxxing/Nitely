@@ -1792,11 +1792,11 @@ function firstCommitPreview(): FirstCommitPreview {
     bytes: 3_400_000,
     largest: [["src", 2_100_000], ["assets", 900_000], ["docs", 300_000]],
     flagged: [
-      { path: ".env", reason: "secret", bytes: 120 },
-      { path: "node_modules", reason: "build", bytes: 0 },
-      { path: "assets/demo.mp4", reason: "large", bytes: 80_000_000 },
+      { path: ".env", reason: "secret", bytes: 120, line: ".env" },
+      { path: "node_modules", reason: "build", bytes: 0, line: "node_modules/" },
+      { path: "assets/demo.mp4", reason: "large", bytes: 80_000_000, line: "/assets/demo.mp4" },
     ],
-    gitignore: [".env*", "node_modules/", "/assets/demo.mp4"],
+    gitignore: [".env", "node_modules/", "/assets/demo.mp4"],
     needs_identity: true,
     branch: "main",
   };

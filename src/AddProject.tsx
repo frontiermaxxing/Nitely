@@ -269,12 +269,13 @@ function FirstCommit(props: { root: string; branch: string; onMade: (said: strin
     if (!preview) return;
     setBusy(true);
     try {
-      const items = preview.gitignore ?? preview.flagged.map((f) => f.path);
-      const chosen = items.filter((i) => kept.has(i));
+      // What stays out is decided in the backend from what it flagged; the page names only what
+      // the person chose to commit after all: a flagged path whose line (or box) they unticked.
+      const include = preview.flagged.filter((f) => !kept.has(preview.gitignore ? f.line : f.path)).map((f) => f.path);
       const said = await invoke<string>("first_commit", {
         path: props.root,
-        gitignore: preview.gitignore ? chosen : null,
-        exclude: preview.gitignore ? [] : chosen,
+        gitignore: preview.gitignore ? preview.gitignore.filter((l) => kept.has(l)) : null,
+        include,
         name: preview.needs_identity ? gitName : null,
         email: preview.needs_identity ? gitEmail : null,
       });

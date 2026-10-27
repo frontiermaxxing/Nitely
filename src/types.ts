@@ -747,7 +747,7 @@ export interface FirstCommitPreview {
   files: number;
   bytes: number;
   largest: [string, number][];
-  flagged: { path: string; reason: "build" | "large" | "secret"; bytes: number }[];
+  flagged: { path: string; reason: "build" | "large" | "secret"; bytes: number; line: string }[];
   gitignore: string[] | null;
   needs_identity: boolean;
   branch: string;

@@ -2081,10 +2081,9 @@ fn run(cmd: Cmd) -> Result<()> {
                         println!("  writes .gitignore: {}", lines.join(", "));
                     }
                     if yes {
-                        // With a .gitignore of its own, what it does not cover is left out by path.
-                        let exclude: Vec<String> = if p.gitignore.is_some() { vec![] } else { p.flagged.iter().map(|f| f.path.clone()).collect() };
+                        // Everything flagged stays out; the CLI includes nothing it flagged.
                         let identity = git_name.as_deref().zip(git_email.as_deref());
-                        println!("{}", nitely_core::first_commit::make(&root, p.gitignore.as_deref(), &exclude, identity)?);
+                        println!("{}", nitely_core::first_commit::make(&root, p.gitignore.as_deref(), &[], identity)?);
                         plan = nitely_core::connect::plan(&db, &config, &path, project.as_deref(), name.as_deref())?;
                     }
                 }

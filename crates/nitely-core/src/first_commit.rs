@@ -100,6 +100,17 @@ pub struct Flagged {
     pub path: String,
     pub reason: Reason,
     pub bytes: u64,
+    /// The .gitignore line that keeps it out (`ignore_line`), so the page can tell which flagged
+    /// paths a line it unticks lets in.
+    pub line: String,
+}
+
+/// Whether the staged path `path` (`/`-separated) is one `classify` keeps out: a file it flags, or a
+/// file inside a folder it flags. A .gitignore cannot be trusted with that alone: a nested one can
+/// re-include what the root one excludes (NIT-685 review).
+pub fn kept_out(path: &str, size: u64) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    (1..parts.len()).any(|n| classify(&parts[..n].join("/"), 0, true).is_some()) || classify(path, size, false).is_some()
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -125,7 +136,7 @@ pub struct Preview {
 pub fn proposed_gitignore(flagged: &[Flagged]) -> Vec<String> {
     let (mut patterns, mut paths): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
     for f in flagged {
-        let line = ignore_line(&f.path, f.reason);
+        let line = f.line.clone();
         let list = if line.starts_with('/') { &mut paths } else { &mut patterns };
         if !list.contains(&line) {
             list.push(line);
@@ -159,14 +170,16 @@ pub fn preview(root: &Path) -> Result<Preview> {
             let Ok(meta) = e.metadata() else { continue };
             if meta.is_dir() {
                 if let Some(reason) = classify(&path, 0, true) {
-                    flagged.push(Flagged { path, reason, bytes: 0 });
+                    let line = ignore_line(&path, reason);
+                    flagged.push(Flagged { path, reason, bytes: 0, line });
                 } else {
                     pending.push((e.path(), path));
                 }
                 continue;
             }
             if let Some(reason) = classify(&path, meta.len(), false) {
-                flagged.push(Flagged { path, reason, bytes: meta.len() });
+                let line = ignore_line(&path, reason);
+                flagged.push(Flagged { path, reason, bytes: meta.len(), line });
                 continue;
             }
             files += 1;
@@ -187,8 +200,10 @@ pub fn preview(root: &Path) -> Result<Preview> {
 
 /// Makes the first commit of the repo at `root`: writes `gitignore` (the lines the person kept)
 /// when the repo has no .gitignore, sets `identity` (name, email) for this repo only, adds what is
-/// there, leaves out each path in `exclude`, and commits "Initial commit". Never pushes.
-pub fn make(root: &Path, gitignore: Option<&[String]>, exclude: &[String], identity: Option<(&str, &str)>) -> Result<String> {
+/// there, and commits "Initial commit". Whatever `kept_out` flags stays out, whatever the
+/// .gitignore files say, unless it is in `include` (a flagged path, or a folder above it, that the
+/// person chose to commit after all). Never pushes.
+pub fn make(root: &Path, gitignore: Option<&[String]>, include: &[String], identity: Option<(&str, &str)>) -> Result<String> {
     if git(root, &["rev-parse", "--verify", "--quiet", "HEAD"]).is_ok() {
         bail!("{} has commits already", root.display());
     }
@@ -206,14 +221,23 @@ pub fn make(root: &Path, gitignore: Option<&[String]>, exclude: &[String], ident
             std::fs::write(&path, format!("{}\n", lines.join("\n")))?;
         }
     }
-    // Whatever was staged before (a `.env` added by hand, say) goes back out of the index, so the
-    // .gitignore and `exclude` alone decide what the commit holds (NIT-685 review). The repo has
-    // no commit, so nothing else is lost: the files stay as they are on disk.
-    // read-tree empties it whatever state each entry is in (staged, then edited again, say).
+    // Whatever was staged before (a `.env` added by hand, say) goes back out of the index, so what
+    // is decided here alone is what the commit holds (NIT-685 review). The repo has no commit, so
+    // nothing else is lost: the files stay as they are on disk. read-tree empties it whatever state
+    // each entry is in (staged, then edited again, say).
     git(root, &["read-tree", "--empty"])?;
     git(root, &["add", "--all"])?;
-    for p in exclude {
-        git(root, &["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", p])?;
+    let chosen = |p: &str| include.iter().any(|i| p == i || p.starts_with(&format!("{i}/")));
+    let out: Vec<String> = git(root, &["diff", "--cached", "--name-only", "--no-renames"])?
+        .lines()
+        .map(str::to_string)
+        .filter(|p| !p.is_empty() && !chosen(p))
+        .filter(|p| kept_out(p, std::fs::metadata(root.join(p)).map(|m| m.len()).unwrap_or(0)))
+        .collect();
+    for batch in out.chunks(200) {
+        let mut args = vec!["rm", "--cached", "--quiet", "--ignore-unmatch", "--"];
+        args.extend(batch.iter().map(String::as_str));
+        git(root, &args)?;
     }
     let staged = git(root, &["diff", "--cached", "--name-only"])?.lines().filter(|l| !l.trim().is_empty()).count();
     if staged == 0 {
@@ -252,7 +276,8 @@ mod tests {
         assert_eq!(ignore_line("certs/[prod]/server.PEM", Reason::Secret), r"/certs/\[prod\]/server.PEM");
         assert_eq!(literal("!important*.bin"), r"\!important\*.bin");
         // A flagged template stays out: its own path line comes after the template exceptions.
-        let flag = |path: &str, reason| Flagged { path: path.into(), reason, bytes: 0 };
+        let flag = |path: &str, reason| Flagged { path: path.into(), reason, bytes: 0, line: ignore_line(path, reason) };
+        assert!(kept_out("web/node_modules/pkg/index.js", 1) && kept_out("certs/server.pem", 1) && !kept_out("src/main.rs", 1));
         let lines = proposed_gitignore(&[flag(".env.example", Reason::Large), flag(".env.local", Reason::Secret)]);
         assert_eq!(lines.last().map(String::as_str), Some("/.env.example"), "{lines:?}");
         assert_eq!(ignore_line("deploy/server.pem", Reason::Secret), "*.pem");
@@ -272,6 +297,10 @@ mod tests {
         std::fs::write(dir.join(".env"), "TOKEN=1").unwrap();
         std::fs::write(dir.join(".env.local"), "TOKEN=2").unwrap();
         std::fs::write(dir.join(".env.example"), "TOKEN=").unwrap();
+        // A nested .gitignore that re-includes a key does not get it into the commit.
+        std::fs::create_dir_all(dir.join("certs")).unwrap();
+        std::fs::write(dir.join("certs/server.pem"), "KEY").unwrap();
+        std::fs::write(dir.join("certs/.gitignore"), "!server.pem\n").unwrap();
         git(&dir, &["init", "--quiet", "--initial-branch=main"]).unwrap();
         // A secret the person staged before connecting stays out all the same, and a file staged
         // and then edited again does not stop the commit.
@@ -281,15 +310,15 @@ mod tests {
         git(&dir, &["config", "user.name", ""]).unwrap();
         git(&dir, &["config", "user.email", ""]).unwrap();
         let p = preview(&dir).unwrap();
-        assert_eq!((p.files, p.branch.as_str()), (2, "main"));
-        let lines = [".env", ".env.*", "node_modules/", "!.env.example", "!.env.sample", "!.env.template"].map(String::from);
+        assert_eq!((p.files, p.branch.as_str()), (3, "main"));
+        let lines = [".env", ".env.*", "*.pem", "node_modules/", "!.env.example", "!.env.sample", "!.env.template"].map(String::from);
         assert_eq!(p.gitignore.as_deref(), Some(&lines[..]));
         assert!(p.needs_identity);
         assert!(make(&dir, p.gitignore.as_deref(), &[], None).unwrap_err().to_string().contains("name and email"));
         let said = make(&dir, p.gitignore.as_deref(), &[], Some(("You", "you@example.com"))).unwrap();
         assert!(said.contains("on main") && said.contains("not pushed"), "{said}");
         let committed = git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
-        assert_eq!(committed.lines().collect::<Vec<_>>(), [".env.example", ".gitignore", "src/main.rs"], "the template goes in, the staged .env does not");
+        assert_eq!(committed.lines().collect::<Vec<_>>(), [".env.example", ".gitignore", "certs/.gitignore", "src/main.rs"], "the template goes in; the staged .env and the re-included key do not");
         assert!(preview(&dir).is_err() && make(&dir, None, &[], None).is_err(), "only a repo with no commits");
         std::fs::remove_dir_all(&dir).ok();
     }
