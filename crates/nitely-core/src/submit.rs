@@ -6,7 +6,7 @@
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use rusqlite::OptionalExtension;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::db::{now, Db};
 use crate::issues::{Actor, IssueRecord};
@@ -222,6 +222,10 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     pb.approval.check_blocked(&files)?;
     crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
     let mut verification = crate::verification::assess_and_record(db, &worktree, &base, &checked_head, &issue,actor)?;
+    // The review starts as the gate is queued, on the commit it gates (NIT-699), so a round costs
+    // the longer of the two and not their sum.
+    let mut early = start_early_review(db, &root, &issue, &worktree, &branch, &since, &checked_head, &files, quick || opts.skip_review, actor)?;
+    let early_started = early.is_some();
     let gate = playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)?;
     if gate.skipped.is_some() {
         verification.enforcement="Project mode: automatic tests did not run; classification is advice only.".into();
@@ -269,21 +273,33 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             out.next = format!("{said}. {}", out.next);
             out.state = db.issue(&issue.key)?.map(|i| i.state).unwrap_or_default();
         }
+        // The review that ran alongside comes back with the failure, so one round fixes both.
+        if let Some(early) = early.take() {
+            match early.join(&worktree, &out.commit) {
+                Ok(Some((choice, mut review))) => {
+                    crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
+                    review.note = choice.note.clone();
+                    let changes = review.verdict == "changes";
+                    out.next = format!("{} {}", out.next, crate::submit_rules::beside_failed_gate(changes, &review.reviewer));
+                    out.review = Some(review);
+                    // Recorded so the next round checks its findings first; a passing one is not,
+                    // since a review on record with no passing gate must not carry over.
+                    if changes {
+                        db.record_review(&out)?;
+                        let (pb, _) = review_policy(db, &root, &issue)?;
+                        let diff = diff_id(&worktree, &since, &out.commit).ok();
+                        db.conn.execute("UPDATE review SET rules = ?2, diff_id = ?3 WHERE id = ?1", rusqlite::params![db.conn.last_insert_rowid(), rules_of(&pb.review), diff])?;
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review alongside the gate did not finish: {e:#}"))?,
+            }
+        }
         return Ok(out);
     }
 
     // A queued gate may outlive a human settings change. Read the authoritative policy again.
-    let mut pb = Playbook::load(&root)?;
-    crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
-    // A goal item on main still gets the blocking item review its mode asks for, though changes
-    // with no goal land unreviewed (NIT-563).
-    let item_blocking = issue.goal.is_some() && item_review_of(db, &issue.key)? == ItemReview::Blocking;
-    if item_blocking {
-        pb.review.enabled = true;
-    }
-    pb.review.policy_root = Some(root.clone());
-    // Guarded by that item review then, not by the review of changes with no goal (NIT-597 review).
-    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.map(|g| crate::project_yolo::ReviewGuard { item: item_blocking, ..g }).into_iter().collect();
+    let (mut pb, item_blocking) = review_policy(db, &root, &issue)?;
     crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
@@ -315,41 +331,21 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             let mut rules = pb.review.clone();
             rules.context = review_context(db, &issue, &out.gate)?;
             // Under a mode that reviews in batches, its review waits for its land queue batch
-            // (review_batch.rs): nothing is reviewed now, and land refuses it until it is.
-            if reused.is_none() && waits_for_land_batch(db, &pb, &issue, &worktree, &files, &vendor, &out.reasons, previous.as_ref(), actor)? {
+            // (review_batch.rs): nothing is reviewed now, and land refuses it until it is. One that
+            // started with the gate was found not to.
+            if reused.is_none() && !early_started && waits_for_land_batch(db, &pb, &issue, &worktree, &files, &vendor, &out.reasons, previous.as_ref(), actor)? {
                 out.review_batched = true;
                 return Ok(());
             }
-            // A reviewer that cannot run (not signed in, say) is passed over for the next candidate;
-            // one that ran and did not finish its review stops the submit.
-            let mut failed: Vec<crate::review::CouldNotRun> = vec![];
-            let (choice, mut review) = if let Some(done) = reused { done } else { loop {
-                rules.require_enabled()?;
-                let choice = pb.review.choose_after(&vendor, &|r| pb.review.is_installed(r, &worktree), &failed)?;
-                let reviewer = choice.reviewer.clone();
-                let started = format!("Review by {reviewer}{} started", noted(&choice.note));
-                db.log_event(actor, Some(&issue.key), Some(&wt), "review_started", &started)?;
-                match rules.run(&reviewer, &worktree, &since, previous.as_ref()) {
-                    Ok(r) => {
-                        db.reviewer_ran(&reviewer)?;
-                        break (choice, r);
-                    }
-                    Err(e) if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() => return Err(e),
-                    Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
-                        Ok(out) => {
-                            db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
-                            // Told once, until it reviews again (NIT-362).
-                            let hint = if out.why == "not signed in" { crate::review::login_hint(&reviewer, &pb.review) } else { String::new() };
-                            db.reviewer_could_not_run(&issue.key, &reviewer, &out.why, &hint)?;
-                            failed.push(out);
-                        }
-                        Err(e) => {
-                            db.log_event(actor, Some(&issue.key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
-                            return Err(e);
-                        }
-                    },
-                }
-            } };
+            // The review that ran alongside the gate, when it reviewed the commit the gate passed.
+            let alongside = match early.take() {
+                Some(e) if reused.is_none() => e.join(&worktree, &out.commit)?,
+                _ => None,
+            };
+            let (choice, mut review) = match (reused, alongside) {
+                (Some(done), _) | (None, Some(done)) => done,
+                (None, None) => run_review(db, &pb.review, &rules, &vendor, &worktree, &since, previous.as_ref(), &issue.key, actor)?,
+            };
             crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
             let reviewer = choice.reviewer.clone();
             review.note = choice.note.clone();
@@ -604,6 +600,131 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         out.land = landed.ok();
     }
     Ok(out)
+}
+
+/// The review policy a submit goes by, read now: the playbook under the issue's project mode, with
+/// a goal item's blocking item review and the YOLO guards. Also whether that item review blocks.
+fn review_policy(db: &Db, root: &Path, issue: &IssueRecord) -> Result<(Playbook, bool)> {
+    let mut pb = Playbook::load(root)?;
+    crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
+    // A goal item on main still gets the blocking item review its mode asks for, though changes
+    // with no goal land unreviewed (NIT-563).
+    let item_blocking = issue.goal.is_some() && item_review_of(db, &issue.key)? == ItemReview::Blocking;
+    if item_blocking {
+        pb.review.enabled = true;
+    }
+    pb.review.policy_root = Some(root.to_path_buf());
+    // Guarded by that item review then, not by the review of changes with no goal (NIT-597 review).
+    pb.review.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.map(|g| crate::project_yolo::ReviewGuard { item: item_blocking, ..g }).into_iter().collect();
+    Ok((pb, item_blocking))
+}
+
+/// A review started as the gate was queued, on the commit the gate runs on (NIT-699).
+struct EarlyReview {
+    head: String,
+    handle: std::thread::JoinHandle<Result<(crate::review::Choice, Review)>>,
+}
+
+impl EarlyReview {
+    /// Its result, once it finishes, when it is still of the change: the gate ran on the commit it
+    /// reviewed and the worktree has not moved since. None when it is not.
+    fn join(self, worktree: &Path, gated: &str) -> Result<Option<(crate::review::Choice, Review)>> {
+        let done = self.handle.join().map_err(|_| anyhow::anyhow!("the review stopped unexpectedly"))??;
+        let at = |rev: &str| git(worktree, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")]).map(|c| c.trim().to_string());
+        Ok((at(gated)? == self.head && at("HEAD")? == self.head).then_some(done))
+    }
+}
+
+/// Starts the change's review on its own connection, alongside the gate, when it would be reviewed
+/// alone after a passing gate: not under YOLO or with review off, not a pass carried over, and not
+/// one its land queue batch reviews (batched pre-review is unchanged). The gate's result is not
+/// known yet, so the review is not told it.
+#[allow(clippy::too_many_arguments)]
+fn start_early_review(
+    db: &Db,
+    root: &Path,
+    issue: &IssueRecord,
+    worktree: &Path,
+    branch: &str,
+    since: &str,
+    head: &str,
+    files: &[String],
+    no_review: bool,
+    actor: &Actor,
+) -> Result<Option<EarlyReview>> {
+    let Some(path) = db.conn.path().filter(|p| !p.is_empty()).map(PathBuf::from) else { return Ok(None) };
+    if no_review {
+        return Ok(None);
+    }
+    let (pb, item_blocking) = review_policy(db, root, issue)?;
+    if (!item_blocking && crate::project_yolo::enabled_for_issue(db, &issue.key)?) || !pb.review.enabled || pb.review.require_enabled().is_err() {
+        return Ok(None);
+    }
+    let vendor = crate::git::parse_branch(branch).0.unwrap_or_default();
+    if reused_pass(db, &pb.review, &issue.key, &diff_id(worktree, since, head)?, &vendor, &|r| pb.review.is_installed(r, worktree))?.is_some() {
+        return Ok(None);
+    }
+    let previous = previous_round(db, &issue.key, worktree)?;
+    if waits_for_land_batch(db, &pb, issue, worktree, files, &vendor, &pb.human_reasons(files)?, previous.as_ref(), actor)? {
+        return Ok(None);
+    }
+    let not_gated_yet = GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.to_string(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+    let mut rules = pb.review.clone();
+    rules.context = review_context(db, issue, &not_gated_yet)?;
+    let wt = worktree.to_string_lossy().into_owned();
+    db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review starts with the gate, on {}", &head[..head.len().min(7)]))?;
+    let policy = pb.review.clone();
+    let (key, worktree, since, actor) = (issue.key.clone(), worktree.to_path_buf(), since.to_string(), actor.clone());
+    let handle = std::thread::spawn(move || {
+        let db = Db::open(&path)?;
+        run_review(&db, &policy, &rules, &vendor, &worktree, &since, previous.as_ref(), &key, &actor)
+    });
+    Ok(Some(EarlyReview { head: head.to_string(), handle }))
+}
+
+/// Runs the change's review: a reviewer that cannot run (not signed in, say) is passed over for the
+/// next candidate; one that ran and did not finish its review stops the submit.
+#[allow(clippy::too_many_arguments)]
+fn run_review(
+    db: &Db,
+    policy: &crate::review::ReviewRules,
+    rules: &crate::review::ReviewRules,
+    vendor: &str,
+    worktree: &Path,
+    since: &str,
+    previous: Option<&PreviousRound>,
+    key: &str,
+    actor: &Actor,
+) -> Result<(crate::review::Choice, Review)> {
+    let wt = worktree.to_string_lossy().into_owned();
+    let mut failed: Vec<crate::review::CouldNotRun> = vec![];
+    loop {
+        rules.require_enabled()?;
+        let choice = policy.choose_after(vendor, &|r| policy.is_installed(r, worktree), &failed)?;
+        let reviewer = choice.reviewer.clone();
+        let started = format!("Review by {reviewer}{} started", noted(&choice.note));
+        db.log_event(actor, Some(key), Some(&wt), "review_started", &started)?;
+        match rules.run(&reviewer, worktree, since, previous) {
+            Ok(r) => {
+                db.reviewer_ran(&reviewer)?;
+                return Ok((choice, r));
+            }
+            Err(e) if e.is::<crate::review::Disabled>() || e.is::<crate::project_yolo::SkipReview>() => return Err(e),
+            Err(e) => match e.downcast::<crate::review::CouldNotRun>() {
+                Ok(out) => {
+                    db.log_event(actor, Some(key), Some(&wt), "review_failed", &format!("Review by {reviewer} could not run ({}); trying another reviewer", out.why))?;
+                    // Told once, until it reviews again (NIT-362).
+                    let hint = if out.why == "not signed in" { crate::review::login_hint(&reviewer, policy) } else { String::new() };
+                    db.reviewer_could_not_run(key, &reviewer, &out.why, &hint)?;
+                    failed.push(out);
+                }
+                Err(e) => {
+                    db.log_event(actor, Some(key), Some(&wt), "review_failed", &format!("Review by {reviewer} did not finish"))?;
+                    return Err(e);
+                }
+            },
+        }
+    }
 }
 
 /// Why `key`'s review rounds stopped converging, with `review` the newest, which asks for changes,
@@ -1544,6 +1665,7 @@ case "$prompt" in
        *) echo "PREVIOUS 1: open edge.txt:1 \`let edge = 2;\` still skips the empty line"; echo "VERDICT: clean";;
      esac;;
   *) case "$files" in
+       *together*) touch ../review-ran; echo "- [P1] Together: together.txt, the x is never read"; echo "VERDICT: findings";;
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
        *stuck*) echo "- [P1] Stuck: stuck.txt, the x is never read"; echo "VERDICT: findings";;
        *stale*) if [ -f ../stale-seen ]; then echo "Fine."; echo "VERDICT: clean"; else touch ../stale-seen; echo "- [P1] Stale: stale.txt, the x is never read"; echo "VERDICT: findings"; fi;;
@@ -1817,6 +1939,31 @@ reason = "money logic"
             assert_eq!(f.db.reviews(&issue.key).unwrap()[0].patch_id, s.patch_id);
             assert!(describe(&issue, &s, Default::default()).contains(&format!("patch={}", s.patch_id)));
         }
+    }
+
+    #[test]
+    fn a_review_runs_with_its_gate_and_comes_back_with_its_failure() {
+        let mut f = fixture();
+        // The gate fails only once the review has started, so it passes when they run one after the other.
+        let gate = format!("commands = ['\"{}\" gate.sh']", playbook::posix_sh());
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("commands = [\"exit 0\"]", &gate)).unwrap();
+        std::fs::write(f.repo.join("gate.sh"), "i=0
+while [ ! -f ../review-ran ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done
+[ -f ../review-ran ] && exit 3
+exit 0
+").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "a gate that waits for the review"]);
+        let (issue, wt) = f.committed("Together", "together.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert!(!s.gate.passed, "{s:?}");
+        let review = s.review.as_ref().expect("the review's findings come back with the failed gate");
+        assert!(review.verdict == "changes" && review.findings.iter().any(|f| f.text.contains("Together")), "{review:?}");
+        assert_eq!(s.state, "In Progress");
+        // On record for its patch, so the next round checks its findings first and nothing lands on it.
+        let recorded = &f.db.reviews(&issue.key).unwrap()[0];
+        assert_eq!((recorded.verdict.as_str(), recorded.patch_id.as_str()), ("changes", s.patch_id.as_str()));
+        assert!(previous_round(&f.db, &issue.key, &wt).unwrap().is_some_and(|p| p.findings.iter().any(|f| f.text.contains("Together"))));
     }
 
     #[test]

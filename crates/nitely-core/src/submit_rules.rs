@@ -282,6 +282,15 @@ pub fn job_abandoned(process_runs: bool, age_secs: i64, pid_check_after: i64, ru
     !process_runs || (age_secs > pid_check_after && runs_this_job() == Some(false))
 }
 
+/// What a failed gate's result says of the review that ran alongside it (NIT-699).
+pub fn beside_failed_gate(changes: bool, reviewer: &str) -> String {
+    if changes {
+        format!("Its review by {reviewer}, which ran with the gate, asked for changes too: fix its findings in the same round.")
+    } else {
+        format!("Its review by {reviewer}, which ran with the gate, found nothing to change.")
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
