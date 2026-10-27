@@ -959,6 +959,14 @@ async fn install_tool(app: tauri::AppHandle, tool: String) -> Result<nitely_core
     .map_err(|e| e.to_string())?
 }
 
+/// Opens a terminal window running a tool's own sign-in (NIT-689): `gh auth login`, `codex login`,
+/// or Claude Code itself. Nitely only starts it and never sees what is typed there; the setup's
+/// Check again runs `tools_check` once the person is done.
+#[tauri::command]
+async fn tool_sign_in(command: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || nitely_core::tools::open_sign_in(&command).map_err(err)).await.map_err(|e| e.to_string())?
+}
+
 /// Every request waiting now, why, and what it waits behind (NIT-322).
 #[tauri::command]
 async fn waits_overview() -> Result<nitely_crew::waits::Waits, String> {
@@ -1213,6 +1221,7 @@ pub fn run() {
             tools_check,
             tool_install_plans,
             install_tool,
+            tool_sign_in,
             memory_trim_setting,
             set_memory_trim,
             batches_overview,
