@@ -1732,6 +1732,11 @@ pub(crate) fn leave_full_suites_to_land(steps: &mut [(String, Option<String>)], 
 }
 
 pub(crate) fn run_automatic_gate(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
+    // Planned and queued again, in its place, when a stricter mode overtakes it (NIT-487).
+    crate::project_modes::again_under_a_stricter_mode(db, keys, actor, &mut || automatic_gate_once(db, repo_root, worktree, keys, actor, kind))
+}
+
+fn automatic_gate_once(db: &Db, repo_root: &Path, worktree: &Path, keys: &[&str], actor: &Actor, kind: crate::lanes::Kind) -> Result<GateResult> {
     let authority=keys.first().map(|k|crate::project_modes::authority_for_issue(db,k)).transpose()?.flatten();
     for key in keys {if crate::project_modes::authority_for_issue(db,key)?!=authority {bail!("batch members have incompatible project review modes; land individually");}}
     let plan=if !crate::project_yolo::all_enabled(db,keys)? && keys.len()==1 {crate::verification::execution_plan(db,repo_root,worktree,keys[0])?}else{None};

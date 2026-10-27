@@ -1016,7 +1016,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
     };
     db.conn.execute(
         "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, pid_started, polled_at, scheduler)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', 'local', ?10, ?11, ?12, ?13, ?10, ?14)",
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', 'local', ?15, ?11, ?12, ?13, ?10, ?14)",
         params![
             req.project.to_uppercase(),
             root,
@@ -1031,7 +1031,8 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
             std::process::id(),
             priority,
             crate::procs::me().1,
-            SCHEDULER
+            SCHEDULER,
+            queued_since()
         ],
     )?;
     let id = db.conn.last_insert_rowid();
@@ -2008,6 +2009,44 @@ impl LiveRun {
 }
 
 thread_local! {
+    /// The place in the queue this thread's requests take, while a `KeptPlace` lives (NIT-487).
+    static KEPT_PLACE: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// While it lives, the requests this thread queues take `at` as their place in the queue: a gate
+/// planned again after the review mode changed keeps the place it had (NIT-487).
+pub(crate) struct KeptPlace(Option<i64>);
+
+pub(crate) fn keep_place(at: i64) -> KeptPlace {
+    KeptPlace(KEPT_PLACE.with(|k| k.replace(Some(at))))
+}
+
+impl Drop for KeptPlace {
+    fn drop(&mut self) {
+        KEPT_PLACE.with(|k| k.set(self.0));
+    }
+}
+
+/// The place a `KeptPlace` keeps on this thread, if any.
+pub(crate) fn kept_place() -> Option<i64> {
+    KEPT_PLACE.with(|k| k.get())
+}
+
+/// Where a request queued now goes in the queue: the kept place, else now.
+fn queued_since() -> i64 {
+    kept_place().unwrap_or_else(now)
+}
+
+/// A request that a stricter review mode overtook while it waited, with the place it had.
+fn overtaken(db: &Db, id: i64, e: anyhow::Error) -> anyhow::Error {
+    if !e.is::<crate::project_modes::ChangedWhileQueued>() {
+        return e;
+    }
+    let queued_at = db.conn.query_row("SELECT queued_at FROM lane_run WHERE id = ?1", [id], |r| r.get::<_, i64>(0)).ok();
+    anyhow::Error::new(crate::project_modes::ChangedWhileQueued { queued_at })
+}
+
+thread_local! {
     /// The run this thread serves, while it does (`LiveScope`).
     static LIVE: std::cell::RefCell<Option<LiveRun>> = const { std::cell::RefCell::new(None) };
 }
@@ -2951,7 +2990,7 @@ fn take_turn(
     let timeout = rules.timeout_minutes;
     'turn: loop {
         crate::project_yolo::check_queued_gate(db, id, yolo_keys)?;
-        crate::project_modes::check_playbook_authority(db,yolo_keys,pb)?;
+        crate::project_modes::check_playbook_authority(db,yolo_keys,pb).map_err(|e| overtaken(db, id, e))?;
         // The budget read again on every look, so a change in Settings counts at once (NIT-291).
         let slots = slots();
         if let Some(turn) = my_turn_is(db, id, slots, &mut alive)? {
@@ -3085,8 +3124,8 @@ pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &
     let slots = slots_now();
     db.conn.execute(
         "INSERT INTO lane_run (project, repo, issue_key, requested_by, kind, snapshot, tree, base, command, state, executor, queued_at, pid, priority, lane_count, pid_started, polled_at, scheduler)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, 'queued', 'worktree', ?9, ?10, ?11, ?12, ?13, ?9, ?14)",
-        params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots, crate::procs::me().1, SCHEDULER],
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?6, ?8, 'queued', 'worktree', ?15, ?10, ?11, ?12, ?13, ?9, ?14)",
+        params![project.to_uppercase(), repo_root.to_string_lossy(), issue, actor.id(), kind.as_str(), head, tree, command, now(), std::process::id(), priority, slots, crate::procs::me().1, SCHEDULER, queued_since()],
     )?;
     let id = db.conn.last_insert_rowid();
     let authorities=yolo_keys.iter().map(|key|crate::project_modes::authority_for_issue(db,key)).collect::<Result<Vec<_>>>()?;
@@ -3095,7 +3134,7 @@ pub(crate) fn hold_machine_checked<'a>(db: &'a Db, repo_root: &Path, worktree: &
         let mut alive = |r: &Requester| !r.gone();
         loop {
             crate::project_yolo::check_queued_gate(db, id, yolo_keys)?;
-            for (key,authority) in yolo_keys.iter().zip(&authorities) {if !crate::project_modes::covers_issue(db,key,authority)? {bail!("project review mode changed while waiting for memory; submit again");}}
+            for (key,authority) in yolo_keys.iter().zip(&authorities) {if !crate::project_modes::covers_issue(db,key,authority)? {return Err(overtaken(db, id, anyhow::Error::new(crate::project_modes::ChangedWhileQueued { queued_at: None })));}}
             let slots = slots_now();
             if my_turn(db, id, slots, &mut alive)? {
                 if let Some(slot) = (1..=slots.max(1)).find_map(|k| try_slot(db, k).ok().flatten()) {

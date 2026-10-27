@@ -425,6 +425,9 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     // Settings can change while queued reviewers or commands run. Unchecked evidence is usable
     // only while the person still authorizes that bypass.
     crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
+    if let Some(said) = crate::project_modes::looser_since(db, &issue.key, &out.gate.mode_authority)? {
+        db.log_event(actor, Some(&issue.key), Some(&wt), "status", &said)?;
+    }
     if out.yolo && !crate::project_yolo::enabled_for_issue(db, &issue.key)? {
         bail!("YOLO mode was disabled during submit; submit again for normal verification");
     }
