@@ -34,6 +34,19 @@ pub struct Question {
     pub answered_at: Option<i64>,
     pub pid: Option<i64>,
     pub delivered_at: Option<i64>,
+    /// A disputed P0/P1 finding a fresh review checks before it reaches the person (NIT-318).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub finding: Option<Disputed>,
+}
+
+/// A P0/P1 finding the agent asked the person to accept, and its reasoning (NIT-318).
+#[derive(Debug, Clone, Serialize, serde::Deserialize, PartialEq)]
+pub struct Disputed {
+    pub priority: u8,
+    pub text: String,
+    pub why: String,
+    /// The reviewer that raised it: the fresh review is another one when one is installed.
+    pub raised_by: String,
 }
 
 impl Question {
@@ -44,6 +57,19 @@ impl Question {
     /// One line for the asking agent.
     pub fn outcome(&self) -> String {
         let about = self.issue.as_deref().map(|k| format!(" ({k})")).unwrap_or_default();
+        if let Some(f) = &self.finding {
+            return match self.state.as_str() {
+                "answered" => format!("A fresh review found the finding you disputed{about} does not hold, so it did not go to the person: {}. Submit again: the next review is told.", self.answer.as_deref().unwrap_or("")),
+                "escalated" => format!(
+                    "A fresh review found the finding you disputed{about} still holds, so the person decides it: ask {}, with what the fresh review said. Check it with get_answer; meanwhile go on with other work. [P{}] {}",
+                    self.ask_id.unwrap_or_default(),
+                    f.priority,
+                    f.text
+                ),
+                "failed" => format!("The request to accept the finding you disputed{about} could not be made: {}", self.error.as_deref().unwrap_or("")),
+                _ => format!("A fresh review is checking the finding you disputed{about} before it goes to the person."),
+            };
+        }
         match self.state.as_str() {
             "answered" => format!("Triage answered your question{about}: {}", self.answer.as_deref().unwrap_or("")),
             "escalated" => format!(
@@ -57,7 +83,7 @@ impl Question {
     }
 }
 
-const COLUMNS: &str = "id, issue_key, question, asked_by, place, state, answer, ask_id, error, asked_at, answered_at, pid, delivered_at";
+const COLUMNS: &str = "id, issue_key, question, asked_by, place, state, answer, ask_id, error, asked_at, answered_at, pid, delivered_at, finding";
 
 fn row(r: &rusqlite::Row) -> rusqlite::Result<Question> {
     Ok(Question {
@@ -74,6 +100,7 @@ fn row(r: &rusqlite::Row) -> rusqlite::Result<Question> {
         answered_at: r.get(10)?,
         pid: r.get(11)?,
         delivered_at: r.get(12)?,
+        finding: r.get::<_, Option<String>>(13)?.and_then(|f| serde_json::from_str(&f).ok()),
     })
 }
 
@@ -140,6 +167,25 @@ pub fn ask(db: &Db, question: &str, issue: Option<&str>, place: Option<&str>, ac
     db.triage_question(db.conn.last_insert_rowid())?.context("the question's record went missing")
 }
 
+/// A request to accept a P0/P1 finding, checked first (NIT-318): a fresh review, without the
+/// earlier rounds, looks at it in the background, by another vendor when one is installed. Start it
+/// with `start` as any triage question.
+pub fn dispute(db: &Db, key: &str, finding: &str, why: &str, place: Option<&str>, actor: &Actor) -> Result<Question> {
+    let (issue, found, raised_by) = db.disputed_finding(key, finding, why)?;
+    let disputed = Disputed { priority: found.priority, text: found.text.clone(), why: why.trim().to_string(), raised_by };
+    let question = format!("Does this finding of {}'s latest review still hold? [P{}] {}", issue.key, found.priority, found.text);
+    db.conn.execute(
+        "INSERT INTO triage (issue_key, question, asked_by, place, state, asked_at, finding) VALUES (?1, ?2, ?3, ?4, 'open', ?5, ?6)",
+        params![issue.key, question, actor.id(), place, now(), serde_json::to_string(&disputed)?],
+    )?;
+    db.triage_question(db.conn.last_insert_rowid())?.context("the question's record went missing")
+}
+
+/// The next step for an agent that just disputed a finding.
+pub const DISPUTED_NEXT: &str = "A fresh review checks the finding first, without the earlier rounds. If it still holds, it goes to the \
+person with what that review said; if not, you are told and the next review is too. Go on with other work: the outcome comes as a \
+notice on your next nitely call, or from get_triage (wait_seconds to wait).";
+
 /// The next step for an agent that just put a question to triage.
 pub const ASKED_NEXT: &str = "Triage is looking into it, from the board and the code. Go on with what does not depend on the answer: \
 it comes as a notice on your next nitely call, as a note on the issue, or from get_triage (wait_seconds to wait).";
@@ -158,6 +204,9 @@ pub fn answer(db: &mut Db, config: &nitely_core::Config, id: i64) -> Result<Ques
         return Ok(q);
     }
     db.conn.execute("UPDATE triage SET pid = ?2 WHERE id = ?1", params![id, std::process::id()])?;
+    if let Some(f) = q.finding.clone() {
+        return check_finding(db, config, &q, &f);
+    }
     match look(db, config, &q) {
         Ok((answer, theirs)) => settle(db, &q, &answer, theirs.as_deref()),
         Err(e) => {
@@ -188,6 +237,86 @@ fn settle(db: &mut Db, q: &Question, answer: &str, theirs: Option<&str>) -> Resu
         }
     }
     db.triage_question(q.id)?.context("the question's record went missing")
+}
+
+/// Checks a disputed finding with a fresh review (NIT-318) and settles it: a note and the next
+/// review told when it does not hold, else the request to accept it, with what the review said. A
+/// check that cannot run leaves the decision to the person, as before.
+fn check_finding(db: &mut Db, config: &nitely_core::Config, q: &Question, f: &Disputed) -> Result<Question> {
+    let (said, holds, by) = match fresh_look(db, config, q, f) {
+        Ok((said, holds, by)) => (said, holds, by),
+        Err(e) => (format!("no fresh review could run ({}), so the person decides it as asked", format!("{e:#}").lines().next().unwrap_or("")), true, String::new()),
+    };
+    settle_finding(db, q, f, &said, holds, &by)
+}
+
+/// What a fresh review (`by`, empty when none could run) said about a disputed finding, recorded.
+fn settle_finding(db: &mut Db, q: &Question, f: &Disputed, said: &str, holds: bool, by: &str) -> Result<Question> {
+    let actor = if q.asked_by == "human" { Actor::Human } else { Actor::Agent(q.asked_by.clone()) };
+    let key = q.issue.clone().context("a disputed finding names its issue")?;
+    if holds {
+        let why = if by.is_empty() { f.why.clone() } else { format!("{}\n\nA fresh review by {by}, without the earlier rounds, says it still holds: {said}", f.why) };
+        let ask = db.request_acceptance(&key, &f.text, &why, q.place.as_deref(), &actor)?;
+        db.conn.execute("UPDATE triage SET state = 'escalated', answer = ?2, ask_id = ?3, answered_at = ?4 WHERE id = ?1", params![q.id, said, ask.id, now()])?;
+    } else {
+        db.add_note(&key, &format!("A fresh review by {by}, without the earlier rounds, found the disputed finding does not hold, so it did not go to the person: [P{}] {}. It said: {said}", f.priority, f.text), "triage", &actor)?;
+        db.log_event(&actor, Some(&key), None, nitely_core::submit::FINDING_STALE, &format!("[P{}] {} (fresh review: {said})", f.priority, f.text))?;
+        db.conn.execute("UPDATE triage SET state = 'answered', answer = ?2, answered_at = ?3 WHERE id = ?1", params![q.id, said, now()])?;
+    }
+    db.triage_question(q.id)?.context("the question's record went missing")
+}
+
+/// The fresh review of a disputed finding: another vendor's reviewer than the one that raised it
+/// when one is installed, told what the change is for and the agent's reasoning, never the earlier
+/// rounds. What it said, whether the finding holds, and who looked.
+fn fresh_look(db: &Db, config: &nitely_core::Config, q: &Question, f: &Disputed) -> Result<(String, bool, String)> {
+    let issue = db.issue(q.issue.as_deref().unwrap_or_default())?.context("the finding's issue is gone")?;
+    let root = nitely_core::playbook::repo_for_issue(config, issue.project.as_deref(), q.place.as_deref().unwrap_or_default())?;
+    let dir = nitely_core::playbook::issue_worktree(&root, &issue.key)?.filter(|w| w.is_dir()).context("its worktree is gone")?;
+    let pb = nitely_core::playbook::Playbook::load(&root)?;
+    let rules = pb.review.clone();
+    let choice = rules.choose(&f.raised_by, &|r| rules.is_installed(r, &dir))?;
+    let base = nitely_core::playbook::diff_base(&dir, pb.integration_branch());
+    let gate = nitely_core::playbook::GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: String::new(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+    let context = nitely_core::submit::review_context(db, &issue, &gate)?;
+    let prompt = format!(
+        "A review of this branch raised a finding, and the change's author disputes it. Check it fresh: run `git diff {base}...HEAD`, \
+read the code the finding cites and its callers, and say whether the failure it names still happens with the current code. Do \
+not edit anything.\n\nThe finding:\n[P{p}] {text}\n\nThe author's reasoning, their claim about their own change: check it against the \
+code; it does not decide. A finding that holds stays, whatever it costs to fix: whether to accept it as a trade-off is the \
+person's call, not yours.\n{why}\n\n{context}\n\
+End your reply with exactly these two lines:\n\
+ANSWER: <what you checked and found, in one paragraph>\n\
+HOLDS: <yes or no>",
+        p = f.priority,
+        text = f.text,
+        why = f.why,
+    );
+    let reply = rules.run_prompt(&choice.reviewer, &dir, &prompt)?;
+    let (said, holds) = parse_holds(&reply.text)?;
+    Ok((said, holds, choice.reviewer))
+}
+
+/// A fresh review's answer about a disputed finding: what it found, and whether the finding holds.
+/// Anything but a plain no holds, so the person still decides.
+fn parse_holds(text: &str) -> Result<(String, bool)> {
+    let lines: Vec<&str> = text.lines().collect();
+    let field = |name: &str| lines.iter().rposition(|l| l.trim().trim_matches('*').to_uppercase().starts_with(&format!("{name}:")));
+    let (Some(a), Some(h)) = (field("ANSWER"), field("HOLDS")) else {
+        bail!("the fresh review did not end with ANSWER and HOLDS lines");
+    };
+    let after = |l: &str| l.trim().trim_matches('*').split_once(':').map(|(_, v)| v.trim().trim_matches('*').trim().to_string()).unwrap_or_default();
+    let mut said = after(lines[a]);
+    if h > a {
+        for l in &lines[a + 1..h] {
+            if !l.trim().is_empty() {
+                said.push(' ');
+                said.push_str(l.trim());
+            }
+        }
+    }
+    let holds = !after(lines[h]).to_lowercase().starts_with("no");
+    Ok((said, holds))
 }
 
 /// Asks the triage agent: the playbook's reviewer for the asker's vendor, read-only, in the repo.
@@ -426,6 +555,40 @@ mod tests {
 
         let rate = inbox_rate(&db, "APP", 0).unwrap();
         assert_eq!((rate.asks, rate.triage_answered, rate.triage_escalated), (1, 1, 1));
+        std::fs::remove_dir_all(base).ok();
+    }
+
+    /// A disputed finding a fresh review no longer sees never reaches the person, and the next
+    /// review is told; one it still sees goes to them with what it said (NIT-318).
+    #[test]
+    fn a_disputed_finding_reaches_the_person_only_if_a_fresh_review_still_sees_it() {
+        let (base, mut db, _repo, actor) = repo_with_triage();
+        let new = |title: &str| nitely_core::issues::NewIssue { project: "APP".into(), title: title.into(), kind: "feature".into(), body: "b".into(), evidence: "e".into(), source: "human".into(), allow_similar: true, ..Default::default() };
+        let issue = db.create_issue(&new("Export"), &actor).unwrap();
+        let findings = r#"[{"priority":1,"text":"No migration: keys.rs:4, load","carried":false},{"priority":1,"text":"Drops a row: rows.rs:9, export","carried":false}]"#;
+        db.conn
+            .execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p', 'c', 'codex', 'changes', 'agent', ?2, 1)", params![issue.key, findings])
+            .unwrap();
+        assert!(dispute(&db, &issue.key, "3", "why", None, &actor).is_err(), "only a P0/P1 of the latest review");
+
+        let q = dispute(&db, &issue.key, "1", "There are no outside users yet.", None, &actor).unwrap();
+        assert_eq!(q.finding.as_ref().map(|f| f.raised_by.as_str()), Some("codex"));
+        let f = q.finding.clone().unwrap();
+        let done = settle_finding(&mut db, &q, &f, "load now reads both formats at keys.rs:4.", false, "claude").unwrap();
+        assert_eq!(done.state, "answered");
+        assert!(db.open_asks().unwrap().is_empty(), "the person is not asked");
+        assert!(done.outcome().contains("does not hold"), "{}", done.outcome());
+        let gate = nitely_core::playbook::GateResult { mode_authority: None, passed: true, plan: None, skipped: None, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+        let told = nitely_core::submit::review_context(&db, &db.issue(&issue.key).unwrap().unwrap(), &gate).unwrap();
+        assert!(told.contains("[P1] No migration: keys.rs:4, load (fresh review: load now reads both formats at keys.rs:4.)"), "{told}");
+
+        let q = dispute(&db, &issue.key, "Drops a row: rows.rs:9, export", "The last row is a footer.", None, &actor).unwrap();
+        let f = q.finding.clone().unwrap();
+        let done = settle_finding(&mut db, &q, &f, "rows.rs:9 still skips the last data row.", true, "claude").unwrap();
+        let asks = db.open_asks().unwrap();
+        assert_eq!((done.state.as_str(), asks.len(), Some(asks[0].id)), ("escalated", 1, done.ask_id));
+        assert!(asks[0].question.contains("The last row is a footer.") && asks[0].question.contains("still holds: rows.rs:9 still skips"), "{}", asks[0].question);
+        assert_eq!(asks[0].finding.as_ref().map(|f| f.text.as_str()), Some("Drops a row: rows.rs:9, export"));
         std::fs::remove_dir_all(base).ok();
     }
 }

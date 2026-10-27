@@ -975,7 +975,7 @@ fn waits_for_land_batch(
 /// so it checks the change does what was asked first; the gate's result; the author's notes since
 /// the last round, which may answer its findings; and findings the person accepted as trade-offs on
 /// other changes, as examples of what is not a P0/P1 here.
-pub(crate) fn review_context(db: &Db, issue: &IssueRecord, gate: &GateResult) -> Result<String> {
+pub fn review_context(db: &Db, issue: &IssueRecord, gate: &GateResult) -> Result<String> {
     review_context_sized(db, issue, gate, false)
 }
 
@@ -1058,6 +1058,18 @@ a P0 or P1 the code confirms stays one, whatever they say.\n{}\n",
     }
     if let Some(goal) = issue.goal.map(|g| db.goal(g)).transpose()?.flatten() {
         c.push_str(&format!("\nIt is part of the goal \"{}\": {}\n", goal.title, goal.outcome.chars().take(400).collect::<String>()));
+    }
+    // Findings the agent disputed that a fresh review then found do not hold (NIT-318).
+    let stale: Vec<String> = db
+        .conn
+        .prepare(&format!("SELECT summary FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = '{FINDING_STALE}' AND ts >= ?2 AND summary IS NOT NULL ORDER BY id"))?
+        .query_map(rusqlite::params![issue.key, since], |r| r.get::<_, String>(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !stale.is_empty() {
+        c.push_str("\nThe author disputed these findings, and a fresh review without the earlier rounds found they do not hold against the current code. Raise one again only if the code shows it still does, and then say what that review missed:\n");
+        for s in &stale {
+            c.push_str(&format!("- {}\n", s.chars().take(note_chars * 2).collect::<String>().replace('\n', " ")));
+        }
     }
     // Findings the person is deciding now: a round that still sees one says it in the same words,
     // so the request stays attached to it (NIT-353). Only a finding's words, which a review wrote,
@@ -1180,6 +1192,10 @@ pub(crate) fn file_minor_findings(db: &mut Db, key: &str, review: &Review, actor
 const BODY_CHARS: usize = 20_000;
 /// The same for one change of a review batch (NIT-501).
 const BATCH_BODY_CHARS: usize = 4_000;
+
+/// The event a disputed finding is recorded as when a fresh review finds it does not hold
+/// (NIT-318): the next review of the issue is told.
+pub const FINDING_STALE: &str = "finding_stale";
 
 /// The event an author's note to the reviewer is recorded as (`submit` with `reviewer_note`,
 /// NIT-501): the latest one goes to every review of the issue after it.

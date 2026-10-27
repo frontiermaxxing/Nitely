@@ -17,6 +17,14 @@ const prompt = await new Promise((resolve) => {
 });
 await new Promise((r) => setTimeout(r, Number(process.env.REVIEW_SECONDS ?? 4) * 1000));
 
+// A fresh review of a disputed finding (NIT-318): the risky default still holds, as it does in
+// the code, so the request goes on to the person.
+if (prompt.includes("the change's author disputes it")) {
+  console.log(`ANSWER: risky.txt still changes the default greeting.
+HOLDS: ${prompt.includes("Risky default") ? "yes" : "no"}`);
+  process.exit(0);
+}
+
 const touched = (range) => execFileSync("git", ["diff", "--name-only", range], { encoding: "utf8" }).split(/\r?\n/).filter(Boolean);
 const accepted = prompt.includes("Risky default") && /\(accepted: /.test(prompt);
 const risky = (files) => files.includes("risky.txt") && !accepted;
