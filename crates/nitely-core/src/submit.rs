@@ -275,7 +275,8 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         }
         // The review that ran alongside comes back with the failure, so one round fixes both.
         if let Some(early) = early.take() {
-            match early.join(&worktree, &out.commit) {
+            let rules = rules_of(&review_policy(db, &root, &issue)?.0.review);
+            match early.join(&worktree, &out.commit, &rules) {
                 Ok(Some((choice, mut review))) => {
                     crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
                     review.note = choice.note.clone();
@@ -339,7 +340,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             }
             // The review that ran alongside the gate, when it reviewed the commit the gate passed.
             let alongside = match early.take() {
-                Some(e) if reused.is_none() => e.join(&worktree, &out.commit)?,
+                Some(e) if reused.is_none() => e.join(&worktree, &out.commit, &rules_of(&pb.review))?,
                 _ => None,
             };
             let (choice, mut review) = match (reused, alongside) {
@@ -628,16 +629,19 @@ fn review_policy(db: &Db, root: &Path, issue: &IssueRecord) -> Result<(Playbook,
 /// A review started as the gate was queued, on the commit the gate runs on (NIT-699).
 struct EarlyReview {
     head: String,
+    /// The review policy it ran under (`rules_of`), to tell a change made to it meanwhile.
+    rules: String,
     handle: std::thread::JoinHandle<Result<(crate::review::Choice, Review)>>,
 }
 
 impl EarlyReview {
     /// Its result, once it finishes, when it is still of the change: the gate ran on the commit it
-    /// reviewed and the worktree has not moved since. None when it is not.
-    fn join(self, worktree: &Path, gated: &str) -> Result<Option<(crate::review::Choice, Review)>> {
+    /// reviewed, the worktree has not moved since, and the review policy (`rules`, as now) is the
+    /// one it ran under, so a flag added meanwhile is answered (NIT-711 review). None when it is not.
+    fn join(self, worktree: &Path, gated: &str, rules: &str) -> Result<Option<(crate::review::Choice, Review)>> {
         let done = self.handle.join().map_err(|_| anyhow::anyhow!("the review stopped unexpectedly"))??;
         let at = |rev: &str| git(worktree, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")]).map(|c| c.trim().to_string());
-        Ok((at(gated)? == self.head && at("HEAD")? == self.head).then_some(done))
+        Ok((at(gated)? == self.head && at("HEAD")? == self.head && rules == self.rules).then_some(done))
     }
 }
 
@@ -685,7 +689,7 @@ fn start_early_review(
         let db = Db::open(&path)?;
         run_review(&db, &policy, &rules, &vendor, &worktree, &since, previous.as_ref(), &key, &actor)
     });
-    Ok(Some(EarlyReview { head: head.to_string(), handle }))
+    Ok(Some(EarlyReview { head: head.to_string(), rules: rules_of(&pb.review), handle }))
 }
 
 /// Runs the change's review: a reviewer that cannot run (not signed in, say) is passed over for the
@@ -1570,6 +1574,25 @@ mod tests {
     use crate::issues::NewIssue;
     use crate::test_repo::git as sh;
     use std::path::PathBuf;
+
+    /// A review that started with the gate counts only under the review policy as it is when the
+    /// gate passed: a flag added meanwhile was never answered (NIT-711 review).
+    #[test]
+    fn an_early_review_under_a_policy_changed_since_is_not_used() {
+        let dir = crate::test_repo::copy("submit-early-policy", |p| crate::test_repo::init(p, &[("a.txt", "a")]));
+        let head = sh(&dir, &["rev-parse", "HEAD"]).trim().to_string();
+        let early = |rules: &str| EarlyReview {
+            head: head.clone(),
+            rules: rules.to_string(),
+            handle: std::thread::spawn(|| {
+                let review: Review = serde_json::from_value(serde_json::json!({"reviewer": "fake", "verdict": "pass", "findings": [], "flagged": [], "summary": "", "seconds": 1})).unwrap();
+                Ok((crate::review::Choice { reviewer: "fake".into(), independent: true, note: String::new() }, review))
+            }),
+        };
+        assert!(early("before").join(&dir, &head, "before").unwrap().is_some());
+        assert!(early("before").join(&dir, &head, "a flag added").unwrap().is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     /// A review and a decision in the same second are told apart by the event the review saw
     /// (NIT-544); an older review, recorded before that was kept, is ordered by whole seconds.

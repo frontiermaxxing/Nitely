@@ -121,33 +121,38 @@ fn lines(dir: &Path, from: &str, to: &str) -> Result<BTreeMap<String, HashMap<St
     Ok(out)
 }
 
-/// Whether `resolved` is `with_markers` with each conflict replaced by lines from its two sides:
-/// everything outside the conflicts as it is, and inside one, no line that neither side has.
+/// Whether `resolved` is `with_markers` with each conflict replaced by its two sides whole, one
+/// after the other in either order: everything outside the conflicts as it is, and each side's
+/// lines in their own order, so the reviewed code runs as it was reviewed (NIT-711 review).
 fn resolves(with_markers: &str, resolved: &str) -> bool {
     enum Part<'a> {
         Fixed(&'a str),
-        Conflict(HashMap<&'a str, usize>),
+        Conflict(Vec<&'a str>, Vec<&'a str>),
     }
     let mut parts: Vec<Part> = vec![];
-    let mut side: Option<HashMap<&str, usize>> = None;
+    let mut side: Option<(Vec<&str>, Vec<&str>)> = None;
     let mut ours = true;
     for line in with_markers.split('\n') {
         match &mut side {
             None if line.starts_with("<<<<<<<") => {
-                side = Some(HashMap::new());
+                side = Some((vec![], vec![]));
                 ours = true;
             }
             None => parts.push(Part::Fixed(line)),
             Some(_) if ours && line.trim_end_matches('\r') == "=======" => ours = false,
-            Some(_) if !ours && line.starts_with(">>>>>>>") => parts.push(Part::Conflict(side.take().unwrap_or_default())),
-            Some(lines) => *lines.entry(line).or_default() += 1,
+            Some(_) if !ours && line.starts_with(">>>>>>>") => {
+                let (a, b) = side.take().unwrap_or_default();
+                parts.push(Part::Conflict(a, b));
+            }
+            Some((a, _)) if ours => a.push(line),
+            Some((_, b)) => b.push(line),
         }
     }
-    if side.is_some() || !parts.iter().any(|p| matches!(p, Part::Conflict(_))) {
+    if side.is_some() || !parts.iter().any(|p| matches!(p, Part::Conflict(..))) {
         return false;
     }
     let have: Vec<&str> = resolved.split('\n').collect();
-    // Where part `i` can start at line `at` of the resolution; failures remembered.
+    // Whether parts from `i` on make up the resolution from line `at`; failures remembered.
     fn fits(parts: &[Part], have: &[&str], i: usize, at: usize, failed: &mut HashSet<(usize, usize)>) -> bool {
         if i == parts.len() {
             return at == have.len();
@@ -157,20 +162,10 @@ fn resolves(with_markers: &str, resolved: &str) -> bool {
         }
         let ok = match &parts[i] {
             Part::Fixed(line) => have.get(at) == Some(line) && fits(parts, have, i + 1, at + 1, failed),
-            Part::Conflict(allowed) => {
-                let mut used: HashMap<&str, usize> = HashMap::new();
-                let mut end = at;
-                let mut found = fits(parts, have, i + 1, end, failed);
-                while !found && end < have.len() {
-                    let n = used.entry(have[end]).or_default();
-                    *n += 1;
-                    if *n > allowed.get(have[end]).copied().unwrap_or(0) {
-                        break;
-                    }
-                    end += 1;
-                    found = fits(parts, have, i + 1, end, failed);
-                }
-                found
+            Part::Conflict(a, b) => {
+                let ab: Vec<&str> = a.iter().chain(b.iter()).copied().collect();
+                let ba: Vec<&str> = b.iter().chain(a.iter()).copied().collect();
+                [ab, ba].iter().any(|whole| have.get(at..at + whole.len()) == Some(whole.as_slice()) && fits(parts, have, i + 1, at + whole.len(), failed))
             }
         };
         if !ok {
@@ -222,11 +217,15 @@ mod tests {
     #[test]
     fn a_resolution_takes_lines_from_the_two_sides_and_nothing_else() {
         let conflicted = "a\n<<<<<<< main\nx\n=======\ny\n>>>>>>> theirs\nb\n";
-        for ok in ["a\nx\ny\nb\n", "a\ny\nx\nb\n", "a\nx\nb\n"] {
+        for ok in ["a\nx\ny\nb\n", "a\ny\nx\nb\n"] {
             assert!(resolves(conflicted, ok), "{ok:?}");
         }
-        for not in ["a\nx\ny\nz\nb\n", "a\nx\nx\nb\n", "A\nx\ny\nb\n", "a\nx\ny\n"] {
+        for not in ["a\nx\ny\nz\nb\n", "a\nx\nx\nb\n", "A\nx\ny\nb\n", "a\nx\ny\n", "a\nx\nb\n"] {
             assert!(!resolves(conflicted, not), "{not:?}");
         }
+        // Each side keeps its order: the reviewed lines are not reordered around the other side's.
+        let ordered = "<<<<<<< main\nlog\n=======\nauthorize\ndelete\n>>>>>>> theirs\n";
+        assert!(resolves(ordered, "log\nauthorize\ndelete\n") && resolves(ordered, "authorize\ndelete\nlog\n"));
+        assert!(!resolves(ordered, "log\ndelete\nauthorize\n") && !resolves(ordered, "authorize\nlog\ndelete\n"));
     }
 }
