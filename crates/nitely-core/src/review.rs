@@ -1197,16 +1197,25 @@ pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
 }
 
 /// The lines added or changed from `from` to `to` in the repo at `root` (`git diff -U0`): for each
-/// file, the line ranges it has at `to`. A deletion counts as the line it left. None when `from`
-/// is not behind `to`, so nothing can be told apart.
+/// file, the line ranges it has at `to`. A deletion counts as the line it left, and a file deleted
+/// whole as `DELETED`, every line of it (NIT-712 review). None when `from` is not behind `to`, so
+/// nothing can be told apart.
 fn changed_between(root: &Path, from: &str, to: &str) -> Option<std::collections::HashMap<String, Vec<(usize, usize)>>> {
     crate::playbook::git(root, &["merge-base", "--is-ancestor", from, to]).ok()?;
     let diff = crate::playbook::git(root, &["diff", "-U0", "--no-color", "--no-ext-diff", from, to]).ok()?;
     let mut out: std::collections::HashMap<String, Vec<(usize, usize)>> = std::collections::HashMap::new();
     let mut file: Option<String> = None;
+    let mut old: Option<String> = None;
     for line in diff.lines() {
-        if let Some(path) = line.strip_prefix("+++ ") {
+        if let Some(path) = line.strip_prefix("--- ") {
+            old = path.strip_prefix("a/").map(str::to_string);
+        } else if let Some(path) = line.strip_prefix("+++ ") {
             file = path.strip_prefix("b/").map(str::to_string);
+            if path == "/dev/null" {
+                if let Some(gone) = old.take() {
+                    out.entry(gone).or_default().push(DELETED);
+                }
+            }
         } else if let (Some(f), Some(hunk)) = (&file, line.strip_prefix("@@ ")) {
             // `@@ -a,b +c,d @@`: the new side starts at c and runs d lines (one when d is left out).
             let Some(new) = hunk.split_whitespace().find_map(|w| w.strip_prefix('+')) else { continue };
@@ -1227,10 +1236,15 @@ pub fn cite_changed_between(root: &Path, from: &str, to: &str, texts: &[&str]) -
     Some(texts.iter().map(|t| cites_changed(t, &code, &changed)).collect())
 }
 
-/// Whether `text` cites, as file:line, a line in (or within three lines of) what `changed` holds.
+/// The range `changed_between` gives a file deleted whole.
+const DELETED: (usize, usize) = (1, usize::MAX);
+
+/// Whether `text` cites, as file:line, a line in (or within three lines of) what `changed` holds,
+/// or cites, with or without a line, a file deleted since (NIT-712 review).
 fn cites_changed(text: &str, code: &CurrentCode, changed: &std::collections::HashMap<String, Vec<(usize, usize)>>) -> bool {
-    citations(text).into_iter().filter_map(|(p, line)| Some((code.resolve(&p)?, line?))).any(|(f, line)| {
-        changed.get(&f).is_some_and(|ranges| ranges.iter().any(|&(a, b)| line + 3 >= a && line <= b + 3))
+    citations(text).into_iter().any(|(p, line)| match code.resolve(&p) {
+        Some(f) => line.is_some_and(|line| changed.get(&f).is_some_and(|ranges| ranges.iter().any(|&(a, b)| line + 3 >= a && line <= b.saturating_add(3)))),
+        None => changed.iter().any(|(f, ranges)| (*f == p || f.ends_with(&format!("/{p}"))) && ranges.contains(&DELETED)),
     })
 }
 
@@ -1694,6 +1708,17 @@ VERDICT: findings\nMONEY_OR_RELEASE: no";
         let only_old = "- [P1] Old overflow: src/a.rs:5, a5: wraps past 255\nVERDICT: findings\nMONEY_OR_RELEASE: no";
         assert_eq!(rules().parse("codex", only_old, 1, Some(&prev), Some(&dir)).unwrap().verdict, "pass");
         assert_eq!(rules().parse("codex", only_old, 1, None, Some(&dir)).unwrap().verdict, "changes");
+        // A file the revision deleted is changed code too: a new P1 about the deletion holds it.
+        std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
+        std::fs::write(dir.join(".github/workflows/ci.yml"), "on: push\n").unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "ci"]);
+        let with_ci = git(&["rev-parse", "HEAD"]).trim().to_string();
+        git(&["rm", "-q", ".github/workflows/ci.yml"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "no ci"]);
+        let prev = PreviousRound { commit: with_ci, ..prev };
+        let removed = "- [P1] CI removed: .github/workflows/ci.yml, nothing runs the tests now\nVERDICT: findings\nMONEY_OR_RELEASE: no";
+        assert_eq!(rules().parse("codex", removed, 1, Some(&prev), Some(&dir)).unwrap().verdict, "changes");
         std::fs::remove_dir_all(&dir).ok();
     }
 

@@ -199,7 +199,12 @@ pub fn review_rebased(db: &mut Db, root: &Path, pb: &Playbook, key: &str, worktr
 fn review_group(db: &Db, rules: &ReviewRules, root: &Path, reviewer: &str, group: &[&Waiting], actor: &Actor) -> Result<Vec<std::result::Result<Review, String>>> {
     let alone = |w: &Waiting| -> std::result::Result<Review, String> {
         db.log_event(actor, Some(&w.change.key), None, "review_started", &format!("Review by {reviewer}{} started", noted(&w.choice.note))).ok();
-        rules.run(reviewer, &w.change.worktree, &w.change.base, w.change.previous.as_ref()).map_err(|e| first_line(&format!("{e:#}")))
+        // Told what the change is for, as a batch tells each change (NIT-501; NIT-712 review).
+        let mut told = rules.clone();
+        if !w.change.context.is_empty() {
+            told.context = if told.context.is_empty() { w.change.context.clone() } else { format!("{}\n{}", told.context, w.change.context) };
+        }
+        told.run(reviewer, &w.change.worktree, &w.change.base, w.change.previous.as_ref()).map_err(|e| first_line(&format!("{e:#}")))
     };
     if group.len() == 1 {
         return Ok(vec![alone(group[0])]);
