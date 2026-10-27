@@ -80,6 +80,10 @@ pub struct Board {
     pub after_land_failed: Option<AfterLandFailed>,
     /// What the person is told and nothing waits on (NIT-570): newest first, until they dismiss it.
     pub notices: Vec<Notice>,
+    /// Reviewers that cannot run (NIT-362), until they review again.
+    pub reviewers_down: Vec<crate::reviewer_health::Down>,
+    /// Open changes whose latest review was by their author's own vendor, to rerun.
+    pub same_vendor_reviews: Vec<crate::reviewer_health::SameVendor>,
 }
 
 /// A notice for the person: the event that says it, its issue, when, and what it says.
@@ -560,7 +564,7 @@ fn build(config: &Config, db: &Db, git_state: &GitState) -> Result<Board> {
     let remote_sessions = remote.into_iter().filter(|s| visible(None, remote_work.get(&s.id).and_then(|w| w.0.as_deref()))).cloned().collect();
     let views = views.into_iter().filter(|v| visible(v.project.as_deref(), None)).collect();
     let agents = agents.into_iter().filter(|a| visible(a.project.as_deref(), a.issue_key.as_deref())).collect();
-    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents, after_land_failed: db.after_land_failed()?, notices: db.notices()? })
+    Ok(Board { repos: views, needs_me_issues, asks: db.open_asks()?, sync: db.sync_statuses()?, remote_sessions, agents, after_land_failed: db.after_land_failed()?, notices: db.notices()?, reviewers_down: db.reviewers_down()?, same_vendor_reviews: db.same_vendor_reviews()? })
 }
 
 /// One row per local session: where it runs, and the issue its own events name.
