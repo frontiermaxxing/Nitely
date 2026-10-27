@@ -53,16 +53,20 @@ pub fn classify(path: &str, size: u64, is_dir: bool) -> Option<Reason> {
 }
 
 /// The .gitignore line that keeps a flagged path out: a folder's name, a secret's pattern, or a
-/// large file's own path.
+/// large file's own path. A pattern is lowercase, so a name in any other case gets its own path:
+/// git matches case-sensitively where the file system does (NIT-685 review).
 pub fn ignore_line(path: &str, reason: Reason) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
     let lower = name.to_lowercase();
     match reason {
         Reason::Build => format!("{name}/"),
         Reason::Large => format!("/{path}"),
+        Reason::Secret if name != lower => format!("/{path}"),
         Reason::Secret => {
-            if lower == ".env" || lower.starts_with(".env.") {
-                ".env*".into()
+            if lower == ".env" {
+                ".env".into()
+            } else if lower.starts_with(".env.") {
+                ".env.*".into()
             } else if let Some(ext) = [".pem", ".key", ".p12", ".pfx"].iter().find(|e| lower.ends_with(**e)) {
                 format!("*{ext}")
             } else if lower.starts_with("id_") {
@@ -73,6 +77,10 @@ pub fn ignore_line(path: &str, reason: Reason) -> String {
         }
     }
 }
+
+/// The lines that keep environment templates in when `.env.*` keeps the real ones out: a sample is
+/// meant to be committed (`classify` lets it through, so the .gitignore must too).
+const ENV_TEMPLATES: &[&str] = &["!.env.example", "!.env.sample", "!.env.template"];
 
 #[derive(Debug, Clone, Serialize)]
 pub struct Flagged {
@@ -148,6 +156,9 @@ pub fn preview(root: &Path) -> Result<Preview> {
                 lines.push(line);
             }
         }
+        if lines.iter().any(|l| l == ".env.*") {
+            lines.extend(ENV_TEMPLATES.iter().map(|l| l.to_string()));
+        }
         lines
     });
     let identity = |key: &str| git(root, &["config", key]).map(|v| !v.trim().is_empty()).unwrap_or(false);
@@ -175,6 +186,10 @@ pub fn make(root: &Path, gitignore: Option<&[String]>, exclude: &[String], ident
             std::fs::write(&path, format!("{}\n", lines.join("\n")))?;
         }
     }
+    // Whatever was staged before (a `.env` added by hand, say) goes back out of the index, so the
+    // .gitignore and `exclude` alone decide what the commit holds (NIT-685 review). The repo has
+    // no commit, so nothing else is lost: the files stay as they are on disk.
+    git(root, &["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", "."])?;
     git(root, &["add", "--all"])?;
     for p in exclude {
         git(root, &["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", p])?;
@@ -207,7 +222,11 @@ mod tests {
         assert_eq!(classify(".env.example", 10, false), None, "a sample is meant to be committed");
         assert_eq!(classify("src/main.rs", 10, false), None);
         assert_eq!(ignore_line("web/node_modules", Reason::Build), "node_modules/");
-        assert_eq!(ignore_line(".env.local", Reason::Secret), ".env*");
+        assert_eq!(ignore_line(".env", Reason::Secret), ".env");
+        assert_eq!(ignore_line(".env.local", Reason::Secret), ".env.*");
+        // A name not in lowercase is kept out by its own path, which matches whatever the case rules.
+        assert_eq!(ignore_line(".ENV", Reason::Secret), "/.ENV");
+        assert_eq!(ignore_line("deploy/server.PEM", Reason::Secret), "/deploy/server.PEM");
         assert_eq!(ignore_line("deploy/server.pem", Reason::Secret), "*.pem");
         assert_eq!(ignore_line("id_rsa.pub", Reason::Secret), "id_rsa*");
         assert_eq!(ignore_line("assets/video.mp4", Reason::Large), "/assets/video.mp4");
@@ -223,19 +242,24 @@ mod tests {
         std::fs::write(dir.join("src/main.rs"), "fn main() {}\n").unwrap();
         std::fs::write(dir.join("node_modules/pkg/index.js"), "x").unwrap();
         std::fs::write(dir.join(".env"), "TOKEN=1").unwrap();
+        std::fs::write(dir.join(".env.local"), "TOKEN=2").unwrap();
+        std::fs::write(dir.join(".env.example"), "TOKEN=").unwrap();
         git(&dir, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        // A secret the person staged before connecting stays out all the same.
+        git(&dir, &["add", "--force", ".env"]).unwrap();
         // Isolated from the machine's own identity, so the identity step is exercised.
         git(&dir, &["config", "user.name", ""]).unwrap();
         git(&dir, &["config", "user.email", ""]).unwrap();
         let p = preview(&dir).unwrap();
-        assert_eq!((p.files, p.branch.as_str()), (1, "main"));
-        assert_eq!(p.gitignore.as_deref(), Some(&[".env*".to_string(), "node_modules/".to_string()][..]));
+        assert_eq!((p.files, p.branch.as_str()), (2, "main"));
+        let lines = [".env", ".env.*", "node_modules/", "!.env.example", "!.env.sample", "!.env.template"].map(String::from);
+        assert_eq!(p.gitignore.as_deref(), Some(&lines[..]));
         assert!(p.needs_identity);
         assert!(make(&dir, p.gitignore.as_deref(), &[], None).unwrap_err().to_string().contains("name and email"));
         let said = make(&dir, p.gitignore.as_deref(), &[], Some(("You", "you@example.com"))).unwrap();
         assert!(said.contains("on main") && said.contains("not pushed"), "{said}");
         let committed = git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
-        assert_eq!(committed.lines().collect::<Vec<_>>(), [".gitignore", "src/main.rs"]);
+        assert_eq!(committed.lines().collect::<Vec<_>>(), [".env.example", ".gitignore", "src/main.rs"], "the template goes in, the staged .env does not");
         assert!(preview(&dir).is_err() && make(&dir, None, &[], None).is_err(), "only a repo with no commits");
         std::fs::remove_dir_all(&dir).ok();
     }
