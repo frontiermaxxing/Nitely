@@ -719,6 +719,17 @@ export interface ReviewRecord {
   batch_id?: number | null;
 }
 
+/** A tool Nitely works with, as `tools_check` found it (crates/nitely-core/src/tools.rs). */
+export interface Tool {
+  command: string;
+  name: string;
+  /** Where its command is; null when it is not installed. */
+  path: string | null;
+  version: string | null;
+  /** Signed in, signed out, or null: the tool can't say, or has no sign-in. */
+  signed_in: boolean | null;
+}
+
 export interface ConnectChange {
   target: string;
   action: "create" | "update" | "unchanged" | "run" | "manual" | "remove";

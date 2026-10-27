@@ -36,6 +36,9 @@ input { accent-color: var(--fg); }
 
 /* ----- shell ----- */
 .shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); height: 100vh; }
+/* The first-run setup takes the whole window, with its own step rail (NIT-690). */
+.shell-setup { height: 100vh; display: flex; flex-direction: column; }
+.shell-setup > .fr-win { flex: 1; }
 .sidebar {
   background: var(--sunken); border-right: 1px solid var(--line); padding: 16px 10px 14px; overflow-y: auto;
   display: flex; flex-direction: column; gap: 2px;

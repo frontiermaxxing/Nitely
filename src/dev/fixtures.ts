@@ -43,6 +43,7 @@ import type {
   BranchState,
   ConnectPlan,
   FirstCommitPreview,
+  Tool,
   FlowIssue,
   Happening,
   IssueDetail,
@@ -1783,6 +1784,45 @@ const AGENTS: AgentPlan[] = ["claude", "codex", "cursor"].map((agent) => ({
 /** Folders the preview has made git repos (connect_init); a path ending in plain-folder is in none until then. */
 const madeRepos = new Set<string>();
 
+/**
+ * The tools as the first-run setup sees them (NIT-690). `?setup=` picks a state: none (nothing
+ * found), partial (git and Claude Code, signed out), installing, failed, or done (the default).
+ */
+const setupState = () => new URLSearchParams(location.search).get("setup") ?? "done";
+
+function toolsCheck(): Tool[] {
+  const t = (command: string, name: string, version: string | null, signed_in: boolean | null): Tool => ({
+    command,
+    name,
+    path: version ? `C:\Users\you\.local\bin\${command}.exe` : null,
+    version,
+    signed_in,
+  });
+  switch (setupState()) {
+    case "none":
+      return [t("git", "Git", null, null), t("claude", "Claude Code", null, null), t("codex", "Codex", null, null), t("gh", "GitHub CLI", null, null)];
+    case "partial":
+    case "installing":
+    case "failed":
+      return [t("git", "Git", "2.47.1", null), t("claude", "Claude Code", "2.1.3", false), t("codex", "Codex", null, null), t("gh", "GitHub CLI", null, null)];
+    default:
+      return [t("git", "Git", "2.47.1", null), t("claude", "Claude Code", "2.1.3", true), t("codex", "Codex", "0.48.0", true), t("gh", "GitHub CLI", "2.62.0", null)];
+  }
+}
+
+function toolsInstalls() {
+  switch (setupState()) {
+    case "installing":
+      return {
+        codex: { state: "installing", progress: "Installing with npm · 38 s", fraction: 0.68, log: ["> npm install -g @openai/codex", "added 3 packages in 12s", "fetching the platform binary…", "verifying codex.exe"] },
+      };
+    case "failed":
+      return { gh: { state: "failed", log: [], error: "winget stopped: another installation is in progress (0x8A150056)." } };
+    default:
+      return {};
+  }
+}
+
 /** Repos made in the preview that have their first commit (first_commit). */
 const committedRepos = new Set<string>();
 
@@ -2493,6 +2533,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return connectPlan(args);
       case "connect_apply":
         return connectApply(args);
+      case "tools_check":
+        return toolsCheck();
+      case "tools_installs":
+        return toolsInstalls();
       case "connect_init":
         return connectInit(args);
       case "first_commit_preview":
