@@ -15,6 +15,7 @@ import "./settings.css";
 
 /** The sections of Settings, in order: each is `#settings/<id>`. */
 export const SETTINGS_SECTIONS = [
+  { id: "setup", label: "Setup" },
   { id: "notifications", label: "Notifications" },
   { id: "updates", label: "Updates" },
   { id: "reviews", label: "Review defaults" },
@@ -81,6 +82,14 @@ export function Settings(props: {
           </button>
         ))}
       </nav>
+
+      <Section id="setup" label="Setup" why="The tools, sign-ins, first project, agents and skills Nitely set up on first launch. Steps that are done stay done.">
+        <div>
+          <button className="btn" onClick={() => props.onGo({ kind: "setup", reopened: true })}>
+            Set up tools and agents
+          </button>
+        </div>
+      </Section>
 
       <Section id="notifications" label="Notifications" why="When a decision starts waiting on you, Nitely tells you once, outside the window. Several at once come as one.">
         <NotifySettingsPanel />

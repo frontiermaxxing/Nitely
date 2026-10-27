@@ -50,8 +50,9 @@ export function AgentChanges(props: { agents: AgentPlan[] }) {
             </div>
             {agent.error && <p className="error small vendor-error">{agent.error}</p>}
             {agent.found &&
-              agent.changes.map((c) => (
-                <div className="change" key={c.target}>
+              // One file can take more than one change (Codex's config.toml: its MCP server and its hooks).
+              agent.changes.map((c, i) => (
+                <div className="change" key={`${c.target}-${i}`}>
                   <span className={`chip ${c.action}`}>{ACTION_WORD[c.action]}</span>
                   <div className="change-what">
                     <div>{c.why}</div>

@@ -65,7 +65,8 @@ pub struct PlaybookPlan {
 #[derive(Debug, Clone, Serialize)]
 pub struct AgentPlan {
     pub agent: String,
-    /// Whether the agent seems installed (its config folder exists).
+    /// Whether the agent is installed: its command exists (tools.rs, NIT-687), or for Cursor, which
+    /// has no command of its own, its config folder.
     pub found: bool,
     pub changes: Vec<Change>,
     /// Why its setup could not be read, e.g. a config file that is not valid JSON.
@@ -118,7 +119,22 @@ impl Change {
 /// the person's home. `NITELY_AGENT_HOME` overrides it, for tests and the test harness, which must
 /// never read or write the person's own agents.
 pub fn agent_home() -> PathBuf {
-    std::env::var_os("NITELY_AGENT_HOME").map(PathBuf::from).or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from("."))
+    agent_home_override().or_else(dirs::home_dir).unwrap_or_else(|| PathBuf::from("."))
+}
+
+fn agent_home_override() -> Option<PathBuf> {
+    std::env::var_os("NITELY_AGENT_HOME").map(PathBuf::from)
+}
+
+/// Whether the agent whose command is `command` and whose config lives in `dir` is installed: its
+/// command exists (NIT-687), so a leftover config folder alone does not count. Under
+/// `NITELY_AGENT_HOME` (tests and the harness, which install no agents) the folder decides, as it
+/// stands in for the person's own setup there.
+fn installed(command: &str, dir: &Path) -> bool {
+    if agent_home_override().is_some() {
+        return dir.is_dir();
+    }
+    crate::tools::installed(command)
 }
 
 /// How `plan` says a folder is in no git repo: the app offers `init_repo` when it reads this.
@@ -215,7 +231,7 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
         }
     }
     if agents.iter().all(|a| !a.found) {
-        warnings.push("no Claude Code, Codex or Cursor configuration was found in your home folder".into());
+        warnings.push("no Claude Code, Codex or Cursor was found: install one and connect again".into());
     }
 
     Ok(ConnectPlan {
@@ -537,7 +553,7 @@ pub(crate) fn is_nitely_mcp(command: Option<&str>, args: Option<Vec<&str>>) -> b
 
 fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     let dir = agent_home().join(".claude");
-    let found = dir.is_dir() || agent_home().join(".claude.json").exists();
+    let found = installed("claude", &dir) || (agent_home_override().is_some() && agent_home().join(".claude.json").exists());
     let mut changes = Vec::new();
 
     let settings_path = dir.join("settings.json");
@@ -636,7 +652,7 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
 
 fn codex_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     let dir = agent_home().join(".codex");
-    let found = dir.is_dir();
+    let found = installed("codex", &dir);
     let mut changes = Vec::new();
 
     let config_path = dir.join("config.toml");
