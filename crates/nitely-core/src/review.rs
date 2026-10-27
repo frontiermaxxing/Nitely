@@ -324,6 +324,9 @@ pub struct BatchChange {
     /// The files its diff touches, to place a finding that names no change.
     pub files: Vec<String>,
     pub previous: Option<PreviousRound>,
+    /// What a single review of it would be told (`submit::review_context`, compact): its issue,
+    /// the author's note and notes, related issues, calibration (NIT-501).
+    pub context: String,
 }
 
 /// A batched reply, split by change.
@@ -708,6 +711,9 @@ Do not edit anything.\n",
             let k = i + 1;
             p.push_str(&format!("\n## CHANGE {k}: {} \"{}\"\nbranch {}, base {}, head {}\n", c.key, c.title, c.branch, c.base, c.head));
             p.push_str(&format!("Run `git diff {}...{}` for the change.\n", c.base, c.head));
+            if !c.context.trim().is_empty() {
+                p.push_str(&format!("{}\n", c.context.trim()));
+            }
             match &c.previous {
                 Some(prev) if prev.in_history && base_merged_since(&c.worktree, &c.base, &prev.commit, &c.head) => p.push_str(&format!(
                     "It was reviewed before, at commit {c0}, and {b} has been merged into it since: code the merge brought from {b} \
@@ -1987,6 +1993,7 @@ PREVIOUS 2: open crates/nitely-cli/src/lanes.rs:139 `out.push_str(&\"\\\\\".repe
             worktree: dir.clone(),
             files: files.iter().map(|f| f.to_string()).collect(),
             previous,
+            context: String::new(),
         };
         let earlier = PreviousRound {
             passed_on: None,

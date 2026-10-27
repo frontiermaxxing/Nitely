@@ -131,7 +131,10 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
             let previous = crate::submit::previous_round_at(db, &key, &dir, &head, None)?;
             let vendor = crate::git::parse_branch(&branch).0.unwrap_or_default();
             let choice = rules.choose(&vendor, &|r| rules.is_installed(r, &dir))?;
-            let change = BatchChange { key: key.clone(), title: issue.title, branch, base, head, worktree: dir, files, previous };
+            // Told what a single review would be, more briefly (NIT-501).
+            let gate = record.gate.clone().unwrap_or(crate::playbook::GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.clone(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
+            let context = crate::submit::review_context_sized(db, &issue, &gate, true)?;
+            let change = BatchChange { key: key.clone(), title: issue.title, branch, base, head, worktree: dir, files, previous, context };
             Ok(Waiting { pending: record, change, vendor, choice })
         })();
         match prepared {

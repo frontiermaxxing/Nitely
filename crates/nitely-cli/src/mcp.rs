@@ -544,12 +544,13 @@ fn tools() -> Value {
         },
         {
             "name": "submit",
-            "description": "Hand in a finished branch and move on. It returns at once with a job id; in the background Nitely runs the gate, has another vendor review it, decides whether the human must approve, pushes, opens or updates the pull request, and moves the issue (In Review, Needs You, or back to In Progress when the review finds P0/P1 problems). The result comes back through next_task, submit_status, or a notice on your next nitely call. Commit everything first. Supply solution_title and solution_summary explaining the implemented outcome, behavior, validation and remaining limits for this exact revision; the person sees these when approving the change. With wait: true it blocks until the result instead (minutes), as before.",
+            "description": "Hand in a finished branch and move on. It returns at once with a job id; in the background Nitely runs the gate, has another vendor review it, decides whether the human must approve, pushes, opens or updates the pull request, and moves the issue (In Review, Needs You, or back to In Progress when the review finds P0/P1 problems). The result comes back through next_task, submit_status, or a notice on your next nitely call. Commit everything first. Supply solution_title and solution_summary explaining the implemented outcome, behavior, validation and remaining limits for this exact revision; the person sees these when approving the change. The reviewer reads the issue, the issues it blocks and is blocked by, and your notes: put what the change deliberately leaves out, scope split with other issues and decisions already made in reviewer_note, and on a resubmit answer there any finding you dispute before you call request_acceptance. With wait: true it blocks until the result instead (minutes), as before.",
             "inputSchema": { "type": "object", "properties": {
                 "key": { "type": "string", "description": "The issue; defaults to the one your branch names." },
                 "worktree": { "type": "string", "description": "Defaults to the worktree you are in." },
                 "solution_title": { "type": "string", "description": "Concrete implementation/outcome title for this revision. Supply with solution_summary." },
                 "solution_summary": { "type": "string", "description": "What changed in this revision, in your words. Shown to the person approving it; never copy the original problem statement as the solution." },
+                "reviewer_note": { "type": "string", "description": "For the reviewer: what this change deliberately leaves out and why, scope split with other issues, decisions already made, answers to findings you dispute. Read as your claims to check against the code; it never lowers a finding the code confirms. Without it the reviewer gets solution_summary." },
                 "wait": { "type": "boolean", "description": "Wait for the gate and review (up to 10 minutes) and return the result; past that, the job goes on and submit_status gives its result." },
                 "detail": { "type": "boolean", "description": "With wait: the full record (gate output of every step, verification, solution) instead of the short result." }
             } }
@@ -1451,6 +1452,9 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false, solution: solution.as_ref(), solution_commit: None, solution_patch_id: None };
             let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
             let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &actor, &runner)?;
+            if let Some(note) = str_arg(args, "reviewer_note").filter(|n| !n.trim().is_empty()) {
+                nitely_core::submit::brief_reviewer(&db, &job.issue, note, &actor)?;
+            }
             if args.get("wait").and_then(Value::as_bool).unwrap_or(false) {
                 // The job runs in a process of its own, so it outlives this call and this server;
                 // waiting on it here is only waiting.

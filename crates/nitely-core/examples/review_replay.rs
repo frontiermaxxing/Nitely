@@ -248,6 +248,7 @@ fn main() -> Result<()> {
                 worktree: dirs[i].clone(),
                 files: changes[i].files.clone(),
                 previous: None,
+                context: String::new(),
             })
             .collect();
         let reviewer = &changes[group[0]].reviewer;
