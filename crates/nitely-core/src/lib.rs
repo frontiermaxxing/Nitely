@@ -12,6 +12,7 @@ pub mod batches;
 pub mod brief;
 pub mod config;
 pub mod connect;
+pub mod first_commit;
 pub mod instructions;
 pub mod credentials;
 pub mod db;

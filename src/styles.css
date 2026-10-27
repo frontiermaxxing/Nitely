@@ -545,6 +545,8 @@ details summary { cursor: pointer; color: var(--fg-2); }
 .page-form .answer { margin-bottom: 18px; }
 .page-form .answer input { min-height: 38px; border-radius: 8px; padding: 0 12px; font-family: var(--font-mono); font-size: 12.5px; background: var(--surface); }
 .page-form .answer .btn { min-height: 38px; border-radius: 8px; padding: 0 14px; }
+/* The first commit's .gitignore lines or left-out paths, one checkbox each (NIT-685). */
+.first-commit-items { list-style: none; padding-left: 0; display: grid; gap: 4px; }
 .vendor-card {
   margin-bottom: 14px; background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-lg); overflow: hidden;
   --mark-bg: var(--surface);

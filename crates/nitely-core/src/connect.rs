@@ -48,6 +48,9 @@ pub struct ConnectPlan {
     pub nitely: String,
     pub agents: Vec<AgentPlan>,
     pub warnings: Vec<String>,
+    /// The integration branch has no commit yet (a repo just made): tasks need a first commit,
+    /// which Add a project offers with a preview (first_commit.rs, NIT-685).
+    pub first_commit_needed: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -188,14 +191,16 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
         "repo" | "existing" => Playbook::load(&root_path).map(|p| p.integration_branch().to_string()).unwrap_or_default(),
         _ => Playbook::parse(&playbook.text)?.integration_branch().to_string(),
     };
+    let mut first_commit_needed = false;
     if git(&root_path, &["rev-parse", "--verify", "--quiet", &format!("refs/heads/{integration_branch}")]).is_err() {
-        // A repo just made (init_repo) is on that branch with no commit yet: its first commit makes it.
+        // A repo just made (init_repo) is on that branch with no commit yet: its first commit makes
+        // it, and the page offers that commit rather than a warning (NIT-685).
         let unborn = git(&root_path, &["symbolic-ref", "--quiet", "HEAD"]).is_ok_and(|h| h.trim() == format!("refs/heads/{integration_branch}"));
-        warnings.push(if unborn {
-            format!("{integration_branch} has no commits yet; make the first commit before starting tasks")
+        if unborn {
+            first_commit_needed = true;
         } else {
-            format!("there is no local branch {integration_branch}; edit the playbook's integration branch before starting tasks")
-        });
+            warnings.push(format!("there is no local branch {integration_branch}; edit the playbook's integration branch before starting tasks"));
+        }
     }
 
     let resolved = nitely_command();
@@ -224,6 +229,7 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
         nitely,
         agents,
         warnings,
+        first_commit_needed,
     })
 }
 
@@ -1174,6 +1180,7 @@ args = [\"nitely\", \"mcp\"]
             nitely: "nitely".into(),
             agents: vec![],
             warnings: vec![],
+            first_commit_needed: false,
         };
         let key = file_setup_issue(&mut db, &plan, &crate::Actor::Human).unwrap().unwrap();
         let issue = db.issue(&key).unwrap().unwrap();

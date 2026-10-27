@@ -738,6 +738,19 @@ export interface ConnectPlan {
   nitely: string;
   agents: AgentPlan[];
   warnings: string[];
+  /** The integration branch has no commit yet: the page offers the first commit (NIT-685). */
+  first_commit_needed: boolean;
+}
+
+/** What a repo's first commit would hold (first_commit.rs). */
+export interface FirstCommitPreview {
+  files: number;
+  bytes: number;
+  largest: [string, number][];
+  flagged: { path: string; reason: "build" | "large" | "secret"; bytes: number; line: string }[];
+  gitignore: string[] | null;
+  needs_identity: boolean;
+  branch: string;
 }
 
 export interface AgentPlan {
