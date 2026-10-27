@@ -131,3 +131,23 @@ export function stepSummary(id: StepId, f: SetupFacts): string | null {
 export function listWords(items: string[]): string {
   return items.length <= 2 ? items.join(" and ") : `${items.slice(0, -1).join(", ")} and ${items[items.length - 1]}`;
 }
+
+/**
+ * What the agent CLIs installed here mean for reviews (NIT-694): with both, each vendor reviews the
+ * other's work; with one, review falls back to the same vendor in a fresh session (review.rs,
+ * choose_after), unless a project requires a cross-vendor review, which then goes to the person;
+ * with none, there is no agent at all.
+ */
+export function reviewPairing(tools: Tool[] | null): { kind: "both" | "one" | "none"; text: string } | null {
+  if (tools === null) return null;
+  const agents = tools.filter((t) => AGENT_TOOLS.includes(t.command) && t.path);
+  if (agents.length >= 2) return { kind: "both", text: "Claude Code and Codex are both here: each reviews the other's work." };
+  if (agents.length === 1) {
+    const other = tools.find((t) => AGENT_TOOLS.includes(t.command) && t.command !== agents[0].command)?.name ?? "the other";
+    return {
+      kind: "one",
+      text: `Only ${agents[0].name} is here, so ${agents[0].name} reviews its own changes in a fresh session. Install ${other} for an independent review. A project that requires a cross-vendor review sends its changes to you instead.`,
+    };
+  }
+  return { kind: "none", text: "Neither Claude Code nor Codex is here: at least one is required, to work and to review." };
+}

@@ -121,6 +121,9 @@
 .fr-notice-needs { background: var(--attention-wash); border-color: var(--attention); }
 .fr-notice-needs strong { color: var(--attention-ink); }
 .fr-notice-fail { background: var(--fail-wash); border-color: var(--fail); padding: 9px 12px; }
+/* What the installed agents mean for reviews (NIT-694): one agent is worth a look, none blocks. */
+.fr-review-one { border-color: var(--attention); }
+.fr-review-none { background: var(--attention-wash); border-color: var(--attention); }
 
 .fr-actions { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
 .fr-confirm { display: flex; flex-direction: column; gap: 8px; padding: 12px; border-radius: var(--radius); border: 1px solid var(--line-strong); background: var(--bg); }

@@ -2,7 +2,7 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canContinue, openingStep, opensOnLaunch, stepStates, stepSummary, toolsReady, type SetupFacts } from "./steps.ts";
+import { canContinue, openingStep, reviewPairing, opensOnLaunch, stepStates, stepSummary, toolsReady, type SetupFacts } from "./steps.ts";
 import type { AgentPlan, Tool } from "../types.ts";
 
 const tool = (command: string, name: string, path: string | null, signed_in: boolean | null = null, version: string | null = null): Tool => ({ command, name, path, version, signed_in });
@@ -67,4 +67,16 @@ test("NIT-690: a done step's line says what it found", () => {
   assert.equal(stepSummary("project", f), "my-app · APP");
   assert.equal(stepSummary("agents", f), "Claude Code and Codex");
   assert.equal(stepSummary("agents", { ...f, agents: [agent("Claude Code", true, 0), agent("Codex", true, 0), agent("Cursor", true, 0)] }), "Claude Code, Codex and Cursor");
+});
+
+test("NIT-694: the line on reviews follows the agent CLIs installed", () => {
+  assert.equal(reviewPairing(null), null, "not before the tools were checked");
+  assert.equal(reviewPairing(nothing)?.kind, "none");
+  assert.equal(reviewPairing(ready)?.kind, "both");
+  const onlyCodex = nothing.map((t) => (t.command === "codex" ? { ...t, path: "/x/codex" } : t));
+  const one = reviewPairing(onlyCodex);
+  assert.equal(one?.kind, "one");
+  assert.ok(one?.text.includes("Only Codex") && one.text.includes("Install Claude Code"), one?.text);
+  // git and the GitHub CLI are not reviewers.
+  assert.equal(reviewPairing(nothing.map((t) => (t.command === "git" || t.command === "gh" ? { ...t, path: "/x" } : t)))?.kind, "none");
 });
