@@ -71,6 +71,8 @@ pub mod review_precision;
 pub mod rules;
 pub mod sessions;
 pub mod snapshot;
+pub mod tools;
+pub mod tools_install;
 pub mod track;
 pub mod update;
 pub mod verification;

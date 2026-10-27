@@ -936,6 +936,43 @@ async fn set_memory_trim(mode: Option<nitely_core::memory_trim::Mode>) -> Result
     Ok(nitely_core::memory_trim::setting())
 }
 
+/// Git, Claude Code, Codex and the GitHub CLI: where each is, its version and whether it is signed
+/// in (NIT-687). Runs each found for a few seconds at most, so off the main thread.
+#[tauri::command]
+async fn tools_check() -> Result<Vec<nitely_core::tools::Tool>, String> {
+    tauri::async_runtime::spawn_blocking(nitely_core::tools::check).await.map_err(|e| e.to_string())
+}
+
+/// How each missing tool would be installed: the exact command, shown before anything runs
+/// (NIT-688).
+#[tauri::command]
+async fn tool_install_plans() -> Result<Vec<nitely_core::tools_install::Plan>, String> {
+    tauri::async_runtime::spawn_blocking(nitely_core::tools_install::plans).await.map_err(|e| e.to_string())
+}
+
+/// Installs `tool` with the plan the person was shown and confirmed, sending each line it prints
+/// as a `tool-install` event, and returns the tool as it is afterwards (NIT-688).
+#[tauri::command]
+async fn install_tool(app: tauri::AppHandle, tool: String) -> Result<nitely_core::tools::Tool, String> {
+    use tauri::Emitter;
+    tauri::async_runtime::spawn_blocking(move || {
+        nitely_core::tools_install::install(&tool, &mut |line| {
+            app.emit("tool-install", serde_json::json!({ "tool": tool, "line": line })).ok();
+        })
+        .map_err(err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// Opens a terminal window running a tool's own sign-in (NIT-689): `gh auth login`, `codex login`,
+/// or Claude Code itself. Nitely only starts it and never sees what is typed there; the setup's
+/// Check again runs `tools_check` once the person is done.
+#[tauri::command]
+async fn tool_sign_in(command: String) -> Result<(), String> {
+    tauri::async_runtime::spawn_blocking(move || nitely_core::tools::open_sign_in(&command).map_err(err)).await.map_err(|e| e.to_string())?
+}
+
 /// Every request waiting now, why, and what it waits behind (NIT-322).
 #[tauri::command]
 async fn waits_overview() -> Result<nitely_crew::waits::Waits, String> {
@@ -1187,6 +1224,10 @@ pub fn run() {
             set_performance_settings,
             clear_performance_history,
             set_machine_limits,
+            tools_check,
+            tool_install_plans,
+            install_tool,
+            tool_sign_in,
             memory_trim_setting,
             set_memory_trim,
             batches_overview,
