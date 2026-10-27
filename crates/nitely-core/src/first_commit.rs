@@ -39,8 +39,8 @@ pub fn classify(path: &str, size: u64, is_dir: bool) -> Option<Reason> {
     }
     let sample = [".example", ".sample", ".template"].iter().any(|s| lower.ends_with(s));
     let secret = !sample
-        && (lower == ".env"
-            || lower.starts_with(".env.")
+        // Any `.env` name: `.env`, `.env.local`, direnv's `.envrc` (NIT-685 review).
+        && (lower.starts_with(".env")
             || [".pem", ".key", ".p12", ".pfx"].iter().any(|e| lower.ends_with(e))
             || lower.starts_with("id_rsa")
             || lower.starts_with("id_ed25519")
@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(classify("src", 0, true), None);
         assert_eq!(classify("assets/video.mp4", LARGE_BYTES, false), Some(Reason::Large));
         assert_eq!(classify("assets/logo.png", LARGE_BYTES - 1, false), None);
-        for secret in [".env", ".env.local", "deploy/server.pem", "tls.key", "id_rsa", "id_ed25519.pub", "aws-credentials.json"] {
+        for secret in [".env", ".env.local", ".envrc", "deploy/server.pem", "tls.key", "id_rsa", "id_ed25519.pub", "aws-credentials.json"] {
             assert_eq!(classify(secret, 10, false), Some(Reason::Secret), "{secret}");
         }
         assert_eq!(classify(".env.example", 10, false), None, "a sample is meant to be committed");
@@ -285,6 +285,7 @@ mod tests {
         assert_eq!(ignore_line("web/node_modules", Reason::Build), "node_modules/");
         assert_eq!(ignore_line(".env", Reason::Secret), ".env");
         assert_eq!(ignore_line(".env.local", Reason::Secret), ".env.*");
+        assert_eq!(ignore_line("web/.envrc", Reason::Secret), "/web/.envrc");
         // A name not in lowercase is kept out by its own path, which matches whatever the case rules.
         assert_eq!(ignore_line(".ENV", Reason::Secret), "/.ENV");
         assert_eq!(ignore_line("deploy/server.PEM", Reason::Secret), "/deploy/server.PEM");
