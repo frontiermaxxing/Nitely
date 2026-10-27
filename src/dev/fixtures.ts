@@ -42,6 +42,7 @@ import type {
   BranchRow,
   BranchState,
   ConnectPlan,
+  FirstCommitPreview,
   FlowIssue,
   Happening,
   IssueDetail,
@@ -1782,6 +1783,31 @@ const AGENTS: AgentPlan[] = ["claude", "codex", "cursor"].map((agent) => ({
 /** Folders the preview has made git repos (connect_init); a path ending in plain-folder is in none until then. */
 const madeRepos = new Set<string>();
 
+/** Repos made in the preview that have their first commit (first_commit). */
+const committedRepos = new Set<string>();
+
+function firstCommitPreview(): FirstCommitPreview {
+  return {
+    files: 214,
+    bytes: 3_400_000,
+    largest: [["src", 2_100_000], ["assets", 900_000], ["docs", 300_000]],
+    flagged: [
+      { path: ".env", reason: "secret", bytes: 120 },
+      { path: "node_modules", reason: "build", bytes: 0 },
+      { path: "assets/demo.mp4", reason: "large", bytes: 80_000_000 },
+    ],
+    gitignore: [".env*", "node_modules/", "/assets/demo.mp4"],
+    needs_identity: true,
+    branch: "main",
+  };
+}
+
+function firstCommit(args: Record<string, unknown>): string {
+  if (!args.name || !args.email) throw new Error("git has no name and email to commit with: give them, and they are set for this repo only");
+  committedRepos.add(String(args.path ?? ""));
+  return "Made the first commit on main: 212 files. It was not pushed.";
+}
+
 function connectInit(args: Record<string, unknown>): string {
   const path = String(args.path ?? "");
   madeRepos.add(path);
@@ -1800,6 +1826,7 @@ function connectPlan(args: Record<string, unknown>): ConnectPlan {
     project_name: name,
     project_exists: world.projects.some((p) => p.key === key),
     integration_branch: "main",
+    first_commit_needed: madeRepos.has(path) && !committedRepos.has(path),
     playbook: {
       source: "generated",
       path: `%APPDATA%\\nitely\\playbooks\\${key.toLowerCase()}.toml`,
@@ -2468,6 +2495,10 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return connectApply(args);
       case "connect_init":
         return connectInit(args);
+      case "first_commit_preview":
+        return firstCommitPreview();
+      case "first_commit":
+        return firstCommit(args);
       case "update_status":
         return UPDATE;
       case "dismiss_approval_notice":

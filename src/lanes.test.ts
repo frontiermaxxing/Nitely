@@ -85,6 +85,7 @@ test("a lane's size against its cap", () => {
   assert.equal(capWords(p), "twice each lane's first build");
   assert.equal(capWords({ ...p, rules: { ...p.rules, size_cap_gb: 20 } }), "20 GB per lane");
   assert.equal(bytesWords(1024 ** 3), "1.0 GB");
+  assert.equal(bytesWords(300 * 1024), "300 KB", "a small folder in a first commit's preview is not 0 MB");
 });
 
 test("in large-repo mode the chip is the main checkout: building, or waiting and why", () => {

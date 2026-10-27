@@ -1,7 +1,9 @@
 import { useEffect, useState } from "react";
 import { invoke } from "./backend";
 import { open } from "@tauri-apps/plugin-dialog";
-import type { Applied, ConnectPlan } from "./types";
+import type { Applied, ConnectPlan, FirstCommitPreview } from "./types";
+import { bytesWords } from "./lanes";
+import { Checkbox } from "./ui/Toggles";
 import { AgentChanges, pendingChanges } from "./Agents";
 
 const PLAYBOOK_SOURCE: Record<string, string> = {
@@ -172,6 +174,17 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
             )}
           </section>
 
+          {plan.first_commit_needed && (
+            <FirstCommit
+              root={plan.root}
+              branch={plan.integration_branch}
+              onMade={async (said) => {
+                await load(path, key, name);
+                setMade(said);
+              }}
+            />
+          )}
+
           <AgentChanges agents={plan.agents} />
 
           {plan.warnings.map((w) => (
@@ -180,7 +193,7 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
 
           {!applied && (
             <div className="actions">
-              <button className="btn primary" disabled={busy || !key.trim()} onClick={add}>
+              <button className="btn primary" disabled={busy || !key.trim() || plan.first_commit_needed} onClick={add}>
                 Add {key || "project"}
                 {changes > 0 ? ` and make ${changes} change${changes === 1 ? "" : "s"}` : ""}
               </button>
@@ -206,5 +219,132 @@ export function AddProject(props: { onAdded: (projectKey: string) => void }) {
         </>
       )}
     </div>
+  );
+}
+
+const LEFT_OUT: Record<string, string> = { build: "build or dependency folder", large: "over 50 MB", secret: "looks like a secret" };
+
+/**
+ * A repo with no commits yet (one "Make it a git repo" just made, or any fresh one) gets its first
+ * commit here, so the files are in every agent's worktree (NIT-685). It shows what goes in and what
+ * stays out first, offers a .gitignore built from what is there, asks for a git identity when git
+ * has none, and commits once, locally. It opens on its own, so the auto path is one confirmation.
+ */
+function FirstCommit(props: { root: string; branch: string; onMade: (said: string) => void }) {
+  const [preview, setPreview] = useState<FirstCommitPreview | null>(null);
+  // The .gitignore lines kept, or, when the repo has its own .gitignore, the paths left out.
+  const [kept, setKept] = useState<Set<string>>(new Set());
+  const [gitName, setGitName] = useState("");
+  const [gitEmail, setGitEmail] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    invoke<FirstCommitPreview>("first_commit_preview", { path: props.root })
+      .then((p) => {
+        setPreview(p);
+        setKept(new Set(p.gitignore ?? p.flagged.map((f) => f.path)));
+      })
+      .catch((e) => setError(String(e)));
+  }, [props.root]);
+
+  const toggle = (item: string) =>
+    setKept((k) => {
+      const next = new Set(k);
+      if (next.has(item)) next.delete(item);
+      else next.add(item);
+      return next;
+    });
+
+  const commit = async () => {
+    if (!preview) return;
+    setBusy(true);
+    try {
+      const items = preview.gitignore ?? preview.flagged.map((f) => f.path);
+      const chosen = items.filter((i) => kept.has(i));
+      const said = await invoke<string>("first_commit", {
+        path: props.root,
+        gitignore: preview.gitignore ? chosen : null,
+        exclude: preview.gitignore ? [] : chosen,
+        name: preview.needs_identity ? gitName : null,
+        email: preview.needs_identity ? gitEmail : null,
+      });
+      setError(null);
+      props.onMade(said);
+    } catch (e) {
+      setError(String(e));
+    }
+    setBusy(false);
+  };
+
+  const items = preview ? (preview.gitignore ?? preview.flagged.map((f) => f.path)) : [];
+  const identityMissing = !!preview?.needs_identity && (!gitName.trim() || !gitEmail.trim());
+  return (
+    <section>
+      <h2>First commit</h2>
+      <p className="small">
+        <span className="mono">{props.branch}</span> has no commits yet. Agents start their worktrees from it, so files
+        never committed would be missing from every one. Nitely makes one local commit, never pushed.
+      </p>
+      {!preview && !error && <p className="muted small">Looking at the folder…</p>}
+      {preview && (
+        <>
+          <p className="small">
+            {preview.files} file{preview.files === 1 ? "" : "s"}, {bytesWords(preview.bytes)}
+            {preview.largest.length > 0 && <>; the largest folders: {preview.largest.map(([f, b]) => `${f} (${bytesWords(b)})`).join(", ")}</>}.
+          </p>
+          {items.length > 0 && (
+            <>
+              <p className="small">
+                {preview.gitignore ? "There is no .gitignore. This one keeps out what should not go in; untick a line to commit it after all:" : "Left out of the commit; untick one to commit it after all:"}
+              </p>
+              <ul className="small first-commit-items">
+                {items.map((i) => {
+                  const why = preview.gitignore ? undefined : preview.flagged.find((f) => f.path === i);
+                  return (
+                    <li key={i}>
+                      <Checkbox
+                        checked={kept.has(i)}
+                        onChange={() => toggle(i)}
+                        label={
+                          <>
+                            <span className="mono">{i}</span>
+                            {why && <span className="muted"> ({LEFT_OUT[why.reason]})</span>}
+                          </>
+                        }
+                      />
+                    </li>
+                  );
+                })}
+              </ul>
+              {preview.gitignore && (
+                <p className="muted small">
+                  Found: {preview.flagged.map((f) => `${f.path} (${LEFT_OUT[f.reason]})`).join(", ")}.
+                </p>
+              )}
+            </>
+          )}
+          {preview.needs_identity && (
+            <div className="fields">
+              <label>
+                Your name, for git
+                <input value={gitName} onChange={(e) => setGitName(e.target.value)} />
+              </label>
+              <label>
+                Your email, for git
+                <input value={gitEmail} onChange={(e) => setGitEmail(e.target.value)} />
+              </label>
+            </div>
+          )}
+          {preview.needs_identity && <p className="muted small">Git has no name and email yet; they are set for this repo only.</p>}
+          <div className="actions">
+            <button className="btn primary" disabled={busy || identityMissing || preview.files === 0} onClick={commit}>
+              Make the first commit
+            </button>
+          </div>
+        </>
+      )}
+      {error && <p className="error small">{error}</p>}
+    </section>
   );
 }

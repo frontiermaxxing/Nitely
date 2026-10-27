@@ -363,6 +363,16 @@ enum Cmd {
         /// committed) before planning.
         #[arg(long)]
         init: bool,
+        /// When the repo has no commits yet, show its first commit (what goes in, what stays
+        /// out, the .gitignore it would write) and, with --yes, make it locally. Never pushed.
+        #[arg(long)]
+        first_commit: bool,
+        /// The git name for that commit, set for this repo only, when git has none.
+        #[arg(long)]
+        git_name: Option<String>,
+        /// The git email for that commit, set for this repo only, when git has none.
+        #[arg(long)]
+        git_email: Option<String>,
     },
     /// Manage the repos Nitely watches.
     Repo {
@@ -2050,13 +2060,35 @@ fn run(cmd: Cmd) -> Result<()> {
             }
             Ok(())
         }
-        Cmd::Connect { path, project, name, yes, init } => {
+        Cmd::Connect { path, project, name, yes, init, first_commit, git_name, git_email } => {
             let mut config = Config::load()?;
             let mut db = Db::open_default()?;
             if init && nitely_core::git::main_root(&path).is_none() {
                 println!("{}", nitely_core::connect::init_repo(&path)?);
             }
-            let plan = nitely_core::connect::plan(&db, &config, &path, project.as_deref(), name.as_deref())?;
+            let mut plan = nitely_core::connect::plan(&db, &config, &path, project.as_deref(), name.as_deref())?;
+            if plan.first_commit_needed {
+                let root = std::path::PathBuf::from(&plan.root);
+                if !first_commit {
+                    eprintln!("{} has no commits yet; run again with --first-commit to see and make the first commit", plan.integration_branch);
+                } else {
+                    let p = nitely_core::first_commit::preview(&root)?;
+                    println!("first commit on {}: {} files, {} bytes", p.branch, p.files, p.bytes);
+                    for f in &p.flagged {
+                        println!("  leaves out {} ({:?})", f.path, f.reason);
+                    }
+                    if let Some(lines) = &p.gitignore {
+                        println!("  writes .gitignore: {}", lines.join(", "));
+                    }
+                    if yes {
+                        // With a .gitignore of its own, what it does not cover is left out by path.
+                        let exclude: Vec<String> = if p.gitignore.is_some() { vec![] } else { p.flagged.iter().map(|f| f.path.clone()).collect() };
+                        let identity = git_name.as_deref().zip(git_email.as_deref());
+                        println!("{}", nitely_core::first_commit::make(&root, p.gitignore.as_deref(), &exclude, identity)?);
+                        plan = nitely_core::connect::plan(&db, &config, &path, project.as_deref(), name.as_deref())?;
+                    }
+                }
+            }
             let new = if plan.project_exists { "existing" } else { "new" };
             println!("{} → project {} ({}, {new}), integration branch {}", plan.root, plan.project_key, plan.project_name, plan.integration_branch);
             println!("playbook: {} ({})", plan.playbook.path, plan.playbook.source);
