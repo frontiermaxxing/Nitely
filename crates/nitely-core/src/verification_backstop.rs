@@ -141,7 +141,18 @@ pub(crate) fn observation(old:&str,head:&str,head_is_behind:impl FnOnce()->bool,
     if head_is_behind() && !branch_at_head()? { return Ok(Observation::Keep); }
     Ok(Observation::Record)
 }
+/// Whether `head` has no playbook committed: its repo lands by the one Nitely keeps (NIT-702).
+fn uncommitted(repo:&Path,head:&str)->Result<bool> {
+    Ok(git(repo,&["ls-tree","--name-only",head,"--",playbook::PLAYBOOK_PATH])?.trim().is_empty())
+}
 fn committed_policy(repo:&Path,head:&str)->Result<(Playbook,String)> {
+    if uncommitted(repo,head)? {
+        let (pb,text)=Playbook::stored_policy(repo)?;
+        if pb.unknown.iter().any(|s|s.starts_with("verification")) { bail!("unknown verification policy fields"); }
+        use sha2::Digest;
+        let digest=sha2::Sha256::digest(text.as_bytes());
+        return Ok((pb,format!("app:{}",digest.iter().take(20).map(|b|format!("{b:02x}")).collect::<String>())));
+    }
     let object=format!("{head}:{}",playbook::PLAYBOOK_PATH);
     let hash=git(repo,&["rev-parse",&object])?.trim().to_string();
     let pb=Playbook::parse(&git(repo,&["show",&object])?)?;
@@ -152,7 +163,11 @@ fn committed_policy(repo:&Path,head:&str)->Result<(Playbook,String)> {
 /// pending evidence or turn previously blocked health into permission to proceed.
 fn optional_policy(db:&Db,repo:&Path,head:&str)->Result<Option<(Playbook,String)>> {
     let id=repo_id(repo)?;
-    let contents=git(repo,&["show",&format!("{head}:{}",playbook::PLAYBOOK_PATH)]).ok();
+    let contents=match git(repo,&["show",&format!("{head}:{}",playbook::PLAYBOOK_PATH)]).ok() {
+        Some(text)=>Some(text),
+        None if uncommitted(repo,head)? => Some(Playbook::stored_policy(repo)?.1).filter(|t|!t.is_empty()),
+        None=>None,
+    };
     if let Some(contents)=&contents {
         let document:toml::Value=toml::from_str(contents)?;
         if document.get("verification").is_some() || health(db,repo)?.is_some_and(|h|db.project_review_mode(&h.project).map(|m|m.explicit).unwrap_or(false)) {return committed_policy(repo,head).map(Some);}
@@ -638,6 +653,21 @@ mod tests {
         std::fs::create_dir_all(repo.join(".nitely")).unwrap();
         let head=change(&repo,".nitely/playbook.toml","[gate]\ncommands=['echo checked']\n");
         assert!(optional_policy(&db,&repo,&head).is_err(),"removing only the verification section also fails closed");
+    }
+
+    /// A repo whose playbook lives only in Nitely's data folder lands by that one, under a chosen
+    /// mode too, and records no failure (NIT-702).
+    #[test]
+    fn a_repo_without_a_committed_playbook_lands_by_the_one_nitely_keeps() {
+        let mut db=Db::open(&crate::paths::unique_temp("nitely-backstop-app-policy",".sqlite")).unwrap();
+        db.create_project("APP","Example").unwrap();
+        crate::project_modes::set_for_test(&mut db,"APP",crate::project_modes::Mode::Fast,Default::default());
+        let repo=crate::test_repo::copy("verification-app-policy",|p|crate::test_repo::init(p,&[("help.txt","help")]));
+        let base=git(&repo,&["rev-parse","HEAD"]).unwrap().trim().to_string();
+        let head=change(&repo,"help.txt","more help");
+        let issue=db.create_issue(&NewIssue{project:"APP".into(),title:"Ordinary change".into(),body:"b".into(),kind:"feature".into(),source:"codex".into(),evidence:"test".into(),..Default::default()},&Actor::Agent("codex:test".into())).unwrap();
+        let landed=crate::land::Landed{head:Some(head),landed_from:Some(base),..Default::default()};
+        on_landed(&mut db,&repo,&issue,&landed).unwrap();
     }
 
     #[test]

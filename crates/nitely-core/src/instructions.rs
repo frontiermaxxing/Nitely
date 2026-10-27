@@ -31,7 +31,7 @@ on the answer: `ask` moves the issue to Needs You, and the answer moves it back 
 notice on your next nitely call. A question about the board or the code (who holds a file, whether an issue \
 is done, whether a finding is stale, resubmit or wait) goes to `triage`, not the human. Never set Approved: only the human approves. When a change needs their \
 approval, `submit` already puts it in their inbox, so never `ask` for an approval.
-5. Commit, then `submit` with `solution_title` and `solution_summary` describing the implemented outcome, behavior, validation and any remaining limits for this revision (not the original problem): it hands the branch in and returns at once. In the background it runs the \
+5. Commit, then `submit` with `solution_title` and `solution_summary` describing the implemented outcome, behavior, validation and any remaining limits for this revision (not the original problem): it hands the branch in and returns at once. The reviewer reads the issue, the issues around it and your notes: put what the change deliberately leaves out, scope split with other issues and decisions already made in `reviewer_note`, and on a resubmit answer there a finding you dispute before you `request_acceptance`. In the background it runs the \
 gate, has another vendor review the branch, opens the pull request, and moves the issue. The result \
 comes back through `next_task`, `submit_status`, or a notice on your next nitely call; meanwhile pick \
 up other work or stop. `submit` with wait: true blocks until the result instead.

@@ -131,7 +131,10 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
             let previous = crate::submit::previous_round_at(db, &key, &dir, &head, None)?;
             let vendor = crate::git::parse_branch(&branch).0.unwrap_or_default();
             let choice = rules.choose(&vendor, &|r| rules.is_installed(r, &dir))?;
-            let change = BatchChange { key: key.clone(), title: issue.title, branch, base, head, worktree: dir, files, previous };
+            // Told what a single review would be, more briefly (NIT-501).
+            let gate = record.gate.clone().unwrap_or(crate::playbook::GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.clone(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
+            let context = crate::submit::review_context_sized(db, &issue, &gate, true)?;
+            let change = BatchChange { key: key.clone(), title: issue.title, branch, base, head, worktree: dir, files, previous, context };
             Ok(Waiting { pending: record, change, vendor, choice })
         })();
         match prepared {
@@ -156,12 +159,52 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
     Ok(out)
 }
 
+/// A change whose review passed and that its land's rebase changed beyond its conflicts (NIT-700):
+/// reviewed again at the land, on how it differs from the change that passed (`git range-diff`,
+/// `PreviousRound::passed_on`), instead of a new submit round. `last` is that passing review;
+/// `worktree` holds the rebased change at HEAD on top of `base`. Recorded as the review of the
+/// rebased change, and, as `review_pending`, Ok when the land may go on, or why it may not.
+#[allow(clippy::too_many_arguments)]
+pub fn review_rebased(db: &mut Db, root: &Path, pb: &Playbook, key: &str, worktree: &Path, base: &str, branch: &str, last: &ReviewRecord, actor: &Actor) -> Result<std::result::Result<(), String>> {
+    let mut rules = pb.review.clone();
+    rules.policy_root = Some(root.to_path_buf());
+    rules.require_enabled()?;
+    let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+    let head = crate::land::rev(worktree, "HEAD")?;
+    let files: Vec<String> = git(worktree, &["diff", "--name-only", "--no-renames", &format!("{base}...{head}")])?.lines().map(str::to_string).collect();
+    let previous = crate::submit::previous_round_at(db, key, worktree, &head, None)?;
+    let vendor = crate::git::parse_branch(branch).0.unwrap_or_default();
+    let choice = rules.choose(&vendor, &|r| rules.is_installed(r, worktree))?;
+    // The row is of the rebased commit: the solution described the one before; the gate's
+    // evidence stays, as land's own gate checks this commit.
+    let mut pending = last.clone();
+    pending.commit_sha = head.clone();
+    pending.solution = None;
+    pending.reasons = pb.human_reasons(&files)?;
+    // Reviewed alone: told what a single review would be (NIT-501).
+    let gate = pending.gate.clone().unwrap_or(crate::playbook::GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.clone(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
+    let context = crate::submit::review_context(db, &issue, &gate)?;
+    let change = BatchChange { key: key.to_string(), title: issue.title, branch: branch.to_string(), base: base.to_string(), head, worktree: worktree.to_path_buf(), files, previous, context };
+    let w = Waiting { pending, change, vendor, choice };
+    db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "status", "The rebase changed more than its conflicts: it is reviewed at its land, on how it differs from the change that passed")?;
+    let reviewer = w.choice.reviewer.clone();
+    match review_group(db, &rules, root, &reviewer, &[&w], actor)?.remove(0) {
+        Ok(review) => decide(db, &rules, &w, review, actor),
+        Err(why) => Ok(Err(format!("its review at the land did not finish: {why}; land again"))),
+    }
+}
+
 /// The reviews of one reviewer's changes: alone for one, else one batch call, and alone for each
 /// change the batch could not review.
 fn review_group(db: &Db, rules: &ReviewRules, root: &Path, reviewer: &str, group: &[&Waiting], actor: &Actor) -> Result<Vec<std::result::Result<Review, String>>> {
     let alone = |w: &Waiting| -> std::result::Result<Review, String> {
         db.log_event(actor, Some(&w.change.key), None, "review_started", &format!("Review by {reviewer}{} started", noted(&w.choice.note))).ok();
-        rules.run(reviewer, &w.change.worktree, &w.change.base, w.change.previous.as_ref()).map_err(|e| first_line(&format!("{e:#}")))
+        // Told what the change is for, as a batch tells each change (NIT-501; NIT-712 review).
+        let mut told = rules.clone();
+        if !w.change.context.is_empty() {
+            told.context = if told.context.is_empty() { w.change.context.clone() } else { format!("{}\n{}", told.context, w.change.context) };
+        }
+        told.run(reviewer, &w.change.worktree, &w.change.base, w.change.previous.as_ref()).map_err(|e| first_line(&format!("{e:#}")))
     };
     if group.len() == 1 {
         return Ok(vec![alone(group[0])]);
@@ -291,6 +334,7 @@ fn decide(db: &mut Db, rules: &ReviewRules, w: &Waiting, mut review: Review, act
         ],
     )?;
     db.close_superseded_requests(key, &review.findings)?;
+    crate::submit::file_minor_findings(db, key, &review, actor)?;
     let by = match &review.batch {
         Some(b) => format!("{}{}, in a batch with {},", review.reviewer, noted(&review.note), b.with.join(", ")),
         None => format!("{}{}", review.reviewer, noted(&review.note)),

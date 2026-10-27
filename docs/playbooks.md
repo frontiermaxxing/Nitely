@@ -15,7 +15,13 @@ the pull request on GitHub or Bitbucket. The review is stored for that exact pat
 check it. `nitely land NIT-4` (MCP: `land`) is then the only writer of the integration branch:
 one land at a time under a lock, rebase, a review that must cover exactly the rebased change, a
 human approval in Nitely when the change needs one, the gate, a fast-forward and a push. All of it
-shows on the issue's timeline and in the app. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
+shows on the issue's timeline and in the app. A rebase that stops on conflicts is left for the
+agent to resolve and land again: when the resolution only combines lines from the two sides, and the
+change adds and removes the same lines its review saw, the review still covers it; anything more is
+reviewed at the land, on how it differs from the change that passed (`git range-diff`), with no new
+submit. `[land] union` names append-only files every change adds to (fixture registries,
+pending-work lists), as gitattributes patterns: the land's rebase merges them with git's union
+driver, so they stop conflicting. A repo without a playbook gets `main`, `{vendor}/{key}-{slug}`
 branches and worktrees in `../{repo}-worktrees/`. Nitely's own is in [.nitely/playbook.toml](../.nitely/playbook.toml).
 Gate steps can depend on what the branch changes (`when_changed`, `unless_only`), commands can use
 `{main}`, `{worktree}` and `{base}`, and `[approval] blocked_paths` lists paths no task branch may

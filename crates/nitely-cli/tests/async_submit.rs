@@ -120,8 +120,8 @@ fn disabled_review_async_mcp_submission_still_gates_and_lands() {
     // never released, so accidentally starting it cannot yield a passing submission.
     let off = nitely_core::project_modes::Options { pre_review: Some(nitely_core::project_modes::PreReview::Off), ..Default::default() };
     s.db.set_project_review_mode("APP", nitely_core::project_modes::Mode::Custom, off.clone(), 0, &Actor::Human).unwrap();
-    let job = tool(&s, "submit", json!({}));
-    let id = job["id"].as_i64().unwrap().to_string();
+    tool(&s, "submit", json!({}));
+    let id = s.db.latest_submit_job(&s.key).unwrap().unwrap().id.to_string();
     let done = nitely(&s, &["submit-status", &id, "--wait", "600"]);
     assert_eq!(done["state"], "done", "{done}");
     assert_eq!(done["result"]["review_disabled"], true, "{done}");
@@ -165,9 +165,10 @@ fn submit_returns_at_once_and_the_background_job_finishes_it() {
 #[test]
 fn an_agent_hands_in_over_mcp_and_hears_the_result_on_its_next_call() {
     let s = setup("nitely-async-submit-mcp");
+    // One line while it runs (NIT-697).
     let job = tool(&s, "submit", json!({}));
-    assert!(job["next"].as_str().unwrap().contains("Handed in"), "{job}");
-    let id = job["id"].as_i64().unwrap();
+    assert!(job.as_str().unwrap().starts_with("Handed in"), "{job}");
+    let id = s.db.latest_submit_job(&s.key).unwrap().unwrap().id;
     s.still_reviewing(&id.to_string());
     s.release_review();
 
@@ -182,9 +183,10 @@ fn an_agent_hands_in_over_mcp_and_hears_the_result_on_its_next_call() {
     let again = tool(&s, "get_issue", json!({ "key": s.key }));
     assert!(again.get("notices").is_none(), "told once: {again}");
 
-    // submit_status by key answers the same, with the result's next step.
+    // submit_status by key answers the same, short, with the result's next step (NIT-697).
     let status = tool(&s, "submit_status", json!({ "key": s.key }));
-    assert_eq!((status["id"].as_i64(), status["state"].as_str()), (Some(id), Some("done")));
+    assert_eq!((status["job"].as_i64(), status["state"].as_str()), (Some(id), Some("In Review")));
+    assert_eq!(status["gate"], json!({ "passed": true }), "{status}");
     assert!(status["next"].as_str().unwrap().contains("Call land"), "{status}");
     std::fs::remove_dir_all(&s.base).ok();
 }
