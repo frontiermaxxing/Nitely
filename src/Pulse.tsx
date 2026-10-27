@@ -331,13 +331,14 @@ function ReviewersDown({ board, now }: { board: Board; now: number }) {
             </span>
           ))}
           .{" "}
-          {down.length > 0 ? (
-            "Rerun their reviews once it can review again."
-          ) : sent ? (
-            sent.length ? `${sent.join(", ")} went back to their agents to submit again.` : "None was waiting to land."
+          {/* Offered while the reviewer is down too: only a review clears it, and these may be the only
+              work left to review (NIT-362 review). */}
+          {down.length > 0 && !sent && waiting.length > 0 && "Sign it in first, then "}
+          {sent ? (
+            sent.length ? `${sent.join(", ")} went back to Todo, for an agent to submit again.` : "None was waiting to land."
           ) : waiting.length > 0 ? (
             <button className="link" disabled={busy} onClick={rerun}>
-              {busy ? "Sending them back…" : `Rerun ${waiting.length === 1 ? "its review" : `the ${waiting.length} waiting`}`}
+              {busy ? "Sending them back…" : `${down.length > 0 ? "rerun" : "Rerun"} ${waiting.length === 1 ? "its review" : `the ${waiting.length} waiting`}`}
             </button>
           ) : (
             "None is waiting to land."

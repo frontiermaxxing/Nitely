@@ -97,8 +97,9 @@ impl Db {
     }
 
     /// Sends `keys` back for a review by another vendor: each that is still listed by
-    /// `same_vendor_reviews` and waiting (In Review or Needs You) goes back to In Progress with a
-    /// note for its agent to submit again. Returns the keys it sent back.
+    /// `same_vendor_reviews` and waiting (In Review or Needs You) goes back to Todo, with a note to
+    /// submit again, so the next agent takes it up even when the one that submitted it has left
+    /// (a crew worker ends after a submit that went through). Returns the keys it sent back.
     pub fn rerun_same_vendor_reviews(&mut self, keys: &[String], actor: &Actor) -> Result<Vec<String>> {
         let listed = self.same_vendor_reviews()?;
         let mut sent = Vec::new();
@@ -107,7 +108,7 @@ impl Db {
             if row.state != "In Review" && row.state != "Needs You" {
                 continue;
             }
-            self.move_issue(&row.key, "In Progress", None, None, actor)?;
+            self.move_issue(&row.key, "Todo", None, None, actor)?;
             self.add_note(
                 &row.key,
                 &format!("Its last review was by {}, the author's own vendor, because the usual reviewer couldn't run. Submit again for a review by another vendor.", display(&row.reviewer)),
@@ -174,7 +175,8 @@ mod tests {
         assert_eq!(events(&db, AVAILABLE), ["Codex reviews again"], "told once that it is back");
 
         assert_eq!(db.rerun_same_vendor_reviews(&[a.clone(), b.clone()], &Actor::Human).unwrap(), [a.clone()]);
-        assert_eq!(db.issue(&a).unwrap().unwrap().state, "In Progress", "back to its agent to submit again");
+        assert_eq!(db.issue(&a).unwrap().unwrap().state, "Todo", "back for the next agent to submit again");
+        assert_eq!(db.next_task("NIT", "claude:another").unwrap().map(|i| i.key), Some(a.clone()), "an agent takes it up, whoever submitted it");
 
         // A later miss is news again.
         db.reviewer_could_not_run(&a, "codex", "over quota", "").unwrap();
