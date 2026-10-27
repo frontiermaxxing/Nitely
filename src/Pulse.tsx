@@ -182,6 +182,7 @@ export function Pulse(props: {
         <>
           <Glance data={data} board={props.board} decisions={props.decisions} ctx={ctx} onGo={props.onGo} />
           {props.board?.after_land_failed && <AfterLandFailed failed={props.board.after_land_failed} now={ctx.now} />}
+          {props.board && <ReviewersDown board={props.board} now={ctx.now} />}
           {data.projects.length === 0 && (
             <EmptyState title="No projects yet." action={<button className="btn" onClick={() => props.onGo({ kind: "add" })}>Add a project</button>}>
               Add a repo and connect your agents; their work shows up here as it moves.
@@ -278,6 +279,74 @@ function AfterLandFailed({ failed, now }: { failed: NonNullable<Board["after_lan
       <strong>An after-land step failed</strong>
       {failed.issue && <> landing {failed.issue}</>} {ago(now, failed.ts)}. {failed.summary.replace(/^After landing: /, "")}
     </p>
+  );
+}
+
+/** `text` with its backticked parts in the mono face: "run `codex login`". */
+const codeSpans = (text: string) =>
+  text.split("`").map((part, i) => (i % 2 ? <code key={i}>{part}</code> : <span key={i}>{part}</span>));
+
+/** "Codex" for `codex`. */
+const toolName = (reviewer: string) => reviewer.charAt(0).toUpperCase() + reviewer.slice(1);
+
+/**
+ * A reviewer that can't run (not signed in, over quota, not installed), said once until it reviews
+ * again, and the open changes its absence left to their author's own vendor, with a rerun once it
+ * is back (NIT-362).
+ */
+function ReviewersDown({ board, now }: { board: Board; now: number }) {
+  const down = board.reviewers_down ?? [];
+  const same = board.same_vendor_reviews ?? [];
+  const [busy, setBusy] = useState(false);
+  const [sent, setSent] = useState<string[] | null>(null);
+  const [failed, setFailed] = useState<string | null>(null);
+  if (down.length === 0 && same.length === 0) return null;
+  const waiting = same.filter((r) => r.state === "In Review" || r.state === "Needs You");
+  const rerun = async () => {
+    setBusy(true);
+    setFailed(null);
+    try {
+      setSent(await invoke<string[]>("rerun_same_vendor_reviews", { keys: waiting.map((r) => r.key) }));
+    } catch (e) {
+      setFailed(String(e));
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="reviewers-down" role="status">
+      {down.map((d) => (
+        <p key={d.reviewer}>
+          <strong>{toolName(d.reviewer)} can't review</strong>: {d.why}
+          {d.hint && <> ({codeSpans(d.hint)})</>}, since {ago(now, d.since)}. Until it can, reviews fall back to another reviewer, some to the author's own vendor.
+        </p>
+      ))}
+      {same.length > 0 && (
+        <p>
+          {same.length === 1 ? "1 open change was" : `${same.length} open changes were`} last reviewed by the author's own vendor:{" "}
+          {same.map((r, i) => (
+            <span key={r.key} title={r.title}>
+              {i > 0 && ", "}
+              <span style={{ fontFamily: "var(--font-mono)" }}>{r.key}</span>
+            </span>
+          ))}
+          .{" "}
+          {/* Offered while the reviewer is down too: only a review clears it, and these may be the only
+              work left to review (NIT-362 review). */}
+          {down.length > 0 && !sent && waiting.length > 0 && "Sign it in first, then "}
+          {sent ? (
+            sent.length ? `${sent.join(", ")} went back to Todo, for an agent to submit again.` : "None was waiting to land."
+          ) : waiting.length > 0 ? (
+            <button className="link" disabled={busy} onClick={rerun}>
+              {busy ? "Sending them back…" : `${down.length > 0 ? "rerun" : "Rerun"} ${waiting.length === 1 ? "its review" : `the ${waiting.length} waiting`}`}
+            </button>
+          ) : (
+            "None is waiting to land."
+          )}
+        </p>
+      )}
+      {failed && <p className="error">{failed}</p>}
+    </div>
   );
 }
 

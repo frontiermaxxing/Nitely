@@ -300,6 +300,28 @@ export interface Board {
   after_land_failed?: { issue: string | null; ts: number; summary: string } | null;
   /** What the person is told and nothing waits on, until they dismiss it (snapshot.rs Notice, NIT-570). */
   notices?: Notice[];
+  /** Reviewers that cannot run, until they review again (reviewer_health.rs Down, NIT-362). */
+  reviewers_down?: ReviewerDown[];
+  /** Open changes whose latest review was by their author's own vendor (reviewer_health.rs SameVendor). */
+  same_vendor_reviews?: SameVendorReview[];
+}
+
+/** A reviewer that cannot run: why, and what the person can do about it (NIT-362). */
+export interface ReviewerDown {
+  reviewer: string;
+  why: string;
+  hint: string;
+  since: number;
+}
+
+/** An open change whose latest review was by its author's own vendor, to rerun (NIT-362). */
+export interface SameVendorReview {
+  key: string;
+  title: string;
+  state: string;
+  reviewer: string;
+  note: string;
+  ts: number;
 }
 
 /** A notice in the Inbox: the event that says it, its issue, when, and what it says. */
