@@ -606,6 +606,21 @@ async fn connect_init(path: String) -> Result<String, String> {
     nitely_core::connect::init_repo(&path).map_err(err)
 }
 
+/// What a repo with no commits yet would put in its first commit (NIT-685).
+#[tauri::command]
+async fn first_commit_preview(path: String) -> Result<nitely_core::first_commit::Preview, String> {
+    nitely_core::first_commit::preview(std::path::Path::new(&path)).map_err(err)
+}
+
+/// Makes that first commit: the .gitignore lines the person kept, the flagged paths they chose to
+/// commit after all, and a
+/// git identity for this repo when git has none. Never pushed.
+#[tauri::command]
+async fn first_commit(path: String, gitignore: Option<Vec<String>>, include: Vec<String>, name: Option<String>, email: Option<String>) -> Result<String, String> {
+    let identity = name.as_deref().zip(email.as_deref());
+    nitely_core::first_commit::make(std::path::Path::new(&path), gitignore.as_deref(), &include, identity).map_err(err)
+}
+
 /// Adds the repo. The plan is recomputed here rather than taken from the page, so what is written
 /// is what Nitely decides now.
 #[tauri::command]
@@ -1196,6 +1211,8 @@ pub fn run() {
             decline_finding,
             connect_plan,
             connect_init,
+            first_commit_preview,
+            first_commit,
             connect_apply,
             agent_setup,
             agent_setup_apply,
