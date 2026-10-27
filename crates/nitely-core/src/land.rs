@@ -1027,7 +1027,7 @@ pub fn after_steps_running(root: &Path) -> bool {
 /// a land on main checks its review and approval, runs the gate, and fast-forwards the main
 /// checkout.
 #[allow(clippy::too_many_arguments)]
-fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed, goal: Option<&crate::goal_branch::GoalBranch>) -> Result<()> {
+fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed, goal: Option<&crate::goal_branch::GoalBranch>) -> Result<()> {
     let base = report.base.clone();
     // A repo with no origin is local: what lands stays in it.
     let push = opts.push && playbook::has_origin(root);
@@ -1079,7 +1079,8 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
         }
     } else if git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Rebasing {branch} onto {base}"))?;
-        let rebased = crate::submodules::rebase_repo(&worktree, &base, &moving);
+        let union = crate::rebase_review::union_args(pb, &worktree)?;
+        let rebased = crate::submodules::rebase_repo(&worktree, &base, &moving, &union);
         if let Err(e) = rebased {
             if !crate::test_command_merge::finish_rebase(&worktree).unwrap_or(false) {
                 report.conflicts = git(&worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
@@ -1089,7 +1090,7 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
                 }
                 bail!(
                     "the rebase of {branch} onto {base} stopped on conflicts in {}; it is left in progress in {wt}. \
-                     Resolve each file, git add it, git rebase --continue, then submit and land again",
+                     Resolve each file, git add it, git rebase --continue, then land again (a resolution that only combines the two sides keeps the review; anything more is reviewed at the land)",
                     report.conflicts.join(", ")
                 );
             }
@@ -1098,6 +1099,11 @@ fn run(db: &Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor
 
     crate::submodules::point(&worktree, &moving)?;
     crate::submodules::follow(pb, &worktree, &moving)?;
+    // A passing review the rebase changed more than conflicts in is brought up to date here, at
+    // the land, not in a new submit round (NIT-700). A checkpoint merges its base instead.
+    if goal.is_none() && !checkpoint {
+        crate::rebase_review::review_at_land(db, root, pb, key, &worktree, &base, &branch, actor)?;
+    }
     let head = rev(root, &branch)?;
     report.approval = Some(match goal {
         Some(gb) => check_item(db, key, pb, &worktree, &base, gb)?,
@@ -1357,7 +1363,7 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
     let pb = &current;
     let patch = crate::submit::patch_id_range(worktree, base, head)?;
     let review = db.reviews(key)?.into_iter().next().with_context(|| format!("{key} has no review; submit it first"))?;
-    if review.patch_id != patch && !crate::test_command_merge::equivalent(worktree, base, head, &review).unwrap_or(false) {
+    if review.patch_id != patch && !crate::rebase_review::covers(pb, worktree, base, head, &review)? {
         bail!(
             "the branch changed since its review (reviewed {}, now {}); submit again",
             short(&review.patch_id),
@@ -2736,6 +2742,58 @@ when_changed = ["billing"]
         assert!(r.tidied.iter().any(|t| t.contains(&p)), "{r:?}");
         assert_eq!(r.tidied.len(), 5, "{r:?}");
         assert!(f.db.timeline(&p).unwrap().iter().any(|t| t.kind == "worktree_removed"));
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A conflict resolved by combining the two sides keeps the review; a resolution that adds
+    /// something is reviewed at the land, with no submit; a `[land] union` file does not conflict
+    /// (NIT-700).
+    #[test]
+    fn a_rebase_that_only_resolves_conflicts_keeps_its_review() {
+        let mut f = fixture();
+        let reviews = |f: &Fixture, key: &str| f.db.reviews(key).unwrap().len();
+        // Main adds a line where the change adds its own: the land stops on the conflict.
+        let conflict = |f: &mut Fixture, title: &str, line: &str| -> (String, PathBuf) {
+            std::fs::write(f.repo.join("list.txt"), "a\n").unwrap();
+            sh(&f.repo, &["add", "list.txt"]);
+            sh(&f.repo, &["commit", "-q", "-m", "list"]);
+            let (key, wt) = f.reviewed(title, "list.txt", &format!("a\n{line}\n"));
+            std::fs::write(f.repo.join("list.txt"), format!("a\nmain {line}\n")).unwrap();
+            sh(&f.repo, &["commit", "-q", "-am", "main's line"]);
+            (key, wt)
+        };
+        let resolve = |wt: &Path, content: &str| {
+            std::fs::write(wt.join("list.txt"), content).unwrap();
+            sh(wt, &["add", "list.txt"]);
+            sh(wt, &["-c", "core.editor=true", "rebase", "--continue"]);
+        };
+
+        let (a, wt) = conflict(&mut f, "Add b", "b");
+        assert_eq!(f.land(&a).conflicts, vec!["list.txt"]);
+        resolve(&wt, "a\nmain b\nb\n");
+        let r = f.land(&a);
+        assert!(r.landed, "{r:?}");
+        assert_eq!(reviews(&f, &a), 1, "kept: no review ran");
+
+        // A resolution with a line neither side has is the author's new code: reviewed at the land.
+        let (b, wt) = conflict(&mut f, "Add c", "c");
+        assert_eq!(f.land(&b).conflicts, vec!["list.txt"]);
+        resolve(&wt, "a\nmain c\nc\nmore\n");
+        let r = f.land(&b);
+        assert!(r.landed, "{r:?}");
+        assert_eq!(reviews(&f, &b), 2, "reviewed once more, at the land");
+        assert!(f.db.timeline(&b).unwrap().iter().any(|e| e.summary.as_deref().is_some_and(|s| s.contains("at its land passed"))));
+
+        // Named in `[land] union`, the list takes both lines and stops conflicting.
+        let pb_path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let pb = std::fs::read_to_string(&pb_path).unwrap().replacen("[[land.after]]", "[land]\nunion = [\"list.txt\"]\n[[land.after]]", 1);
+        std::fs::write(&pb_path, pb).unwrap();
+        sh(&f.repo, &["commit", "-q", "-am", "list.txt is append-only"]);
+        let (c, _) = conflict(&mut f, "Add d", "d");
+        let r = f.land(&c);
+        assert!(r.landed, "{r:?}");
+        assert_eq!(reviews(&f, &c), 1);
+        assert_eq!(std::fs::read_to_string(f.repo.join("list.txt")).unwrap().replace('\r', ""), "a\nmain d\nd\n");
         std::fs::remove_dir_all(&f.base).ok();
     }
 

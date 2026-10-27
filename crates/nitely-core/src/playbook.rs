@@ -81,6 +81,11 @@ pub struct LandRules {
     /// Changes per queue run (default 5).
     #[serde(default)]
     pub batch_max: Option<u32>,
+    /// Append-only files every change adds to (fixture registries, pending-work lists), as
+    /// gitattributes patterns: the land's rebase merges them with git's union driver, keeping the
+    /// lines of both sides, so they do not conflict (NIT-700).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub union: Vec<String>,
 }
 
 /// How a project lands reviewed changes: one at a time, or together in a queue.
