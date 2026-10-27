@@ -114,10 +114,11 @@ export function queueWords(p: ProjectLanes, now: number): { label: string; long:
   return { label: `${queued.length} waiting${long ? `, longest ${forHowLong(longest)}` : ""}`, long, lines };
 }
 
-/** "8.3 GB", "640 MB". */
+/** "8.3 GB", "640 MB", "300 KB": a folder under a megabyte is not "0 MB" (NIT-685). */
 export function bytesWords(bytes: number): string {
   const gb = bytes / 1024 ** 3;
-  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${Math.round(bytes / 1024 ** 2)} MB`;
+  if (gb >= 1) return `${gb.toFixed(1)} GB`;
+  return bytes >= 1024 ** 2 ? `${Math.round(bytes / 1024 ** 2)} MB` : `${Math.round(bytes / 1024)} KB`;
 }
 
 /** What a project's lanes may grow to: the playbook's cap, or twice each lane's first build. */
