@@ -508,7 +508,7 @@ mod tests {
  }
  #[test]
  fn a_gate_a_stricter_mode_overtook_in_the_queue_runs_again_in_its_place() {
-  let file=crate::paths::unique_temp("mode-again",".sqlite");let db=Db::open(&file).unwrap();db.create_project("APP","Example").unwrap();
+  let file=crate::paths::unique_temp("mode-again",".sqlite");let mut db=Db::open(&file).unwrap();db.create_project("APP","Example").unwrap();
   let issue=db.create_issue(&crate::NewIssue{project:"APP".into(),title:"Queued change".into(),body:"Waits in the lane queue".into(),evidence:"none".into(),source:"codex".into(),kind:"feature".into(),..Default::default()},&Actor::Human).unwrap();
   let passed=GateResult{mode_authority:None,passed:true,plan:None,skipped:None,commit:"abc".into(),results:vec![],warnings:vec![],flaked:vec![],lane_run:None};
   let mut places=vec![];
