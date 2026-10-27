@@ -727,6 +727,21 @@ impl Playbook {
         Some(Playbook::stored_path(&repo.name)).filter(|p| p.exists())
     }
 
+    /// The playbook a repo with none committed lands by: the one Nitely keeps for it, or the
+    /// defaults when it keeps none, with its text ("" for the defaults) (NIT-702).
+    pub(crate) fn stored_policy(repo_root: &Path) -> Result<(Playbook, String)> {
+        let config = crate::Config::load().ok();
+        let text = match Playbook::stored_path_for(repo_root, config.as_ref()) {
+            Some(path) => std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?,
+            None => String::new(),
+        };
+        let none = crate::rules::RuleDefaults::default();
+        let defaults = if cfg!(test) { &none } else { config.as_ref().map(|c| &c.rule_defaults).unwrap_or(&none) };
+        let mut pb = Playbook::parse(&text)?;
+        crate::rules::apply_defaults(&mut pb, &text, defaults);
+        Ok((pb, text))
+    }
+
     /// The playbook Nitely keeps for a connected repo that has none of its own.
     pub fn stored_path(repo_name: &str) -> PathBuf {
         Playbook::stored_path_in(&crate::paths::data_dir(), repo_name)
