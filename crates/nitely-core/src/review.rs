@@ -260,7 +260,13 @@ const BASE_RULES: &str = "A defect that is already on the base as it is, which t
 this change's: report it as `- [BASE] title: file, symbol: what goes wrong` instead, with no priority, and it is listed to \
 fix on the base without holding this change.";
 
-const SEVERITIES: &str = "using P0 for data loss or security, P1 for a definite bug in normal use, P2 for an edge case, P3 for a minor issue. \
+/// Graded by what the failure costs, not by how often it happens (NIT-695): only P0 and P1 hold the
+/// change; a P2 goes to one follow-up issue, so nothing real is lost and nothing minor holds it.
+const SEVERITIES: &str = "grading each by what goes wrong, not by how likely it is: \
+P0 for data loss, a security hole or leak, money, corrupted stored state, or a core flow that stops working (cannot submit, land, launch); \
+P1 for a wrong result on the main path this change is about; \
+P2 for a wrong result on a secondary path, a display or attribution detail, the edge of a fixed cap or window, or the wording of an error path; \
+P3 for a minor issue. Only P0 and P1 hold the change; P2 findings are filed as a follow-up and do not block it. \
 A P0 or P1 must name a concrete failure: the inputs or state that lead to a wrong result, data loss, a leak or a crash, and the \
 file and line that cause it. A risk with no such failure (\"what if\", a missing guard nothing reaches) is P2 at most, however \
 serious it sounds.";

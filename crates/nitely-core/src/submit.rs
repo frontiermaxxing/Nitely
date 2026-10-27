@@ -434,6 +434,9 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     crate::verification::check_gate_authority(db,&root,&worktree,&issue.key,&out.gate)?;
     db.record_review(&out)?;
     let review_id = db.conn.last_insert_rowid();
+    if let Some(r) = &out.review {
+        file_minor_findings(db, &issue.key, r, actor)?;
+    }
     if out.review.is_some() {
         // The commit the gate and review ran on, not what HEAD is now: a commit since was not reviewed.
         let diff = diff_id(&worktree, &since, &out.commit).ok();
@@ -816,6 +819,7 @@ fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, b
     };
     db.record_review(&record)?;
     db.close_superseded_requests(&issue.key, &review.findings)?;
+    file_minor_findings(db, &issue.key, &review, actor)?;
     Ok((review, patch, stalled))
 }
 
@@ -1087,6 +1091,39 @@ fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &
         ..Default::default()
     };
     Ok(db.create_issue(&new, actor)?.key)
+}
+
+/// Files a review round's P2 findings, passing or not, in the change's one follow-up for them
+/// (NIT-695): the open one from an earlier round with the new ones added, else a new one, outside
+/// any goal so minor work holds no checkpoint. Says so on the change when it added any, and
+/// returns the follow-up's key.
+pub(crate) fn file_minor_findings(db: &mut Db, key: &str, review: &Review, actor: &Actor) -> Result<Option<String>> {
+    let minor = crate::submit_rules::minor(&review.findings);
+    let Some(issue) = db.issue(key)?.filter(|_| !minor.is_empty()) else { return Ok(None) };
+    let evidence = crate::submit_rules::minor_follow_up_evidence(key);
+    let follow_up = match db.list_issues(issue.project.as_deref(), false)?.into_iter().find(|i| i.evidence == evidence) {
+        Some(existing) => {
+            let Some(body) = crate::submit_rules::follow_up_with(&existing.body, &minor) else { return Ok(Some(existing.key)) };
+            db.edit_issue(&existing.key, None, Some(&body), actor)?;
+            existing.key
+        }
+        None => {
+            let new = crate::issues::NewIssue {
+                project: issue.project.clone().unwrap_or_default(),
+                title: format!("Minor review findings of {key}: {}", issue.title),
+                body: crate::submit_rules::minor_follow_up_body(key, &minor),
+                kind: "bug".into(),
+                source: issue.source.clone().unwrap_or_else(|| "nitely".into()),
+                evidence,
+                priority: 3,
+                allow_similar: true,
+                ..Default::default()
+            };
+            db.create_issue(&new, actor)?.key
+        }
+    };
+    db.add_note(key, &format!("The review's P2 findings do not hold this change; they are in [{follow_up}]({}).", crate::links::issue_url(&follow_up)), "note", actor)?;
+    Ok(Some(follow_up))
 }
 
 /// The note on a review run fresh, without the rounds before it, before stalled rounds escalate.
@@ -1767,6 +1804,28 @@ reason = "money logic"
             .unwrap();
     }
 
+
+    /// A P2 holds nothing (NIT-695): the change passes, and its P2 findings, from this round and
+    /// any later one, go to one follow-up outside the goal.
+    #[test]
+    fn p2_findings_pass_and_go_to_one_follow_up_across_rounds() {
+        let mut f = fixture();
+        let (issue, wt) = f.committed("Count the rows", "edge.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert_eq!(s.review.as_ref().unwrap().verdict, "pass", "{s:?}");
+        let evidence = crate::submit_rules::minor_follow_up_evidence(&issue.key);
+        let follow_ups = |f: &Fixture| f.db.list_issues(Some("NIT"), false).unwrap().into_iter().filter(|i| i.evidence == evidence).collect::<Vec<_>>();
+        let first = follow_ups(&f);
+        assert_eq!(first.len(), 1);
+        assert!(first[0].body.contains("- [P2] Edge case: edge.txt, the empty line") && first[0].goal.is_none() && first[0].priority == 3, "{:?}", first[0]);
+        // A later round that still finds it files nothing new.
+        std::fs::write(wt.join("more.txt"), "y").unwrap();
+        sh(&wt, &["add", "."]);
+        sh(&wt, &["commit", "-q", "-m", "more"]);
+        f.submit(&wt, true).unwrap();
+        let again = follow_ups(&f);
+        assert_eq!((again.len(), again[0].key.as_str(), again[0].body.matches("Edge case").count()), (1, first[0].key.as_str(), 1));
+    }
 
     #[test]
     fn basic_submission_and_land_run_only_basic_checks_and_enqueue_an_audit() {

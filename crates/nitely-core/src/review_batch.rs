@@ -323,6 +323,7 @@ fn decide(db: &mut Db, rules: &ReviewRules, w: &Waiting, mut review: Review, act
         ],
     )?;
     db.close_superseded_requests(key, &review.findings)?;
+    crate::submit::file_minor_findings(db, key, &review, actor)?;
     let by = match &review.batch {
         Some(b) => format!("{}{}, in a batch with {},", review.reviewer, noted(&review.note), b.with.join(", ")),
         None => format!("{}{}", review.reviewer, noted(&review.note)),

@@ -10,6 +10,9 @@
 //! project's most recent first-round reviews of small changes whose commits are still in the repo,
 //! reviews each in a scratch clone of the repo checked out at the change (the repo itself and its
 //! worktrees are untouched), and prints both comparisons. Development only.
+//!
+//! `--blocking` takes only first rounds that asked for changes, and `--size 1` reviews each alone
+//! with no batches: how a change to the severities moves findings that blocked (NIT-695).
 
 use anyhow::{bail, Context, Result};
 use nitely_core::playbook::{self, Playbook};
@@ -27,10 +30,11 @@ struct Args {
     size: usize,
     parallel: usize,
     out: Option<PathBuf>,
+    blocking: bool,
 }
 
 fn args() -> Result<Args> {
-    let mut a = Args { repo: PathBuf::new(), db: PathBuf::new(), project: String::new(), count: 15, size: 3, parallel: 3, out: None };
+    let mut a = Args { repo: PathBuf::new(), db: PathBuf::new(), project: String::new(), count: 15, size: 3, parallel: 3, out: None, blocking: false };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().with_context(|| format!("{flag} needs a value"));
@@ -42,11 +46,12 @@ fn args() -> Result<Args> {
             "--size" => a.size = value()?.parse()?,
             "--parallel" => a.parallel = value()?.parse()?,
             "--out" => a.out = Some(value()?.into()),
+            "--blocking" => a.blocking = true,
             other => bail!("unknown argument {other}"),
         }
     }
     if a.repo.as_os_str().is_empty() || a.db.as_os_str().is_empty() || a.project.is_empty() {
-        bail!("usage: review_replay --repo <repo> --db <nitely.db> --project <KEY> [--count 15] [--size 3] [--parallel 3] [--out replay.json]");
+        bail!("usage: review_replay --repo <repo> --db <nitely.db> --project <KEY> [--count 15] [--size 3] [--parallel 3] [--out replay.json] [--blocking]");
     }
     Ok(a)
 }
@@ -84,6 +89,9 @@ fn candidates(a: &Args, rules: &ReviewRules) -> Result<Vec<Change>> {
     for (key, title, commit, reviewer, verdict, findings) in rows {
         if out.len() == a.count {
             break;
+        }
+        if a.blocking && verdict != "changes" {
+            continue;
         }
         if git(&a.repo, &["cat-file", "-e", &format!("{commit}^{{commit}}")]).is_none() {
             continue;
@@ -158,7 +166,9 @@ fn main() -> Result<()> {
     let mut groups: Vec<Vec<usize>> = vec![];
     for reviewer in changes.iter().map(|c| c.reviewer.clone()).collect::<std::collections::BTreeSet<_>>() {
         let of: Vec<usize> = (0..changes.len()).filter(|&i| changes[i].reviewer == reviewer).collect();
-        groups.extend(of.chunks(a.size.max(2)).filter(|g| g.len() > 1).map(|g| g.to_vec()));
+        if a.size > 1 {
+            groups.extend(of.chunks(a.size).filter(|g| g.len() > 1).map(|g| g.to_vec()));
+        }
     }
     for (n, group) in groups.iter().enumerate() {
         let parts: Vec<BatchChange> = group
@@ -219,6 +229,27 @@ fn main() -> Result<()> {
     println!("A fresh review alone against the original one (how much reviews drift anyway; the first side is the original):");
     for line in Report::of(&drift).lines().into_iter().filter(|l| !l.contains("seconds") && !l.contains("Tokens")) {
         println!("  {line}");
+    }
+    // By priority, the original reviews against the fresh ones, of the changes both cover.
+    let count = |f: &[Finding], p: u8| f.iter().filter(|x| x.priority == p).count();
+    let reviewed: Vec<(&Change, &Review)> = changes.iter().zip(&singles).filter_map(|(c, s)| s.as_ref().map(|s| (c, s))).collect();
+    let orig: Vec<usize> = (0..4).map(|p| reviewed.iter().map(|(c, _)| count(&c.original.findings, p)).sum()).collect();
+    let fresh: Vec<usize> = (0..4).map(|p| reviewed.iter().map(|(_, r)| count(&r.findings, p)).sum()).collect();
+    let blocked = |v: &dyn Fn(&(&Change, &Review)) -> bool| reviewed.iter().filter(|x| v(x)).count();
+    println!("Severities over {} changes (P0/P1/P2/P3): original {:?}, fresh {:?}", reviewed.len(), orig, fresh);
+    println!(
+        "Asked for changes: original {}, fresh {}",
+        blocked(&|(c, _)| c.original.verdict == "changes"),
+        blocked(&|(_, r)| r.verdict == "changes")
+    );
+    for (c, r) in &reviewed {
+        println!("  {} {} -> {}", c.key, c.original.verdict, r.verdict);
+        for f in &c.original.findings {
+            println!("    was P{} {}", f.priority, f.text);
+        }
+        for f in &r.findings {
+            println!("    now P{} {}", f.priority, f.text);
+        }
     }
     if let Some(out) = &a.out {
         std::fs::write(out, serde_json::to_string_pretty(&kept)?)?;
