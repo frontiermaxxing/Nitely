@@ -66,6 +66,8 @@ export function stepState(id: StepId, f: SetupFacts): StepState {
       return f.projects.length > 0 ? "done" : "todo";
     case "agents": {
       if (f.agents === null || !f.agents.some((a) => a.found)) return "todo";
+      // A setup Nitely could not read, or a step the person makes by hand, is not done (NIT-693 review).
+      if (f.agents.some((a) => a.found && (a.error || a.changes.some((c) => c.action === "manual")))) return "needs";
       return agentsPending(f.agents) === 0 ? "done" : "todo";
     }
   }

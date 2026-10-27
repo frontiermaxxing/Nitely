@@ -133,7 +133,8 @@ pub fn signed_in(command: &str, ok: bool, reply: &str) -> Option<bool> {
     match command {
         "gh" if text.contains("not logged in") || text.contains("not logged into") => Some(false),
         "gh" if text.contains("logged in to") => Some(true),
-        "gh" => Some(ok),
+        // A failure it does not explain (no network, say) says nothing about the sign-in (NIT-693 review).
+        "gh" => ok.then_some(true),
         "codex" if text.contains("not logged in") => Some(false),
         "codex" if text.contains("logged in") => Some(true),
         _ => None,
@@ -307,7 +308,8 @@ mod tests {
 
         assert_eq!(signed_in("gh", true, "github.com\n  - Logged in to github.com account sam (keyring)\n"), Some(true));
         assert_eq!(signed_in("gh", false, "You are not logged into any GitHub hosts. To log in, run: gh auth login\n"), Some(false));
-        assert_eq!(signed_in("gh", false, "error connecting to api.github.com\n"), Some(false), "gh's own exit code when it says neither");
+        assert_eq!(signed_in("gh", false, "error connecting to api.github.com\n"), None, "offline: unknown, never signed out");
+        assert_eq!(signed_in("gh", true, "github.com\n"), Some(true), "gh's own exit code when it says neither");
         assert_eq!(signed_in("codex", true, "Logged in using ChatGPT\n"), Some(true));
         assert_eq!(signed_in("codex", false, "Not logged in\n"), Some(false));
         assert_eq!(signed_in("codex", false, "error: unrecognized subcommand 'login'\n"), None, "an older codex says nothing either way");

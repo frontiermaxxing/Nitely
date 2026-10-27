@@ -1078,12 +1078,25 @@ pub fn shell_free_command(program: &str) -> Command {
 /// `git` stays the fallback, and is what every other platform runs.
 pub fn git_program() -> &'static std::ffi::OsStr {
     static GIT: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
-    GIT.get_or_init(|| if cfg!(windows) { resolve_real_git().unwrap_or_else(|| "git".into()) } else { "git".into() }).as_os_str()
+    if !cfg!(windows) {
+        return std::ffi::OsStr::new("git");
+    }
+    if let Some(git) = GIT.get() {
+        return git.as_os_str();
+    }
+    // Only a git found is kept: one installed while Nitely runs is found on the next call
+    // (NIT-693 review).
+    match resolve_real_git() {
+        Some(git) => GIT.get_or_init(|| git).as_os_str(),
+        None => std::ffi::OsStr::new("git"),
+    }
 }
 
 fn resolve_real_git() -> Option<PathBuf> {
-    let path = std::env::var_os("PATH")?;
-    let found = std::env::split_paths(&path).map(|d| d.join("git.exe")).find(|p| p.is_file())?;
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    // PATH's git, else where Git's installer puts it: a process started before the install has the
+    // old PATH (tools.rs).
+    let found = std::env::split_paths(&path).map(|d| d.join("git.exe")).find(|p| p.is_file()).or_else(|| crate::tools::find("git"))?;
     if let Some(real) = real_git_beside(&found, |p| p.is_file()) {
         return Some(real);
     }

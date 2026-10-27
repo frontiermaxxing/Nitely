@@ -198,6 +198,17 @@ pub fn install(tool: &str, line: &mut dyn FnMut(&str)) -> Result<crate::tools::T
     if !status.success() && now.path.is_none() {
         bail!("{} exited with {status}, and {} is still not installed", plan.shown, now.name);
     }
+    // The installer changed PATH for new processes only: put its folder on this one's, so what
+    // Nitely starts next (git, an agent) finds the tool without a restart (NIT-693 review).
+    if let Some(dir) = now.path.as_deref().and_then(|p| std::path::Path::new(p).parent()) {
+        let path = std::env::var_os("PATH").unwrap_or_default();
+        let dirs: Vec<std::path::PathBuf> = std::env::split_paths(&path).collect();
+        if !dirs.iter().any(|d| d == dir) {
+            if let Ok(joined) = std::env::join_paths(std::iter::once(dir.to_path_buf()).chain(dirs)) {
+                std::env::set_var("PATH", joined);
+            }
+        }
+    }
     Ok(now)
 }
 

@@ -34,6 +34,9 @@ test("NIT-690: a step is done when what it sets up reports ready, and needs the 
   assert.equal(stepStates(facts({ tools: ready.map((t) => ({ ...t, signed_in: t.command === "claude" ? null : t.signed_in === false ? null : t.signed_in })) })).signin, "todo");
   // An agent with changes still to make leaves Agents not done.
   assert.equal(stepStates(facts({ agents: [agent("Codex", true, 1)] })).agents, "todo");
+  // A broken config, or a change the person makes by hand, needs the person: never done (NIT-693 review).
+  assert.equal(stepStates(facts({ agents: [{ ...agent("Codex", true, 0), error: "config.toml is not valid TOML" }] })).agents, "needs");
+  assert.equal(stepStates(facts({ agents: [{ ...agent("Codex", true, 0), changes: [{ target: "~/.codex", action: "manual" as const, why: "", after: "" }] }] })).agents, "needs");
 });
 
 test("NIT-690: reopened from Settings it opens on the first step not done; on launch, where it was left", () => {

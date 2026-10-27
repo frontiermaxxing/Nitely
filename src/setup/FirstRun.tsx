@@ -145,6 +145,8 @@ export function FirstRun(props: {
     try {
       const after = await invoke<Tool>("install_tool", { tool });
       setTools((all) => (all ? all.map((t) => (t.command === tool ? after : t)) : all));
+      // A new agent gets its setup planned now, so the Agents step offers it (NIT-693 review).
+      if (tool === "claude" || tool === "codex") props.onAgentsChanged();
       setInstalls((all) => {
         const rest = { ...all };
         delete rest[tool];
