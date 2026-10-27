@@ -264,7 +264,7 @@ fix on the base without holding this change.";
 /// change; a P2 goes to one follow-up issue, so nothing real is lost and nothing minor holds it.
 const SEVERITIES: &str = "grading each by what goes wrong, not by how likely it is: \
 P0 for data loss, a security hole or leak, money, corrupted stored state, or a core flow that stops working (cannot submit, land, launch); \
-P1 for a wrong result on the main path this change is about; \
+P1 for a wrong result on the main path this change is about, or a build, test or CI check the project runs that now fails on any platform; \
 P2 for a wrong result on a secondary path, a display or attribution detail, the edge of a fixed cap or window, or the wording of an error path; \
 P3 for a minor issue. Only P0 and P1 hold the change; P2 findings are filed as a follow-up and do not block it. \
 A P0 or P1 must name a concrete failure: the inputs or state that lead to a wrong result, data loss, a leak or a crash, and the \
