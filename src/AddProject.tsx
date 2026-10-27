@@ -240,12 +240,21 @@ function FirstCommit(props: { root: string; branch: string; onMade: (said: strin
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    // Another folder's preview never stays up, nor arrives late, while this one's loads: a commit
+    // must use the exclusions of the folder it commits (NIT-685 review).
+    let current = true;
+    setPreview(null);
+    setError(null);
     invoke<FirstCommitPreview>("first_commit_preview", { path: props.root })
       .then((p) => {
+        if (!current) return;
         setPreview(p);
         setKept(new Set(p.gitignore ?? p.flagged.map((f) => f.path)));
       })
-      .catch((e) => setError(String(e)));
+      .catch((e) => current && setError(String(e)));
+    return () => {
+      current = false;
+    };
   }, [props.root]);
 
   const toggle = (item: string) =>
@@ -338,7 +347,7 @@ function FirstCommit(props: { root: string; branch: string; onMade: (said: strin
           )}
           {preview.needs_identity && <p className="muted small">Git has no name and email yet; they are set for this repo only.</p>}
           <div className="actions">
-            <button className="btn primary" disabled={busy || identityMissing || preview.files === 0} onClick={commit}>
+            <button className="btn primary" disabled={busy || identityMissing || (preview.files === 0 && items.every((i) => kept.has(i)))} onClick={commit}>
               Make the first commit
             </button>
           </div>

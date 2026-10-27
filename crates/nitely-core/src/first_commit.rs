@@ -59,9 +59,9 @@ pub fn ignore_line(path: &str, reason: Reason) -> String {
     let name = path.rsplit('/').next().unwrap_or(path);
     let lower = name.to_lowercase();
     match reason {
-        Reason::Build => format!("{name}/"),
-        Reason::Large => format!("/{path}"),
-        Reason::Secret if name != lower => format!("/{path}"),
+        Reason::Build => format!("{}/", literal(name)),
+        Reason::Large => format!("/{}", literal(path)),
+        Reason::Secret if name != lower => format!("/{}", literal(path)),
         Reason::Secret => {
             if lower == ".env" {
                 ".env".into()
@@ -70,12 +70,25 @@ pub fn ignore_line(path: &str, reason: Reason) -> String {
             } else if let Some(ext) = [".pem", ".key", ".p12", ".pfx"].iter().find(|e| lower.ends_with(**e)) {
                 format!("*{ext}")
             } else if lower.starts_with("id_") {
-                format!("{}*", name.split('.').next().unwrap_or(name))
+                format!("{}*", literal(name.split('.').next().unwrap_or(name)))
             } else {
-                format!("/{path}")
+                format!("/{}", literal(path))
             }
         }
     }
+}
+
+/// `path` as a .gitignore line that matches only itself: git's pattern characters (`*`, `?`, `[`,
+/// `]`, `\`) escaped, and a leading `!` or `#` too, which would otherwise negate or comment the line.
+pub fn literal(path: &str) -> String {
+    let mut out = String::new();
+    for (i, c) in path.chars().enumerate() {
+        if matches!(c, '*' | '?' | '[' | ']' | '\\') || (i == 0 && matches!(c, '!' | '#')) {
+            out.push('\\');
+        }
+        out.push(c);
+    }
+    out
 }
 
 /// The lines that keep environment templates in when `.env.*` keeps the real ones out: a sample is
@@ -104,6 +117,25 @@ pub struct Preview {
     pub needs_identity: bool,
     /// The branch the commit goes on.
     pub branch: String,
+}
+
+/// The .gitignore proposed for `flagged`: name patterns first, then the lines that keep environment
+/// templates in, then each file kept out by its own path. Git takes the last line that matches, so
+/// a template that is itself flagged (over 50 MB, say) stays out (NIT-685 review).
+pub fn proposed_gitignore(flagged: &[Flagged]) -> Vec<String> {
+    let (mut patterns, mut paths): (Vec<String>, Vec<String>) = (Vec::new(), Vec::new());
+    for f in flagged {
+        let line = ignore_line(&f.path, f.reason);
+        let list = if line.starts_with('/') { &mut paths } else { &mut patterns };
+        if !list.contains(&line) {
+            list.push(line);
+        }
+    }
+    if patterns.iter().any(|l| l == ".env.*") {
+        patterns.extend(ENV_TEMPLATES.iter().map(|l| l.to_string()));
+    }
+    patterns.extend(paths);
+    patterns
 }
 
 /// What the first commit of the repo at `root` would hold. Refuses a repo that has commits.
@@ -148,19 +180,7 @@ pub fn preview(root: &Path) -> Result<Preview> {
     let mut largest: Vec<(String, u64)> = top.into_iter().collect();
     largest.sort_by(|a, b| b.1.cmp(&a.1));
     largest.truncate(5);
-    let gitignore = existing.is_none().then(|| {
-        let mut lines: Vec<String> = Vec::new();
-        for f in &flagged {
-            let line = ignore_line(&f.path, f.reason);
-            if !lines.contains(&line) {
-                lines.push(line);
-            }
-        }
-        if lines.iter().any(|l| l == ".env.*") {
-            lines.extend(ENV_TEMPLATES.iter().map(|l| l.to_string()));
-        }
-        lines
-    });
+    let gitignore = existing.is_none().then(|| proposed_gitignore(&flagged));
     let identity = |key: &str| git(root, &["config", key]).map(|v| !v.trim().is_empty()).unwrap_or(false);
     Ok(Preview { files, bytes, largest, flagged, gitignore, needs_identity: !(identity("user.name") && identity("user.email")), branch })
 }
@@ -189,7 +209,8 @@ pub fn make(root: &Path, gitignore: Option<&[String]>, exclude: &[String], ident
     // Whatever was staged before (a `.env` added by hand, say) goes back out of the index, so the
     // .gitignore and `exclude` alone decide what the commit holds (NIT-685 review). The repo has
     // no commit, so nothing else is lost: the files stay as they are on disk.
-    git(root, &["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", "."])?;
+    // read-tree empties it whatever state each entry is in (staged, then edited again, say).
+    git(root, &["read-tree", "--empty"])?;
     git(root, &["add", "--all"])?;
     for p in exclude {
         git(root, &["rm", "-r", "--cached", "--quiet", "--ignore-unmatch", "--", p])?;
@@ -227,6 +248,13 @@ mod tests {
         // A name not in lowercase is kept out by its own path, which matches whatever the case rules.
         assert_eq!(ignore_line(".ENV", Reason::Secret), "/.ENV");
         assert_eq!(ignore_line("deploy/server.PEM", Reason::Secret), "/deploy/server.PEM");
+        // A path line matches only that path: git's pattern characters are escaped.
+        assert_eq!(ignore_line("certs/[prod]/server.PEM", Reason::Secret), r"/certs/\[prod\]/server.PEM");
+        assert_eq!(literal("!important*.bin"), r"\!important\*.bin");
+        // A flagged template stays out: its own path line comes after the template exceptions.
+        let flag = |path: &str, reason| Flagged { path: path.into(), reason, bytes: 0 };
+        let lines = proposed_gitignore(&[flag(".env.example", Reason::Large), flag(".env.local", Reason::Secret)]);
+        assert_eq!(lines.last().map(String::as_str), Some("/.env.example"), "{lines:?}");
         assert_eq!(ignore_line("deploy/server.pem", Reason::Secret), "*.pem");
         assert_eq!(ignore_line("id_rsa.pub", Reason::Secret), "id_rsa*");
         assert_eq!(ignore_line("assets/video.mp4", Reason::Large), "/assets/video.mp4");
@@ -245,8 +273,10 @@ mod tests {
         std::fs::write(dir.join(".env.local"), "TOKEN=2").unwrap();
         std::fs::write(dir.join(".env.example"), "TOKEN=").unwrap();
         git(&dir, &["init", "--quiet", "--initial-branch=main"]).unwrap();
-        // A secret the person staged before connecting stays out all the same.
-        git(&dir, &["add", "--force", ".env"]).unwrap();
+        // A secret the person staged before connecting stays out all the same, and a file staged
+        // and then edited again does not stop the commit.
+        git(&dir, &["add", "--force", ".env", "src/main.rs"]).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "fn main() { println!(\"edited\"); }\n").unwrap();
         // Isolated from the machine's own identity, so the identity step is exercised.
         git(&dir, &["config", "user.name", ""]).unwrap();
         git(&dir, &["config", "user.email", ""]).unwrap();
