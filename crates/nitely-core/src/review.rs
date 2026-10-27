@@ -677,6 +677,7 @@ anything. Start each finding with the key of the change it is about.\n{changes}\
             let l = l.trim().to_uppercase();
             l.starts_with("VERDICT:")
                 || l.trim_start_matches(['-', '*', ' ']).starts_with("PREVIOUS ")
+                || l.trim_start_matches(['-', '*', ' ']).starts_with("REQUIREMENT ")
                 || self.flags.iter().any(|f| l.starts_with(&format!("{}:", f.name)))
         };
         let summary = text

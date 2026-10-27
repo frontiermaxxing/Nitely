@@ -977,14 +977,20 @@ fn waits_for_land_batch(
 /// other changes, as examples of what is not a P0/P1 here.
 pub(crate) fn review_context(db: &Db, issue: &IssueRecord, gate: &GateResult) -> Result<String> {
     let mut c = String::new();
-    let body: String = issue.body.chars().take(2500).collect();
-    c.push_str(&format!(
-        "What the change is for, its issue {} \"{}\":\n{}\n\nFirst check that the change does what the issue asks (its \"done when\", \
-when it has one): a gap there is a finding like any other, and comes before line-level problems.\n",
-        issue.key,
-        issue.title,
-        body.trim()
-    ));
+    // The whole body, so the first round's list of requirements is complete (NIT-696); only one
+    // past any sensible issue is cut, and the reviewer is told how much.
+    let body: String = issue.body.chars().take(BODY_CHARS).collect();
+    let cut = issue.body.chars().count().saturating_sub(BODY_CHARS);
+    let cut = if cut > 0 { format!("\n[{cut} more characters of the issue are cut here.]") } else { String::new() };
+    c.push_str(&format!("What the change is for, its issue {} \"{}\":\n{}{cut}\n\n", issue.key, issue.title, body.trim()));
+    let last = db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| (r.ts, r.after_event));
+    if last.is_none() {
+        // Every requirement at once in the first round, so spec gaps do not arrive one per round;
+        // later rounds treat a gap in code this round saw as a follow-up (NIT-704).
+        c.push_str(REQUIREMENTS);
+    } else {
+        c.push_str("First check that the change does what the issue asks (its \"done when\", when it has one): a gap there is a finding like any other, and comes before line-level problems.\n");
+    }
     // A step skipped here passed on this same tree before (lanes keep that), so it counts as run.
     let gate: Vec<String> = gate.results.iter().filter(|r| r.ok).map(|r| format!("`{}`", r.command)).collect();
     if !gate.is_empty() {
@@ -992,7 +998,6 @@ when it has one): a gap there is a finding like any other, and comes before line
     }
     // Notes since the last review: after the event it saw (NIT-544), or, for an older review, from
     // its second on.
-    let last = db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| (r.ts, r.after_event));
     if let Some((since, seen)) = last {
         let notes: Vec<String> = db
             .conn
@@ -1125,6 +1130,16 @@ pub(crate) fn file_minor_findings(db: &mut Db, key: &str, review: &Review, actor
     db.add_note(key, &format!("The review's P2 findings do not hold this change; they are in [{follow_up}]({}).", crate::links::issue_url(&follow_up)), "note", actor)?;
     Ok(Some(follow_up))
 }
+
+/// How much of an issue's body the reviewer is given: all of any ordinary issue (NIT-696).
+const BODY_CHARS: usize = 20_000;
+
+/// What the first review of a change does before anything else (NIT-696): checks every requirement
+/// of the issue at once, each one not met a finding in that round.
+pub(crate) const REQUIREMENTS: &str = "This is the change's first review. Before anything else, list every requirement the issue \
+states (each thing it says is wanted or must hold, its \"done when\" included), one per line, as `REQUIREMENT <n>: met <file>, \
+<symbol>` or `REQUIREMENT <n>: not met: <what is missing>`. Report each one not met as a finding too, in this round, graded \
+like any other: later rounds treat a gap in code this round already saw as a follow-up, not a blocker.\n";
 
 /// The note on a review run fresh, without the rounds before it, before stalled rounds escalate.
 const FRESH: &str = "fresh, without the earlier rounds";
@@ -2237,6 +2252,35 @@ exit 0
         let c = review_context(&f.db, &issue, &gate).unwrap();
         assert!(c.contains("report it in exactly these words") && c.contains(&format!("- [P1] {words}\n")), "{c}");
         assert!(!c.contains("The agent's reasoning."), "{c}");
+    }
+
+    /// The first review is given the whole issue and checks every requirement in it at once; a
+    /// later round is not asked again (NIT-696).
+    #[test]
+    fn the_first_review_checks_every_requirement_of_the_whole_issue() {
+        let mut f = fixture();
+        let body = format!("Wanted:
+- Rows are counted.
+{}
+- The last requirement: totals are shown.", "Background. ".repeat(400));
+        let issue = f.db.create_issue(&NewIssue { body, ..new("Totals") }, &f.actor).unwrap();
+        let gate = GateResult { mode_authority: None, plan: None, skipped: None, passed: true, commit: "c".into(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
+        let c = review_context(&f.db, &issue, &gate).unwrap();
+        assert!(c.contains("The last requirement: totals are shown.") && c.contains(REQUIREMENTS), "{c}");
+        let long = f.db.create_issue(&NewIssue { body: "x".repeat(BODY_CHARS + 10), ..new("Long") }, &f.actor).unwrap();
+        assert!(review_context(&f.db, &long, &gate).unwrap().contains("[10 more characters of the issue are cut here.]"));
+        // Its reply's requirement lines are not taken for its summary.
+        let r = crate::review::ReviewRules::default()
+            .parse("codex", "REQUIREMENT 1: met src/a.rs, count
+REQUIREMENT 2: not met: no totals
+Totals are missing.
+- [P1] No totals: src/a.rs:3, show: nothing is shown
+VERDICT: findings
+", 1, None, None)
+            .unwrap();
+        assert_eq!((r.summary.as_str(), r.verdict.as_str()), ("Totals are missing.", "changes"));
+        f.db.conn.execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, ts) VALUES (?1, 'p', 'c', 'codex', 'changes', 'agent', 1)", [&issue.key]).unwrap();
+        assert!(!review_context(&f.db, &issue, &gate).unwrap().contains(REQUIREMENTS));
     }
 
     #[test]
