@@ -13,6 +13,10 @@
 //!
 //! `--blocking` takes only first rounds that asked for changes, and `--size 1` reviews each alone
 //! with no batches: how a change to the severities moves findings that blocked (NIT-695).
+//!
+//! `--rounds 5` replays no reviewer: it takes the recorded rounds of changes reviewed five times or
+//! more and counts the re-reviews that blocked as recorded, and those that would block where a new
+//! P1 holds the change only on a line changed since the round before (NIT-704).
 
 use anyhow::{bail, Context, Result};
 use nitely_core::playbook::{self, Playbook};
@@ -31,10 +35,11 @@ struct Args {
     parallel: usize,
     out: Option<PathBuf>,
     blocking: bool,
+    rounds: Option<usize>,
 }
 
 fn args() -> Result<Args> {
-    let mut a = Args { repo: PathBuf::new(), db: PathBuf::new(), project: String::new(), count: 15, size: 3, parallel: 3, out: None, blocking: false };
+    let mut a = Args { repo: PathBuf::new(), db: PathBuf::new(), project: String::new(), count: 15, size: 3, parallel: 3, out: None, blocking: false, rounds: None };
     let mut it = std::env::args().skip(1);
     while let Some(flag) = it.next() {
         let mut value = || it.next().with_context(|| format!("{flag} needs a value"));
@@ -47,11 +52,12 @@ fn args() -> Result<Args> {
             "--parallel" => a.parallel = value()?.parse()?,
             "--out" => a.out = Some(value()?.into()),
             "--blocking" => a.blocking = true,
+            "--rounds" => a.rounds = Some(value()?.parse()?),
             other => bail!("unknown argument {other}"),
         }
     }
     if a.repo.as_os_str().is_empty() || a.db.as_os_str().is_empty() || a.project.is_empty() {
-        bail!("usage: review_replay --repo <repo> --db <nitely.db> --project <KEY> [--count 15] [--size 3] [--parallel 3] [--out replay.json] [--blocking]");
+        bail!("usage: review_replay --repo <repo> --db <nitely.db> --project <KEY> [--count 15] [--size 3] [--parallel 3] [--out replay.json] [--blocking] [--rounds 5]");
     }
     Ok(a)
 }
@@ -128,8 +134,68 @@ fn checkout(repo: &Path, scratch: &Path, c: &Change) -> Result<PathBuf> {
     Ok(dir)
 }
 
+/// The recorded re-reviews of changes reviewed `min` times or more, graded as recorded and as a
+/// re-review is now (NIT-704): a carried P0/P1 and a new P0 still block; a new P1 blocks only when
+/// it cites a line changed since the round before.
+fn regrade_rounds(a: &Args, min: usize) -> Result<()> {
+    let db = Connection::open_with_flags(&a.db, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+    let mut stmt = db.prepare(
+        "SELECT issue_key, commit_sha, verdict, findings FROM review WHERE reviewer != '' AND issue_key LIKE ?1 || '-%' ORDER BY issue_key, ts, id",
+    )?;
+    let rows: Vec<(String, String, String, String)> = stmt.query_map([&a.project], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?.collect::<rusqlite::Result<_>>()?;
+    let mut by_issue: Vec<(String, Vec<(String, String, Vec<Finding>)>)> = vec![];
+    for (key, commit, verdict, findings) in rows {
+        let findings: Vec<Finding> = serde_json::from_str(&findings).unwrap_or_default();
+        match by_issue.last_mut() {
+            Some((k, rounds)) if *k == key => rounds.push((commit, verdict, findings)),
+            _ => by_issue.push((key, vec![(commit, verdict, findings)])),
+        }
+    }
+    let (mut changes, mut before, mut after, mut rereviews, mut unknown) = (0, 0, 0, 0, 0);
+    let (mut new_p1s, mut kept_p1s, mut by_carried) = (0, 0, 0);
+    for (key, rounds) in by_issue.iter().filter(|(_, r)| r.len() >= min) {
+        changes += 1;
+        let mut line = vec![];
+        for pair in rounds.windows(2) {
+            let ((prev, _, _), (commit, verdict, findings)) = (&pair[0], &pair[1]);
+            rereviews += 1;
+            let blocked = verdict == "changes";
+            before += blocked as usize;
+            let carried = findings.iter().any(|f| f.carried && f.priority <= 1);
+            let p0 = findings.iter().any(|f| !f.carried && f.priority == 0);
+            let new_p1: Vec<&str> = findings.iter().filter(|f| !f.carried && f.priority == 1).map(|f| f.text.as_str()).collect();
+            let blocks = match nitely_core::review::cite_changed_between(&a.repo, prev, commit, &new_p1) {
+                // Accepted findings and the like turned some recorded `changes` into a pass: keep those.
+                Some(cited) => {
+                    new_p1s += cited.len();
+                    kept_p1s += cited.iter().filter(|c| **c).count();
+                    by_carried += (blocked && carried) as usize;
+                    blocked && (carried || p0 || cited.iter().any(|c| *c))
+                }
+                None => {
+                    unknown += 1;
+                    blocked
+                }
+            };
+            after += blocks as usize;
+            line.push(match (blocked, blocks) {
+                (true, true) => "X",
+                (true, false) => "x>p",
+                _ => ".",
+            });
+        }
+        println!("  {key} ({} rounds): {}", rounds.len(), line.join(" "));
+    }
+    println!("Of the re-reviews checked: {new_p1s} new P1s, {kept_p1s} cite a line changed since the round before; {by_carried} blocked rounds hold a carried P0/P1 the rule leaves as it is");
+    println!("{changes} changes reviewed {min}+ times, {rereviews} re-reviews: {before} blocked as recorded, {after} would block now ({unknown} could not be checked: a rebase or a commit no longer in the repo, counted as recorded)");
+    Ok(())
+}
+
 fn main() -> Result<()> {
     let a = args()?;
+    if let Some(min) = a.rounds {
+        return regrade_rounds(&a, min);
+    }
     let rules = Playbook::load(&a.repo)?.review;
     let changes = candidates(&a, &rules)?;
     eprintln!("{} small first-round changes to replay", changes.len());

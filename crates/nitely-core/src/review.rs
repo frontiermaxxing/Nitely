@@ -271,6 +271,21 @@ A P0 or P1 must name a concrete failure: the inputs or state that lead to a wron
 file and line that cause it. A risk with no such failure (\"what if\", a missing guard nothing reaches) is P2 at most, however \
 serious it sounds.";
 
+/// What a re-review may hold the change for (NIT-704): a P0 anywhere, or a P1 whose cause, or what
+/// made it reachable, is a line changed since the reviewed commit, cited as file:line. The parser
+/// files anything else as a P2 (`changed_since`), so rounds converge on what each one changed.
+fn since_rule(commit: &str) -> String {
+    format!(
+        "The rest of the branch was already reviewed. A new finding holds this change only if it is P0, or a P1 that cites \
+as `file:line` a line the author added or changed since {commit} that causes it or made it reachable. \
+Anything else you find is filed as a follow-up and does not hold the change: report it at P2."
+    )
+}
+
+/// Appended to a re-review's new P1 that cites no line changed since the reviewed commit, which
+/// goes to the follow-up at P2 instead of holding the change (NIT-704).
+const OLD_CODE: &str = " (in code the last round already reviewed: a follow-up, not a blocker)";
+
 /// What an answer about a previous finding must hold, after its format (NIT-214).
 const PREVIOUS_RULES: &str = "where file, line and code are from the current branch, the code is at that line, and <how> says in a few words how \
 that code still causes the problem the finding describes. The code a finding cites may have moved or gone, and a fix \
@@ -543,12 +558,7 @@ anything. Start each finding with the key of the change it is about.\n{changes}\
             p.push_str(&accepted_told(&prev.accepted));
         }
         if let Some(prev) = previous.filter(|p| p.in_history) {
-            p.push_str(&format!(
-                "\nThen review what changed since {c} and report any defect in it. The rest of the branch was already \
-reviewed: raise something new there only if it is P0 or P1, and then say in the finding why that review missed it \
-(for example, a change since made it reachable).\n",
-                c = prev.commit
-            ));
+            p.push_str(&format!("\nThen review what changed since {c} and report any defect in it. {}\n", since_rule(&prev.commit), c = prev.commit));
         }
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
@@ -609,6 +619,15 @@ reviewed: raise something new there only if it is P0 or P1, and then say in the 
         for f in findings.iter_mut().filter(|f| f.priority <= 1 && !names_a_file(&f.text, code.as_ref())) {
             f.raised_as = Some(f.priority);
             f.priority = 2;
+        }
+        // In a re-review, a new P1 holds the change only on a line changed since that round (NIT-704).
+        if let (Some(prev), Some(code)) = (previous.filter(|p| p.in_history), &code) {
+            if let Some(changed) = changed_between(&code.root, &prev.commit, "HEAD") {
+                for f in findings.iter_mut().filter(|f| f.priority == 1 && !cites_changed(&f.text, code, &changed)) {
+                    f.priority = 2;
+                    f.text.push_str(OLD_CODE);
+                }
+            }
         }
         let statuses = parse_previous(text);
         let previous: Vec<Recheck> = previous
@@ -689,14 +708,14 @@ Do not edit anything.\n",
                 Some(prev) if prev.in_history && base_merged_since(&c.worktree, &c.base, &prev.commit, &c.head) => p.push_str(&format!(
                     "It was reviewed before, at commit {c0}, and {b} has been merged into it since: code the merge brought from {b} \
 is context, not this change, so raise nothing about it. Compare the diff above with `git diff {b}...{c0}`, the change as \
-it was reviewed, to see what changed since. The rest was already reviewed: raise something new there only if it is P0 or \
-P1, and then say in the finding why that review missed it.\n",
+it was reviewed, to see what changed since. {rule}\n",
+                    rule = since_rule(&prev.commit),
                     c0 = prev.commit,
                     b = c.base
                 )),
                 Some(prev) if prev.in_history => p.push_str(&format!(
-                    "It was reviewed before, at commit {c0}: `git diff {c0} {h}` is what changed since. The rest was already \
-reviewed: raise something new there only if it is P0 or P1, and then say in the finding why that review missed it.\n",
+                    "It was reviewed before, at commit {c0}: `git diff {c0} {h}` is what changed since. {rule}\n",
+                    rule = since_rule(&prev.commit),
                     c0 = prev.commit,
                     h = c.head
                 )),
@@ -1146,6 +1165,10 @@ pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
         let word = word.trim_end_matches(['.', ':']);
         let (path, line) = match word.rsplit_once(':') {
             Some((p, n)) if !n.is_empty() && n.chars().all(|c| c.is_ascii_digit()) => (p, n.parse().ok()),
+            // A range, `file.rs:393-405`, cites its first line.
+            Some((p, n)) if n.split_once(['-', '\u{2013}']).is_some_and(|(a, b)| !a.is_empty() && !b.is_empty() && (a.to_string() + b).chars().all(|c| c.is_ascii_digit())) => {
+                (p, n.split(['-', '\u{2013}']).next().and_then(|a| a.parse().ok()))
+            }
             _ => (word, None),
         };
         // A file name: a dot, then a short extension of letters; with a line number, any name
@@ -1161,6 +1184,44 @@ pub(crate) fn citations(text: &str) -> Vec<(String, Option<usize>)> {
         }
     }
     out
+}
+
+/// The lines added or changed from `from` to `to` in the repo at `root` (`git diff -U0`): for each
+/// file, the line ranges it has at `to`. A deletion counts as the line it left. None when `from`
+/// is not behind `to`, so nothing can be told apart.
+fn changed_between(root: &Path, from: &str, to: &str) -> Option<std::collections::HashMap<String, Vec<(usize, usize)>>> {
+    crate::playbook::git(root, &["merge-base", "--is-ancestor", from, to]).ok()?;
+    let diff = crate::playbook::git(root, &["diff", "-U0", "--no-color", "--no-ext-diff", from, to]).ok()?;
+    let mut out: std::collections::HashMap<String, Vec<(usize, usize)>> = std::collections::HashMap::new();
+    let mut file: Option<String> = None;
+    for line in diff.lines() {
+        if let Some(path) = line.strip_prefix("+++ ") {
+            file = path.strip_prefix("b/").map(str::to_string);
+        } else if let (Some(f), Some(hunk)) = (&file, line.strip_prefix("@@ ")) {
+            // `@@ -a,b +c,d @@`: the new side starts at c and runs d lines (one when d is left out).
+            let Some(new) = hunk.split_whitespace().find_map(|w| w.strip_prefix('+')) else { continue };
+            let (start, len) = new.split_once(',').map_or((new, "1"), |(s, l)| (s, l));
+            let (Ok(start), Ok(len)) = (start.parse::<usize>(), len.parse::<usize>()) else { continue };
+            out.entry(f.clone()).or_default().push((start, start + len.max(1) - 1));
+        }
+    }
+    Some(out)
+}
+
+/// For recorded re-reviews (examples/review_replay.rs, NIT-704): whether each finding text cites a
+/// line changed from `from` to `to` in the repo at `root`, as the parser now judges a re-review's
+/// new P1. None when `from` is not behind `to`, where the rule does not apply.
+pub fn cite_changed_between(root: &Path, from: &str, to: &str, texts: &[&str]) -> Option<Vec<bool>> {
+    let changed = changed_between(root, from, to)?;
+    let code = CurrentCode::new(root);
+    Some(texts.iter().map(|t| cites_changed(t, &code, &changed)).collect())
+}
+
+/// Whether `text` cites, as file:line, a line in (or within three lines of) what `changed` holds.
+fn cites_changed(text: &str, code: &CurrentCode, changed: &std::collections::HashMap<String, Vec<(usize, usize)>>) -> bool {
+    citations(text).into_iter().filter_map(|(p, line)| Some((code.resolve(&p)?, line?))).any(|(f, line)| {
+        changed.get(&f).is_some_and(|ranges| ranges.iter().any(|&(a, b)| line + 3 >= a && line <= b + 3))
+    })
 }
 
 /// The `backticked` pieces of a text.
@@ -1464,13 +1525,13 @@ mod tests {
         assert!(p.contains("git diff abc1234 HEAD"), "{p}");
         assert!(p.contains("1. [P1] Drops the last row: src/a.rs, f\n2. [P2] Empty name"), "{p}");
         assert!(p.contains("`PREVIOUS <n>: fixed` or `PREVIOUS <n>: open <file>:<line>"), "{p}");
-        assert!(p.contains("only if it is P0 or P1"), "{p}");
+        assert!(p.contains("holds this change only if it is P0"), "{p}");
         assert!(p.contains("exactly these 2 lines:\nVERDICT: <findings or clean>\nMONEY_OR_RELEASE: <yes or no>"));
 
         // After a rebase there is no diff since that round: check the findings, review it all.
         let rebased = rules().prompt("main", Some(&previous(false)));
         assert!(rebased.contains("rebased since") && rebased.contains("PREVIOUS <n>"), "{rebased}");
-        assert!(!rebased.contains("git diff abc1234") && !rebased.contains("only if it is P0 or P1"), "{rebased}");
+        assert!(!rebased.contains("git diff abc1234") && !rebased.contains("holds this change only if it is P0"), "{rebased}");
 
         // A clean previous round leaves no checklist, but old code still only takes P0 or P1.
         // Findings the person accepted are told apart, not checked again.
@@ -1485,7 +1546,7 @@ mod tests {
         assert!(!p.contains("PREVIOUS <n>"), "{p}");
         let clean = PreviousRound { passed_on: None, findings: vec![], ..previous(true) };
         let p = rules().prompt("main", Some(&clean));
-        assert!(!p.contains("PREVIOUS") && p.contains("only if it is P0 or P1"), "{p}");
+        assert!(!p.contains("PREVIOUS") && p.contains("holds this change only if it is P0"), "{p}");
     }
 
     #[test]
@@ -1589,6 +1650,40 @@ mod tests {
         let review = rules().parse("codex", "PREVIOUS 1: base\nVERDICT: clean\nMONEY_OR_RELEASE: no", 1, Some(&carried), Some(&dir)).unwrap();
         assert_eq!((review.findings.len(), review.outside.len(), review.verdict.as_str()), (0, 1, "pass"));
 
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// A re-review holds the change for a new P1 only on a line changed since the round before, and
+    /// for a P0 anywhere; the rest goes to the follow-up at P2 (NIT-704).
+    #[test]
+    fn a_re_review_blocks_on_what_changed_since_or_a_p0() {
+        let dir = crate::paths::unique_temp("nitely-since", "");
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        let git = |args: &[&str]| crate::playbook::git(&dir, args).unwrap();
+        git(&["init", "-q"]);
+        let old: String = (1..=40).map(|n| format!("let a{n} = {n};\n")).collect();
+        std::fs::write(dir.join("src/a.rs"), &old).unwrap();
+        git(&["add", "."]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "one"]);
+        let reviewed = git(&["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(dir.join("src/a.rs"), old.replace("let a30 = 30;", "let a30 = 31;")).unwrap();
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qam", "two"]);
+        let prev = PreviousRound { passed_on: None, commit: reviewed, findings: vec![], in_history: true, accepted: vec![] };
+        let text = "- [P1] Off by one: src/a.rs:31, a30: the total skips a row\n\
+- [P1] Old overflow: src/a.rs:5, a5: wraps past 255\n\
+- [P1] Range: src/a.rs:28-33, a30: wrong sum\n\
+- [P0] Leaks the key: src/a.rs:2, a2: logs the token\n\
+VERDICT: findings\nMONEY_OR_RELEASE: no";
+        let r = rules().parse("codex", text, 1, Some(&prev), Some(&dir)).unwrap();
+        let got: Vec<(u8, bool)> = r.findings.iter().map(|f| (f.priority, f.text.ends_with(OLD_CODE))).collect();
+        assert_eq!(got, [(1, false), (2, true), (1, false), (0, false)], "{:?}", r.findings);
+        assert_eq!(r.verdict, "changes");
+        // The one in old code is a P2 the follow-up takes.
+        assert_eq!(crate::submit_rules::minor(&r.findings).len(), 1);
+        // With only that one, the round passes; a first review holds it as before.
+        let only_old = "- [P1] Old overflow: src/a.rs:5, a5: wraps past 255\nVERDICT: findings\nMONEY_OR_RELEASE: no";
+        assert_eq!(rules().parse("codex", only_old, 1, Some(&prev), Some(&dir)).unwrap().verdict, "pass");
+        assert_eq!(rules().parse("codex", only_old, 1, None, Some(&dir)).unwrap().verdict, "changes");
         std::fs::remove_dir_all(&dir).ok();
     }
 
