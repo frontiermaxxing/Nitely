@@ -17,6 +17,7 @@ pub mod hook;
 pub mod release_notes;
 pub mod report_text;
 pub mod verification_timing;
+pub mod pipeline;
 
 pub use pulse::{pulse, Pulse};
 

@@ -457,6 +457,15 @@ fn tools() -> Value {
     let states: Vec<&str> = STATES.iter().map(|(n, _)| *n).filter(|n| *n != "Approved").collect();
     json!([
         {
+            "name": "pipeline",
+            "description": "How the project's pipeline performed per week, oldest first (NIT-703): reviews per landed issue, the changes rate and new blocking findings per review by round; blocking findings the person accepted or split to a follow-up; lane wait against run time per kind; land stops by cause; questions to the person per landing; per issue, claim to first submit, submit rounds, fixing between rounds and last submit to landed (medians); tokens per landed issue and the median context per model call. Issues run in parallel, so their times overlap.",
+            "inputSchema": { "type": "object", "properties": {
+                "project": { "type": "string" },
+                "weeks": { "type": "integer", "minimum": 1, "maximum": 52, "description": "How many weeks back, this one included; default 4." },
+                "tokens": { "type": "boolean", "description": "Read the agents' session files for the token figures; default true." }
+            } }
+        },
+        {
             "name": "performance",
             "description": "Read cached machine health (now), bounded history, or sustained pressure episodes. Never starts a collector. Reports freshness, units, gaps and measured contributors; temporal overlap is not proof of cause. Before expensive work, inspect current health and admission constraints; do not bypass Nitely build lanes. before_last_restart selects ten minutes ending at the previous boot's last retained sample.",
             "inputSchema": { "type": "object", "additionalProperties": false, "properties": {
@@ -1248,6 +1257,11 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         None
     };
     let mut out = match name {
+        "pipeline" => {
+            let weeks = args.get("weeks").and_then(Value::as_u64).unwrap_or(4) as usize;
+            let tokens = args.get("tokens").and_then(Value::as_bool).unwrap_or(true) && server.remote.is_none();
+            json!(nitely_crew::pipeline::read(&db, tokens.then_some(&config), &project(&db)?, weeks, nitely_core::db::now())?)
+        }
         "performance" => json!(nitely_crew::performance_query::query(&nitely_core::performance::directory(), &serde_json::from_value(args.clone())?)?),
         "next_task" if returned.is_some() => {
             let job = returned.as_ref().unwrap();

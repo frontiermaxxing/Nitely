@@ -327,6 +327,19 @@ enum Cmd {
         #[arg(long, default_value_t = 14)]
         days: usize,
     },
+    /// How the pipeline performed per week (NIT-703): reviews and their rounds, findings accepted or
+    /// split off, lane waits against run time, land stops by cause, questions to the person, each
+    /// issue's claim-to-landed times, and tokens per landed issue.
+    Pipeline {
+        #[arg(long)]
+        project: Option<String>,
+        /// How many weeks back, this one included.
+        #[arg(long, default_value_t = 4)]
+        weeks: usize,
+        /// Leave out the token figures, which read the agents' session files.
+        #[arg(long)]
+        no_tokens: bool,
+    },
     /// The issue mirror (docs/mirror.md): `status` says what it would publish; `sync` brings the
     /// host up to date now. Only the app turns it on.
     Mirror {
@@ -2002,6 +2015,12 @@ fn run(cmd: Cmd) -> Result<()> {
                 bail!("this deletes every report this install sent from the public board and forgets its key; run it again with --yes if that is what you want");
             }
             print_json(&serde_json::json!({ "deleted": nitely_crew::leaderboard_send::Sharing::default_dir().leave("cli")? }))
+        }
+        Cmd::Pipeline { project, weeks, no_tokens } => {
+            let config = Config::load()?;
+            let db = Db::open_default()?;
+            let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+            print_json(&nitely_crew::pipeline::read(&db, (!no_tokens).then_some(&config), &project, weeks, nitely_core::db::now())?)
         }
         Cmd::Spend { issue, project, days } => {
             let config = Config::load()?;
