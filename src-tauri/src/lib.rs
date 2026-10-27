@@ -891,6 +891,12 @@ async fn clear_performance_history() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(|| nitely_core::performance::clear_history(&nitely_core::performance::directory()).map_err(err)).await.map_err(|e| e.to_string())?
 }
 
+/// What became of each P0/P1 the project's reviews raised over the last `days`, per area (NIT-316).
+#[tauri::command]
+async fn review_precision(project: String, days: u32) -> Result<nitely_core::review_precision::Report, String> {
+    nitely_core::review_precision::read(&db()?, &project, days).map_err(err)
+}
+
 /// The build lanes of every connected repo whose playbook has `[lanes]` (docs/build-lanes.md).
 #[tauri::command]
 async fn lanes_overview() -> Result<nitely_core::lanes::Overview, String> {
@@ -1223,6 +1229,7 @@ pub fn run() {
             reviewer_settings_save,
             rules_branches,
             rules_dry_run,
+            review_precision,
             rule_defaults,
             rule_defaults_check,
             rule_defaults_save,

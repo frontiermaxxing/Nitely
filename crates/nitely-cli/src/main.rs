@@ -273,6 +273,14 @@ enum Cmd {
         #[arg(long, default_value_t = 1)]
         days: u64,
     },
+    /// What became of each P0/P1 the reviews raised over the last days, per area of the code:
+    /// fixed, accepted, stale or open, and how precise the reviewer is there (NIT-316).
+    ReviewPrecision {
+        #[arg(long, default_value = "NIT")]
+        project: String,
+        #[arg(long, default_value_t = 30)]
+        days: u32,
+    },
     /// Runs a queued submit; `nitely submit` starts it in the background.
     #[command(hide = true)]
     SubmitJob { id: i64 },
@@ -1874,6 +1882,7 @@ fn run(cmd: Cmd) -> Result<()> {
             let since = nitely_core::db::now() - days as i64 * 86_400;
             print_json(&nitely_crew::triage::inbox_rate(&db, &project, since)?)
         }
+        Cmd::ReviewPrecision { project, days } => print_json(&nitely_core::review_precision::read(&Db::open_default()?, &project, days)?),
         Cmd::LandAfter { repo, issue } => {
             let db = Db::open_default()?;
             nitely_core::land::run_after_steps(&db, &repo, issue.as_deref(), &me, &mut std::thread::sleep)

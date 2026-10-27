@@ -8,6 +8,7 @@ import { LandsStrip, type RulesSection } from "./rules/LandsStrip";
 import { Loosen } from "./rules/Loosen";
 import { Mode } from "./rules/Mode";
 import { Paths } from "./rules/Paths";
+import { ReviewerPrecision } from "./rules/Precision";
 import { OwnVendor, ReviewerMap, Reviewers } from "./rules/Reviewers";
 import { SaveBar } from "./rules/SaveBar";
 import type { RulesDraft } from "./rules/shared";
@@ -151,6 +152,7 @@ export function ProjectRules(props: { projectKey: string }) {
           />
         </div>
       ))}
+      <ReviewerPrecision project={props.projectKey} />
     </>
   );
 }

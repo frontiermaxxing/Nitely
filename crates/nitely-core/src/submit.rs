@@ -908,7 +908,43 @@ does not.\n",
             c.push_str(&format!("- [P{}] {} (accepted: {})\n", a.priority, a.finding.chars().take(300).collect::<String>(), a.reason));
         }
     }
+    c.push_str(&least_precise_examples(db, prefix, &issue.key)?);
     Ok(c)
+}
+
+/// How many findings of the least precise areas a review is shown.
+const PRECISION_EXAMPLES: usize = 4;
+
+/// The P0/P1s of the two areas the reviewer was least precise in over the last 30 days (NIT-316)
+/// that turned out stale or that the person accepted, on other issues, as examples of what was not
+/// a P1 there. An accepted one is shown only when the person signed it: an agent's own row never
+/// steers the reviewer.
+fn least_precise_examples(db: &Db, project: &str, issue: &str) -> Result<String> {
+    let raised = crate::review_precision::raised_in(db, project, 30)?;
+    let public = crate::approval::trusted_key().ok();
+    let mut lines = Vec::new();
+    for r in crate::review_precision::worst_examples(&raised) {
+        if r.issue.eq_ignore_ascii_case(issue) || lines.len() >= PRECISION_EXAMPLES {
+            continue;
+        }
+        let how = match r.outcome {
+            crate::review_precision::Outcome::Stale => "stale: its code was gone, or a fresh review no longer found it".to_string(),
+            _ => {
+                let Some(public) = &public else { continue };
+                let Some(a) = db.signed_acceptances(&r.issue, public)?.into_iter().find(|a| a.finding == r.text) else { continue };
+                format!("accepted: {}", a.reason)
+            }
+        };
+        lines.push(format!("- [P{}] {} ({how})\n", r.priority, r.text.chars().take(300).collect::<String>()));
+    }
+    if lines.is_empty() {
+        return Ok(String::new());
+    }
+    Ok(format!(
+        "\nFor calibration: in {}, raised P0/P1s lately often turned out not to be, as these did. Hold a finding there to its concrete failure before you raise it at P0 or P1.\n{}",
+        crate::review_precision::worst_areas(&raised).join(" and "),
+        lines.concat()
+    ))
 }
 
 /// What to do after a gate that did not pass: fix the step that failed, or, when a step ran past
@@ -955,7 +991,7 @@ fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &
 }
 
 /// The note on a review run fresh, without the rounds before it, before stalled rounds escalate.
-const FRESH: &str = "fresh, without the earlier rounds";
+pub(crate) const FRESH: &str = "fresh, without the earlier rounds";
 
 /// How many review rounds in a row may ask for changes before the issue goes to a person.
 pub const MAX_ROUNDS: usize = 5;

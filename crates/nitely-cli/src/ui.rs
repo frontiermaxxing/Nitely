@@ -87,6 +87,10 @@ pub fn run(command: &str, args: &Value) -> Result<Value> {
         }
         "crew_settings" => json!(nitely_crew::crew_settings::crew_for_project(&Config::load_read_only()?, &db()?, str_arg(args, "project")?)?),
         "issue_spend" => json!(nitely_crew::usage::spend_of_issue(&Config::load_read_only()?, &db()?, str_arg(args, "key")?)?),
+        "review_precision" => {
+            let days = args.get("days").and_then(Value::as_u64).unwrap_or(30) as u32;
+            json!(nitely_core::review_precision::read(&db()?, str_arg(args, "project")?, days)?)
+        }
         "lanes_overview" => json!(nitely_core::lanes::overview(&Config::load_read_only()?, &db()?)?),
         // A database a newer schema has not reached yet has no batches to show.
         "waits_overview" => json!(nitely_crew::waits::overview(&Config::load_read_only()?, &db()?)?),

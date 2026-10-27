@@ -166,7 +166,7 @@ pub struct Finding {
 }
 
 /// Appended to a carried finding whose cited code was not on the branch.
-const UNCONFIRMED: &str = " (unconfirmed: the code it cites is not on the branch now)";
+pub(crate) const UNCONFIRMED: &str = " (unconfirmed: the code it cites is not on the branch now)";
 
 /// What the previous review of the branch found, so the next one checks those findings first and
 /// reviews what changed since instead of starting over.

@@ -67,6 +67,7 @@ pub mod remote;
 pub mod similar;
 pub mod slim;
 pub mod review;
+pub mod review_precision;
 pub mod rules;
 pub mod sessions;
 pub mod snapshot;

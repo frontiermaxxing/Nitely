@@ -2529,6 +2529,18 @@ export async function fixtureInvoke<T>(cmd: string, args: Record<string, unknown
         return rulesFixture.reviewerPreview(args);
       case "reviewer_settings_save":
         return rulesFixture.reviewerSave(args);
+      case "review_precision":
+        return {
+          project: "NIT",
+          days: 30,
+          raised: [],
+          areas: [
+            { area: "submit.rs", raised: 14, fixed: 6, accepted: 3, stale: 4, open: 1, precision: 6 / 13 },
+            { area: "src/", raised: 9, fixed: 6, accepted: 1, stale: 1, open: 1, precision: 0.75 },
+            { area: "land.rs", raised: 11, fixed: 9, accepted: 0, stale: 1, open: 1, precision: 0.9 },
+            { area: "other", raised: 2, fixed: 0, accepted: 0, stale: 0, open: 2, precision: null },
+          ],
+        };
       case "rules_branches":
         return rulesFixture.rulesBranches(args);
       case "rules_dry_run":
