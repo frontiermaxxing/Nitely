@@ -227,6 +227,13 @@ pub fn make(root: &Path, gitignore: Option<&[String]>, include: &[String], ident
     // each entry is in (staged, then edited again, say).
     git(root, &["read-tree", "--empty"])?;
     git(root, &["add", "--all"])?;
+    // What the person chose to commit after all goes in even where a .gitignore of the repo's own
+    // keeps it out (an unticked `bin` with `bin/` in it): add --all alone would skip it (NIT-685 review).
+    for batch in include.chunks(200) {
+        let mut args = vec!["--literal-pathspecs", "add", "--force", "--"];
+        args.extend(batch.iter().map(String::as_str));
+        git(root, &args)?;
+    }
     let chosen = |p: &str| include.iter().any(|i| p == i || p.starts_with(&format!("{i}/")));
     // The staged paths as they are: NUL-separated and unquoted, since git quotes a name with
     // non-ASCII characters in its default output (NIT-685 review).
@@ -340,6 +347,18 @@ mod tests {
         make(&dir, None, &[], Some(("You", "you@example.com"))).unwrap();
         let committed = git(&dir, &["-c", "core.quotePath=false", "ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
         assert_eq!(committed.lines().collect::<Vec<_>>(), [".gitignore", "README.md"]);
+        std::fs::remove_dir_all(&dir).ok();
+
+        // A flagged folder the person chose goes in, though the repo's own .gitignore keeps it out.
+        let dir = crate::paths::unique_temp("nitely-first-commit", "");
+        std::fs::create_dir_all(dir.join("bin")).unwrap();
+        std::fs::write(dir.join(".gitignore"), "bin/
+").unwrap();
+        std::fs::write(dir.join("bin/tool"), "#!/bin/sh").unwrap();
+        git(&dir, &["init", "--quiet", "--initial-branch=main"]).unwrap();
+        make(&dir, None, &["bin".to_string()], Some(("You", "you@example.com"))).unwrap();
+        let committed = git(&dir, &["ls-tree", "-r", "--name-only", "HEAD"]).unwrap();
+        assert_eq!(committed.lines().collect::<Vec<_>>(), [".gitignore", "bin/tool"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 }
