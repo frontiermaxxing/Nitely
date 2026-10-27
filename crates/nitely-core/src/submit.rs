@@ -299,7 +299,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     }
 
     // A queued gate may outlive a human settings change. Read the authoritative policy again.
-    let (mut pb, item_blocking) = review_policy(db, &root, &issue)?;
+    let (pb, item_blocking) = review_policy(db, &root, &issue)?;
     crate::project_modes::check_gate_authority(db, &[&issue.key], &out.gate)?;
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
