@@ -342,7 +342,7 @@ fn says_signed_out(output: &str) -> bool {
 }
 
 /// What the person runs to sign a reviewer's CLI in.
-fn login_hint(reviewer: &str, rules: &ReviewRules) -> String {
+pub(crate) fn login_hint(reviewer: &str, rules: &ReviewRules) -> String {
     let program = rules.commands.get(reviewer).and_then(|c| c.first()).map(String::as_str).unwrap_or(reviewer);
     match cli_name(program).as_str() {
         "claude" => "run `claude` in a terminal and sign in with /login".to_string(),

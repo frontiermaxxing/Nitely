@@ -568,6 +568,13 @@ async fn set_owner(key: String, owner: String) -> Result<IssueRecord, String> {
     db.set_owner(&key, &owner, &ME).map_err(err)
 }
 
+/// The person sends changes reviewed by their author's own vendor back for another vendor's review
+/// (NIT-362): each waiting one goes back to its agent to submit again. Returns those sent.
+#[tauri::command]
+async fn rerun_same_vendor_reviews(keys: Vec<String>) -> Result<Vec<String>, String> {
+    db()?.rerun_same_vendor_reviews(&keys, &ME).map_err(err)
+}
+
 /// The person dismisses a notice in the Inbox (NIT-570): nothing waited on it.
 #[tauri::command]
 async fn dismiss_notice(id: i64) -> Result<(), String> {
@@ -1247,6 +1254,7 @@ pub fn run() {
             set_owner,
             answer_ask,
             dismiss_notice,
+            rerun_same_vendor_reviews,
             goal_state,
             accept_finding,
             decline_finding,

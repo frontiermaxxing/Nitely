@@ -67,6 +67,9 @@ impl Digest {
 const DECISIONS: &[&str] = &["answer", "issue_moved", "issue_edited", "goal_changed", "note", "project_review_mode_changed", "project_focus_changed", "project_yolo_changed", "reviewer_settings_changed", "owner_changed", "issue_created", "ask_closed"];
 /// Outcomes of work, whoever's they are: lands, sent-backs, a goal done or dropped.
 const OUTCOMES: &[&str] = &["landed", "land_failed", "goal_state", "memory_wait"];
+/// A reviewer that stopped or started being able to run (NIT-362): news for every reader, whatever
+/// issue noticed it, since every review goes to the same reviewers.
+const REVIEWERS: &[&str] = &[crate::reviewer_health::UNAVAILABLE, crate::reviewer_health::AVAILABLE];
 /// Who files the recovery issue when the full check on the integration branch fails
 /// (verification_backstop.rs): that issue's filing is the failure's news.
 const BACKSTOP: &str = "verification-backstop";
@@ -90,6 +93,9 @@ pub fn digest(events: &[FeedEvent], reader: &str, scope: &Scope, cap: usize) -> 
         let decision = e.actor == "human" && DECISIONS.contains(&e.kind.as_str());
         let outcome = OUTCOMES.contains(&e.kind.as_str()) || sent_back || (e.actor == BACKSTOP && e.kind == "issue_created");
         // An answer to an ask about no issue: for its asker, and a coordinator; no other agent.
+        if REVIEWERS.contains(&e.kind.as_str()) {
+            return true;
+        }
         if let (Some(to), Scope::Mine { .. }) = (&e.for_reader, scope) {
             return decision && to == reader;
         }
@@ -191,6 +197,8 @@ fn line(e: &FeedEvent) -> String {
         "ask_closed" => format!("The person closed the ask{on}"),
         "reviewer_settings_changed" => format!("The person changed the reviewer settings: {said}"),
         "land_failed" => format!("{} was sent back from landing: {said}", e.issue_key.as_deref().unwrap_or("A change")),
+        "reviewer_unavailable" => format!("{said}. Until then reviews fall back, maybe to the author's own vendor"),
+        "reviewer_available" => said,
         // A run held for memory past ten minutes with nothing of Nitely's running (NIT-656).
         "memory_wait" => said,
         _ => format!("The person changed{on}: {said}"),
@@ -312,6 +320,24 @@ mod tests {
             ev(21, "verification-backstop", Some("APP-80"), Some("APP"), None, "issue_created", "Filed as Todo"),
             ev(22, "human", None, Some("APP"), Some(22), "goal_state", "Goal 22 \"Less ceremony\" is done"),
         ]
+    }
+
+    /// NIT-362: a reviewer that can't run, and its coming back, reach every reader, whatever issue
+    /// noticed it: every review goes to the same reviewers.
+    #[test]
+    fn a_reviewer_that_cannot_run_is_news_for_every_reader() {
+        let events = vec![
+            ev(30, "nitely-review", Some("WEB-9"), Some("WEB"), None, "reviewer_unavailable", "Codex can't review: not signed in (run `codex login`)"),
+            ev(31, "nitely-review", None, None, None, "reviewer_available", "Codex reviews again"),
+        ];
+        let mine = Scope::Mine { issues: ["APP-3".to_string()].into(), goals: [].into(), projects: ["APP".to_string()].into() };
+        assert_eq!(
+            digest(&events, "claude:me", &mine, 10).lines,
+            [
+                "Codex can't review: not signed in (run `codex login`). Until then reviews fall back, maybe to the author's own vendor",
+                "Codex reviews again",
+            ]
+        );
     }
 
     #[test]
