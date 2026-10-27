@@ -937,6 +937,28 @@ async fn tools_check() -> Result<Vec<nitely_core::tools::Tool>, String> {
     tauri::async_runtime::spawn_blocking(nitely_core::tools::check).await.map_err(|e| e.to_string())
 }
 
+/// How each missing tool would be installed: the exact command, shown before anything runs
+/// (NIT-688).
+#[tauri::command]
+async fn tool_install_plans() -> Result<Vec<nitely_core::tools_install::Plan>, String> {
+    tauri::async_runtime::spawn_blocking(nitely_core::tools_install::plans).await.map_err(|e| e.to_string())
+}
+
+/// Installs `tool` with the plan the person was shown and confirmed, sending each line it prints
+/// as a `tool-install` event, and returns the tool as it is afterwards (NIT-688).
+#[tauri::command]
+async fn install_tool(app: tauri::AppHandle, tool: String) -> Result<nitely_core::tools::Tool, String> {
+    use tauri::Emitter;
+    tauri::async_runtime::spawn_blocking(move || {
+        nitely_core::tools_install::install(&tool, &mut |line| {
+            app.emit("tool-install", serde_json::json!({ "tool": tool, "line": line })).ok();
+        })
+        .map_err(err)
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
 /// Every request waiting now, why, and what it waits behind (NIT-322).
 #[tauri::command]
 async fn waits_overview() -> Result<nitely_crew::waits::Waits, String> {
@@ -1189,6 +1211,8 @@ pub fn run() {
             clear_performance_history,
             set_machine_limits,
             tools_check,
+            tool_install_plans,
+            install_tool,
             memory_trim_setting,
             set_memory_trim,
             batches_overview,
