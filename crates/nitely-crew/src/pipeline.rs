@@ -125,6 +125,9 @@ pub struct ReviewRow {
     pub ts: i64,
     /// (priority, text, carried from an earlier round)
     pub findings: Vec<(i64, String, bool)>,
+    /// A pass carried over from the round before, for the same diff under the same rules: no
+    /// reviewer ran, so it is no review (NIT-714).
+    pub reused: bool,
 }
 
 /// One submit of an issue.
@@ -159,7 +162,7 @@ const REVIEWED: &[&str] = &["pass", "changes"];
 pub fn reviews(landed: &[&str], rows: &[ReviewRow]) -> (Reviews, usize) {
     let landed: HashSet<&str> = landed.iter().copied().collect();
     let mut by_issue: BTreeMap<&str, Vec<&ReviewRow>> = BTreeMap::new();
-    for r in rows.iter().filter(|r| landed.contains(r.issue.as_str()) && REVIEWED.contains(&r.verdict.as_str())) {
+    for r in rows.iter().filter(|r| landed.contains(r.issue.as_str()) && REVIEWED.contains(&r.verdict.as_str()) && !r.reused) {
         by_issue.entry(&r.issue).or_default().push(r);
     }
     let mut rounds: Vec<Round> = Vec::new();
@@ -311,15 +314,28 @@ fn week(db: &Db, usage: Option<&[crate::usage::Attributed]>, project: &str, from
     let mut accepted = Vec::new();
     let mut landed = Vec::new();
     for (key, at) in &landed_at {
-        let mut s = c.prepare("SELECT verdict, ts, findings FROM review WHERE issue_key = ?1 COLLATE NOCASE")?;
-        for r in s.query_map([key], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?)))? {
-            let (verdict, ts, findings) = r?;
+        // In the order they ran, so a pass is checked against the review before it, as submit's
+        // `reused_pass` does.
+        let mut s = c.prepare("SELECT verdict, ts, findings, reviewer, COALESCE(diff_id, ''), rules FROM review WHERE issue_key = ?1 COLLATE NOCASE ORDER BY ts, id")?;
+        let mut last: Option<(String, String, String, Option<String>)> = None;
+        for r in s.query_map([key], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, Option<String>>(2)?, (r.get::<_, String>(3)?, r.get::<_, String>(4)?, r.get::<_, Option<String>>(5)?)))
+        })? {
+            let (verdict, ts, findings, (reviewer, diff, rules)) = r?;
+            let reused = verdict == "pass"
+                && last.as_ref().is_some_and(|(by, v, d, ru)| {
+                    let before = nitely_core::submit_rules::LastReview { reviewer: by, verdict: v, diff_id: d, rules: ru.as_deref() };
+                    rules.as_deref().is_some_and(|now| nitely_core::submit_rules::reusable(&before, &diff, now, Some(&reviewer)))
+                });
+            if !reviewer.is_empty() {
+                last = Some((reviewer, verdict.clone(), diff, rules));
+            }
             let findings: Vec<serde_json::Value> = findings.and_then(|f| serde_json::from_str(&f).ok()).unwrap_or_default();
             let findings = findings
                 .iter()
                 .map(|f| (f["priority"].as_i64().unwrap_or(9), f["text"].as_str().unwrap_or("").to_string(), f["carried"].as_bool().unwrap_or(false)))
                 .collect();
-            rows.push(ReviewRow { issue: key.clone(), verdict, ts, findings });
+            rows.push(ReviewRow { issue: key.clone(), verdict, ts, findings, reused });
         }
         let mut s = c.prepare("SELECT priority, reason FROM accepted_finding WHERE issue_key = ?1 COLLATE NOCASE")?;
         for a in s.query_map([key], |r| Ok(Acceptance { issue: key.clone(), priority: r.get(0)?, reason: r.get(1)? }))? {
@@ -380,12 +396,13 @@ mod tests {
     use super::*;
 
     fn review(issue: &str, verdict: &str, ts: i64, findings: &[(i64, &str, bool)]) -> ReviewRow {
-        ReviewRow { issue: issue.into(), verdict: verdict.into(), ts, findings: findings.iter().map(|(p, t, c)| (*p, t.to_string(), *c)).collect() }
+        ReviewRow { issue: issue.into(), verdict: verdict.into(), ts, findings: findings.iter().map(|(p, t, c)| (*p, t.to_string(), *c)).collect(), reused: false }
     }
 
     /// Two landed issues: rounds count per issue, a finding raised again or carried is not new, P2s
     /// never block, an unlanded issue and a batched placeholder are left out; an acceptance naming
-    /// another issue is a split; times are medians per issue.
+    /// another issue is a split; a pass carried over unreviewed is no review; times are medians per
+    /// issue.
     #[test]
     fn a_week_counts_rounds_new_blocking_findings_and_issue_times() {
         let rows = [
@@ -393,6 +410,7 @@ mod tests {
             review("APP-1", "batched", 15, &[]),
             review("APP-1", "changes", 20, &[(1, "a", false), (0, "b", false)]),
             review("APP-1", "pass", 30, &[(1, "b", true)]),
+            ReviewRow { reused: true, ..review("APP-1", "pass", 40, &[(1, "b", true)]) },
             review("APP-2", "pass", 12, &[]),
             review("APP-3", "changes", 12, &[(0, "x", false)]),
         ];

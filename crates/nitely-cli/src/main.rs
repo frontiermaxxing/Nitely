@@ -1853,12 +1853,10 @@ fn run(cmd: Cmd) -> Result<()> {
             nitely_core::install::check_current(&config, &cwd, env!("NITELY_COMMIT"))?;
             let solution = nitely_core::submit::SolutionSummary::from_fields(solution_title.as_deref(), solution_summary.as_deref())?;
             let opts = nitely_core::submit::SubmitOptions { dir: &cwd, issue_key: issue.as_deref(), skip_review: no_review, local_only: local, batch: false, solution: solution.as_ref(), solution_commit: None, solution_patch_id: None };
+            nitely_core::submit_job::brief_before(&db, &opts, reviewer_note.as_deref(), &me)?;
             if !wait {
                 let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
                 let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &me, &runner)?;
-                if let Some(note) = reviewer_note.as_deref().filter(|n| !n.trim().is_empty()) {
-                    nitely_core::submit::brief_reviewer(&db, &job.issue, note, &me)?;
-                }
                 print_json(&job)?;
                 if job.finished() {
                     eprintln!("{}", job.outcome());
@@ -1871,9 +1869,6 @@ fn run(cmd: Cmd) -> Result<()> {
             // As a job run here, so it is on record while it runs and after, as a background one is
             // (closing an issue reads both: landed_elsewhere.rs).
             let job = nitely_core::submit_job::enqueue(&db, &opts, &me)?;
-            if let Some(note) = reviewer_note.as_deref().filter(|n| !n.trim().is_empty()) {
-                nitely_core::submit::brief_reviewer(&db, &job.issue, note, &me)?;
-            }
             let job = nitely_core::submit_job::run(&mut db, &config, job.id)?;
             let Some(s) = job.result else { bail!("{}", job.error.unwrap_or_else(|| format!("submit job {} ended {}", job.id, job.state))) };
             print_json(&s)?;
