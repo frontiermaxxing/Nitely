@@ -1128,14 +1128,15 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
 }
 
 /// The failing tests `first` and `again` share, when `again` failed the same way: the same gate
-/// command, and where both name the tests that failed (cargo's), at least one of the same. Empty
+/// step (as the playbook writes it, so two lanes' `{worktree}` paths do not differ), and where both name the tests that failed (cargo's), at least one of the same. Empty
 /// when the command failed without naming any, both times. None when it is not the same failure.
 fn repeated(first: &GateResult, again: &GateResult) -> Option<Vec<String>> {
     if again.passed || again.skipped.is_some() {
         return None;
     }
     for a in first.results.iter().filter(|r| !r.ok && !r.skipped) {
-        let Some(b) = again.results.iter().find(|r| !r.ok && !r.skipped && r.command == a.command) else { continue };
+        let step = |r: &crate::playbook::CommandResult| r.step.clone().unwrap_or_else(|| r.command.clone());
+        let Some(b) = again.results.iter().find(|r| !r.ok && !r.skipped && step(r) == step(a)) else { continue };
         let (x, y) = (failed_tests(&a.output), failed_tests(&b.output));
         if x.is_empty() && y.is_empty() {
             return Some(vec![]);
@@ -1614,6 +1615,13 @@ test result: FAILED. 9 passed; 1 failed
         assert_eq!(repeated(&a, &gate(vec![run(cargo, &["links::tests::b"]), run(npm, &[])])), None, "another test failed: two flakes");
         assert_eq!(repeated(&a, &gate(vec![run(cargo, &[]), run(npm, &["src/x.test.ts"])])), None, "another command failed");
         assert_eq!(repeated(&a, &gate(vec![run(cargo, &[]), run(npm, &[])])), None, "it passed");
+        // The same step run in another lane, its `{worktree}` filled in differently, is the same.
+        let in_lane = |lane: &str| {
+            let mut r = run(&format!("cargo test --manifest-path {lane}/Cargo.toml"), &["lanes::tests::a"]);
+            r.step = Some("cargo test --manifest-path {worktree}/Cargo.toml".into());
+            gate(vec![r])
+        };
+        assert!(repeated(&in_lane("lane-1"), &in_lane("lane-2")).is_some(), "the same step in two lanes");
         // A command that names no test (a build), failing both times, is the same failure.
         let build = gate(vec![run("npm run build", &[]), run(npm, &[])]);
         let mut broken = build.clone();
