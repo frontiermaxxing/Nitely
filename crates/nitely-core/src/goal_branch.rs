@@ -995,7 +995,8 @@ pub(crate) fn after_failed_gate(db: &mut Db, root: &Path, key: &str, gate: &Gate
 
 /// When a checkpoint's full gate failed: gates the items' commits on the goal branch to find the
 /// first that fails, reverts it there, sends it back to its agent, closes this checkpoint and opens
-/// the next without it. One bad item in k costs at most ceil(log2(k + 1)) more full runs. When every
+/// the next without it. One bad item in k costs at most ceil(log2(k + 1)) more full runs, and one
+/// more to see its failure again: a failure that does not repeat was a flaky test (NIT-713). When every
 /// item's commit passes, only the merge with main fails, and nothing is reverted.
 pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed: &GateResult, actor: &Actor) -> Result<String> {
     let cp = db.checkpoint_of_issue(key)?.context("not a checkpoint")?;
@@ -1008,27 +1009,59 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
     let wt = work_tree(root, pb, cp.goal, &items[k - 1].to)?;
     // Prefixes 1..=k are the items' commits; k + 1 is the checkpoint as it landed, which failed.
     let (mut lo, mut hi) = (0usize, k + 1);
+    // Every prefix seen to fail, so a failure that does not repeat hands the search back to the
+    // next one up.
+    let mut failed_at = vec![k + 1];
     let mut failing = failed.clone();
     let mut gates = 0i64;
-    while hi - lo > 1 {
-        let mid = (lo + hi) / 2;
-        git(&wt, &["checkout", "--quiet", "--force", "--detach", &items[mid - 1].to])?;
-        db.log_event(actor, Some(key), None, "status", &format!("Bisecting the checkpoint: the full gate at {} ({mid} of {k} items)", items[mid - 1].issue))?;
+    // Items whose failure did not repeat when gated again: a flaky test, not theirs (NIT-713).
+    let mut flaked: Vec<String> = vec![];
+    let gate_at = |db: &mut Db, i: usize, why: &str, gates: &mut i64| -> Result<GateResult> {
+        git(&wt, &["checkout", "--quiet", "--force", "--detach", &items[i - 1].to])?;
+        db.log_event(actor, Some(key), None, "status", &format!("{why}: the full gate at {} ({i} of {k} items)", items[i - 1].issue))?;
         let g = playbook::run_gate_as(db, root, &wt, Some(key), actor, crate::lanes::Kind::Land)?;
-        gates += 1;
+        *gates += 1;
         if let Some(r) = g.timed_out() {
-            bail!("the full gate at {} did not finish: {}, which says nothing about it; land the checkpoint again", items[mid - 1].issue, r.stopped());
+            bail!("the full gate at {} did not finish: {}, which says nothing about it; land the checkpoint again", items[i - 1].issue, r.stopped());
         }
-        if g.passed || g.skipped.is_some() {
-            lo = mid;
-        } else {
-            hi = mid;
-            failing = g;
+        Ok(g)
+    };
+    loop {
+        while hi - lo > 1 {
+            let mid = (lo + hi) / 2;
+            let g = gate_at(db, mid, "Bisecting the checkpoint", &mut gates)?;
+            if g.passed || g.skipped.is_some() {
+                lo = mid;
+            } else {
+                hi = mid;
+                failed_at.push(mid);
+                failing = g;
+            }
         }
+        if hi == k + 1 {
+            break;
+        }
+        // One failure is not proof: a flaky test fails at random, and reverting a good item costs
+        // it a resubmit and the goal a checkpoint. The item before it passed (a flake fails, it
+        // never passes), so only the failure is gated again before the item is named.
+        let again = gate_at(db, hi, "Confirming the bisect", &mut gates)?;
+        if !(again.passed || again.skipped.is_some()) {
+            failing = again;
+            break;
+        }
+        flaked.push(items[hi - 1].issue.clone());
+        failed_at.retain(|&f| f > hi);
+        lo = hi;
+        hi = failed_at.iter().copied().min().unwrap_or(k + 1);
     }
+    let flaky = if flaked.is_empty() {
+        String::new()
+    } else {
+        format!("; the failure at {} did not repeat when gated again, so it was a flaky test and not counted", flaked.join(", "))
+    };
     db.conn.execute("UPDATE goal_checkpoint SET gates = gates + ?2 WHERE id = ?1", params![cp.id, gates])?;
     if hi == k + 1 {
-        let said = format!("every item's commit on {} passes the full gate; only the merge with main fails, so nothing is reverted ({gates} full run{})", gb.branch, if gates == 1 { "" } else { "s" });
+        let said = format!("every item's commit on {} passes the full gate; only the merge with main fails, so nothing is reverted ({gates} full run{}){flaky}", gb.branch, if gates == 1 { "" } else { "s" });
         db.conn.execute("UPDATE goal_checkpoint SET note = ?2 WHERE id = ?1", params![cp.id, said])?;
         return Ok(said);
     }
@@ -1069,7 +1102,7 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
         "UPDATE goal_checkpoint SET state = 'sent_back', ended_at = ?2, note = ?3 WHERE id = ?1",
         params![cp.id, now(), format!("{} broke the full gate; reverted on {}", bad.issue, gb.branch)],
     )?;
-    let mut said = format!("{} broke the full gate ({gates} full run{} to find it); it was reverted on {} and sent back", bad.issue, if gates == 1 { "" } else { "s" }, gb.branch);
+    let mut said = format!("{} broke the full gate ({gates} full run{} to find it, its failure seen twice); it was reverted on {} and sent back{flaky}", bad.issue, if gates == 1 { "" } else { "s" }, gb.branch);
     if let Some(w) = warning {
         said.push_str(&format!("; {w}"));
     }
@@ -1096,12 +1129,14 @@ mod tests {
     use crate::submit::{submit, SubmitOptions};
     use crate::test_repo::git as sh;
 
-    // The gate fails while bad.txt is there; the fake reviewer passes everything but risky.txt.
+    // The gate fails while bad.txt is there, and once (a flaky test) where flaky.txt is; it does not
+    // retry, as CI's full suites do not. The fake reviewer passes everything but risky.txt.
     const PLAYBOOK: &str = r#"
 [worktree]
 dir = "../wt/{key}"
 [gate]
-commands = ["{gate}"]
+commands = ['{gate}']
+retries = 0
 [review]
 reviewer = { "*" = "fake" }
 commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-only --diff-filter=AM goal-1...HEAD 2>/dev/null)\" in *risky.txt*) echo '- [P1] Risky default: risky.txt, the greeting'; echo 'VERDICT: findings';; *) echo 'Fine.'; echo 'VERDICT: clean';; esac"] }
@@ -1120,8 +1155,13 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
     fn fixture(name: &str, remote: bool) -> Fixture {
         let base = crate::paths::unique_temp(name, "");
         let repo = base.join("repo");
-        let gate = if cfg!(windows) { "if exist bad.txt exit 1" } else { "test ! -f bad.txt" };
-        let playbook = PLAYBOOK.replace("{sh}", &playbook::posix_sh().replace('\\', "/")).replace("{gate}", gate);
+        let flaked = base.join("flaked").to_string_lossy().into_owned();
+        let gate = if cfg!(windows) {
+            format!("if exist bad.txt (exit 1) else if exist flaky.txt if not exist \"{flaked}\" (type nul > \"{flaked}\" & exit 1)")
+        } else {
+            format!("test ! -f bad.txt && {{ test ! -f flaky.txt || test -f \"{flaked}\" || {{ touch \"{flaked}\"; exit 1; }}; }}")
+        };
+        let playbook = PLAYBOOK.replace("{sh}", &playbook::posix_sh().replace('\\', "/")).replace("{gate}", &gate);
         crate::test_repo::init(&repo, &[(playbook::PLAYBOOK_PATH, &playbook), ("shared.txt", "one\ntwo\nthree\n")]);
         if remote {
             crate::test_repo::add_remote(&repo, &base.join("remote.git"));
@@ -1465,35 +1505,32 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
     fn a_failing_checkpoint_finds_the_item_at_fault_reverts_it_and_opens_the_next() {
         let mut f = fixture("nitely-goal-bisect", false);
         f.db.enable_goal_branch(f.goal, &f.repo, None, Some(10), &f.actor).unwrap();
-        for name in ["one", "two", "three"] {
+        for name in ["one", "two"] {
             let key = f.issue(name, Some(f.goal));
-            f.work(&key, &format!("{name}.txt"), "x\n");
+            f.work(&key, &format!("{name}.txt"), "x
+");
             assert!(f.land(&key).landed);
         }
-        // An item whose fault its item checks missed (they ran the tests it affects, not the one it
-        // breaks): put on the goal branch as its land would, so only the full gate finds it.
-        let gb = f.db.goal_branch(f.goal).unwrap().unwrap();
-        let wt = work_tree(&f.repo, &Playbook::load(&f.repo).unwrap(), f.goal, "goal-1").unwrap();
-        let from = rev(&wt, "HEAD").unwrap();
-        std::fs::write(wt.join("bad.txt"), "x\n").unwrap();
-        sh(&wt, &["add", "."]);
-        sh(&wt, &["commit", "-q", "-m", "bad"]);
-        let to = rev(&wt, "HEAD").unwrap();
-        advance(&f.repo, &gb, &from, &to).unwrap();
-        let bad = f.issue("bad", Some(f.goal));
-        item_landed(&mut f.db, &gb, &bad, &from, &to, &f.actor).unwrap();
-        // One more good item after it (its item checks would trip on bad.txt, so it goes on the
-        // same way).
-        let four = f.issue("four", Some(f.goal));
-        let from = rev(&f.repo, "goal-1").unwrap();
-        let gb = f.db.goal_branch(f.goal).unwrap().unwrap();
-        let wt_goal = work_tree(&f.repo, &Playbook::load(&f.repo).unwrap(), f.goal, &from).unwrap();
-        std::fs::write(wt_goal.join("four.txt"), "x\n").unwrap();
-        sh(&wt_goal, &["add", "."]);
-        sh(&wt_goal, &["commit", "-q", "-m", "four"]);
-        let to = rev(&wt_goal, "HEAD").unwrap();
-        advance(&f.repo, &gb, &from, &to).unwrap();
-        item_landed(&mut f.db, &gb, &four, &from, &to, &f.actor).unwrap();
+        // Items whose faults their item checks missed (they ran the tests each affects, not the one
+        // it breaks): put on the goal branch as their lands would, so only the full gate finds them.
+        // "three" brings a flaky test, which fails the first time it runs with no bad.txt beside it:
+        // at the bisect's first step, not at the checkpoint. "bad" breaks the gate; "four" is good.
+        let mut keys = vec![];
+        for (name, file) in [("three", "flaky.txt"), ("bad", "bad.txt"), ("four", "four.txt")] {
+            let gb = f.db.goal_branch(f.goal).unwrap().unwrap();
+            let from = rev(&f.repo, "goal-1").unwrap();
+            let wt = work_tree(&f.repo, &Playbook::load(&f.repo).unwrap(), f.goal, &from).unwrap();
+            std::fs::write(wt.join(file), "x
+").unwrap();
+            sh(&wt, &["add", "."]);
+            sh(&wt, &["commit", "-q", "-m", name]);
+            let to = rev(&wt, "HEAD").unwrap();
+            advance(&f.repo, &gb, &from, &to).unwrap();
+            let key = f.issue(name, Some(f.goal));
+            item_landed(&mut f.db, &gb, &key, &from, &to, &f.actor).unwrap();
+            keys.push(key);
+        }
+        let (three, bad) = (keys[0].clone(), keys[1].clone());
 
         let opened = checkpoint(&mut f.db, &crate::Config::default(), f.goal, &f.repo.to_string_lossy(), Some("claude"), &f.actor).unwrap();
         assert_eq!(opened.items.len(), 5);
@@ -1501,12 +1538,17 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
         // The checkpoint's full gate fails (at submit here; at land it bisects the same way).
         let submitted = f.submit(&wt);
         assert!(submitted.next.contains(&bad) && submitted.next.contains("reverted"), "{}", submitted.next);
+        // The flaky failure at "three" sent the search below it, but gated again it passed: not
+        // counted, not reverted, and the search went on above it to the item that does break it.
+        assert!(submitted.next.contains(&format!("the failure at {three} did not repeat")), "{}", submitted.next);
+        assert!(f.has("goal-1", "flaky.txt"), "the flaky item stays");
         assert!(!f.has("goal-1", "bad.txt") && f.has("goal-1", "four.txt"), "only the bad item is reverted");
         assert!(!f.has("main", "one.txt"), "nothing reached main");
         assert_eq!(f.db.issue(&bad).unwrap().unwrap().state, "Todo", "sent back");
         let cp = f.db.checkpoint_of_issue(&opened.checkpoint.issue).unwrap().unwrap();
         assert_eq!(cp.state, "sent_back");
-        assert!(cp.gates <= 3, "ceil(log2(5 + 1)) = 3 at most: {}", cp.gates);
+        // Three steps down to "three", its confirmation, one step up to "bad", and its confirmation.
+        assert_eq!(cp.gates, 6);
         let next = f.db.open_checkpoint(f.goal).unwrap().expect("the next checkpoint holds the rest");
         assert_ne!(next.issue, cp.issue);
         assert_eq!(f.db.goal_items_waiting(f.goal).unwrap().len(), 4);
