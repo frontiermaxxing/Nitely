@@ -1009,13 +1009,14 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
     let wt = work_tree(root, pb, cp.goal, &items[k - 1].to)?;
     // Prefixes 1..=k are the items' commits; k + 1 is the checkpoint as it landed, which failed.
     let (mut lo, mut hi) = (0usize, k + 1);
-    // Every prefix seen to fail, so a failure that does not repeat hands the search back to the
-    // next one up.
-    let mut failed_at = vec![k + 1];
+    // Every prefix seen to fail, with how, so a failure that does not hold up hands the search back
+    // to the next one up.
+    let mut failed_at: Vec<(usize, GateResult)> = vec![(k + 1, failed.clone())];
     let mut failing = failed.clone();
     let mut gates = 0i64;
-    // Items whose failure did not repeat when gated again: a flaky test, not theirs (NIT-713).
-    let mut flaked: Vec<String> = vec![];
+    // Items whose failure did not hold up: it did not repeat, or it is in tests they do not reach
+    // (NIT-713). Not theirs, so not counted.
+    let mut cleared: Vec<String> = vec![];
     let gate_at = |db: &mut Db, i: usize, why: &str, gates: &mut i64| -> Result<GateResult> {
         git(&wt, &["checkout", "--quiet", "--force", "--detach", &items[i - 1].to])?;
         db.log_event(actor, Some(key), None, "status", &format!("{why}: the full gate at {} ({i} of {k} items)", items[i - 1].issue))?;
@@ -1034,8 +1035,7 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
                 lo = mid;
             } else {
                 hi = mid;
-                failed_at.push(mid);
-                failing = g;
+                failed_at.push((mid, g));
             }
         }
         if hi == k + 1 {
@@ -1043,22 +1043,32 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
         }
         // One failure is not proof: a flaky test fails at random, and reverting a good item costs
         // it a resubmit and the goal a checkpoint. The item before it passed (a flake fails, it
-        // never passes), so only the failure is gated again before the item is named.
+        // never passes), so only the failure is gated again, and it must be the same failure, in
+        // tests the item reaches, before the item is named.
+        let first = failed_at.iter().find(|(i, _)| *i == hi).map(|(_, g)| g.clone()).unwrap_or_else(|| failed.clone());
         let again = gate_at(db, hi, "Confirming the bisect", &mut gates)?;
-        if !(again.passed || again.skipped.is_some()) {
-            failing = again;
-            break;
+        let held = match repeated(&first, &again) {
+            None => Err("did not repeat when gated again, so it was a flaky test".to_string()),
+            Some(tests) => match unreached(&wt, &items[hi - 1], &tests) {
+                Some(names) => Err(format!("is in {names}, which it does not reach (a flaky test, or a gap in the affected-test map)")),
+                None => Ok(()),
+            },
+        };
+        match held {
+            Ok(()) => {
+                failing = again;
+                break;
+            }
+            Err(why) => {
+                db.log_event(actor, Some(key), None, "status", &format!("Bisecting the checkpoint: the failure at {} {why}; not counted", items[hi - 1].issue))?;
+                cleared.push(format!("the failure at {} {why}", items[hi - 1].issue));
+                failed_at.retain(|(i, _)| *i > hi);
+                lo = hi;
+                hi = failed_at.iter().map(|(i, _)| *i).min().unwrap_or(k + 1);
+            }
         }
-        flaked.push(items[hi - 1].issue.clone());
-        failed_at.retain(|&f| f > hi);
-        lo = hi;
-        hi = failed_at.iter().copied().min().unwrap_or(k + 1);
     }
-    let flaky = if flaked.is_empty() {
-        String::new()
-    } else {
-        format!("; the failure at {} did not repeat when gated again, so it was a flaky test and not counted", flaked.join(", "))
-    };
+    let flaky = if cleared.is_empty() { String::new() } else { format!("; not counted: {}", cleared.join("; ")) };
     db.conn.execute("UPDATE goal_checkpoint SET gates = gates + ?2 WHERE id = ?1", params![cp.id, gates])?;
     if hi == k + 1 {
         let said = format!("every item's commit on {} passes the full gate; only the merge with main fails, so nothing is reverted ({gates} full run{}){flaky}", gb.branch, if gates == 1 { "" } else { "s" });
@@ -1115,6 +1125,68 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
         said.push_str(&format!("; {} lands the rest: start_task, submit and land it", next.issue));
     }
     Ok(said)
+}
+
+/// The failing tests `first` and `again` share, when `again` failed the same way: the same gate
+/// command, and where both name the tests that failed (cargo's), at least one of the same. Empty
+/// when the command failed without naming any, both times. None when it is not the same failure.
+fn repeated(first: &GateResult, again: &GateResult) -> Option<Vec<String>> {
+    if again.passed || again.skipped.is_some() {
+        return None;
+    }
+    for a in first.results.iter().filter(|r| !r.ok && !r.skipped) {
+        let Some(b) = again.results.iter().find(|r| !r.ok && !r.skipped && r.command == a.command) else { continue };
+        let (x, y) = (failed_tests(&a.output), failed_tests(&b.output));
+        if x.is_empty() && y.is_empty() {
+            return Some(vec![]);
+        }
+        let both: Vec<String> = x.into_iter().filter(|t| y.contains(t)).collect();
+        if !both.is_empty() {
+            return Some(both);
+        }
+    }
+    None
+}
+
+/// The tests a cargo run reports failed, from the end of its output: `test NAME ... FAILED`, and
+/// the names listed under `failures:`.
+fn failed_tests(output: &str) -> Vec<String> {
+    let mut names: Vec<String> = vec![];
+    let mut listing = false;
+    for line in output.lines() {
+        let line = line.trim_end();
+        if let Some(name) = line.strip_prefix("test ").and_then(|l| l.split_once(" ... FAILED")).map(|(n, _)| n.trim()) {
+            names.push(name.to_string());
+        } else if line == "failures:" {
+            listing = true;
+        } else if listing && line.starts_with("    ") && !line.trim().contains(' ') {
+            names.push(line.trim().to_string());
+        } else if !line.trim().is_empty() {
+            listing = false;
+        }
+    }
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// When none of `tests` (cargo test names) is one `item` reaches, by the affected-test map: what to
+/// call them. None when it reaches one, or the map cannot tell (it places the change nowhere, or
+/// runs a whole cargo suite for it), so the failure stays the item's.
+fn unreached(wt: &Path, item: &Item, tests: &[String]) -> Option<String> {
+    if tests.is_empty() {
+        return None;
+    }
+    let selection = crate::affected_tests::select_with_policy(wt, &item.from, &item.to, &item.from).ok()?;
+    if selection.full {
+        return None;
+    }
+    let cargo = |c: &crate::affected_tests::Check| c.command.trim_start().starts_with("cargo ");
+    let reaches = |t: &String| selection.checks.iter().any(|c| (c.whole_suite && cargo(c)) || c.required_tests.contains(t));
+    if tests.iter().any(reaches) {
+        return None;
+    }
+    Some(tests.iter().map(|t| format!("`{t}`")).collect::<Vec<_>>().join(", "))
 }
 
 fn tail(text: &str, lines: usize) -> String {
@@ -1497,6 +1569,92 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
         assert_eq!(items, [("NIT-7".to_string(), fork, seven.clone()), ("NIT-9".to_string(), seven, nine)]);
         assert_eq!(f.db.goal_branch_summary(f.goal).unwrap().unwrap().next_checkpoint, "at 10 items (8 to go)");
         std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A bisect's confirmation counts only the same failure again, in tests the item reaches
+    /// (NIT-713): test A failing and then test B is two flakes, not a culprit; and a core test
+    /// failing twice beside an item that only changes the frontend is not that item's.
+    #[test]
+    fn a_confirmed_failure_is_the_same_failure_in_tests_the_item_reaches() {
+        let run = |command: &str, failed: &[&str]| crate::playbook::CommandResult {
+            step: None,
+            command: command.into(),
+            ok: failed.is_empty(),
+            seconds: 1,
+            output: if failed.is_empty() {
+                "test result: ok".into()
+            } else {
+                let mut out: String = failed.iter().map(|t| format!("test {t} ... FAILED
+")).collect();
+                out.push_str("
+failures:
+
+");
+                out.extend(failed.iter().map(|t| format!("---- {t} stdout ----
+panicked
+
+")));
+                out.push_str("
+failures:
+");
+                out.extend(failed.iter().map(|t| format!("    {t}
+")));
+                out.push_str("
+test result: FAILED. 9 passed; 1 failed
+");
+                out
+            },
+            skipped: false,
+            timed_out: false,
+        };
+        let gate = |results: Vec<crate::playbook::CommandResult>| GateResult { mode_authority: None, plan: None, skipped: None, passed: results.iter().all(|r| r.ok), commit: "c".into(), results, warnings: vec![], flaked: vec![], lane_run: None };
+        let (cargo, npm) = ("cargo test --workspace", "npm test");
+        let a = gate(vec![run(cargo, &["lanes::tests::a"]), run(npm, &[])]);
+        assert_eq!(repeated(&a, &gate(vec![run(cargo, &["lanes::tests::a", "x::y"]), run(npm, &[])])), Some(vec!["lanes::tests::a".to_string()]));
+        assert_eq!(repeated(&a, &gate(vec![run(cargo, &["links::tests::b"]), run(npm, &[])])), None, "another test failed: two flakes");
+        assert_eq!(repeated(&a, &gate(vec![run(cargo, &[]), run(npm, &["src/x.test.ts"])])), None, "another command failed");
+        assert_eq!(repeated(&a, &gate(vec![run(cargo, &[]), run(npm, &[])])), None, "it passed");
+        // A command that names no test (a build), failing both times, is the same failure.
+        let build = gate(vec![run("npm run build", &[]), run(npm, &[])]);
+        let mut broken = build.clone();
+        broken.results[0].ok = false;
+        broken.results[0].output = "error TS2304".into();
+        broken.passed = false;
+        assert_eq!(repeated(&broken, &broken), Some(vec![]));
+
+        // The map: the frontend's tests are one whole suite; the core's only the named ones.
+        let base = crate::paths::unique_temp("nitely-bisect-reach", "");
+        let repo = base.join("repo");
+        let policy = "version = 1
+[[components]]
+id = \"web\"
+roots = [\"src/\"]
+checks = [\"npm run build\"]
+[[components.suites]]
+id = \"npm-test\"
+inputs = [\"src/\"]
+[components.suites.javascript]
+command = \"npm test\"
+test_patterns = [\"src/**/*.test.ts\"]
+";
+        crate::test_repo::init(&repo, &[(crate::affected_tests::POLICY_PATH, policy), ("src/a.ts", "export const a = 1;
+"), ("src/a.test.ts", "import './a';
+"), ("core/lib.rs", "fn main() {}
+")]);
+        let item = |file: &str| {
+            let from = rev(&repo, "HEAD").unwrap();
+            std::fs::write(repo.join(file), "changed
+").unwrap();
+            sh(&repo, &["commit", "-qam", file]);
+            Item { id: 1, issue: "NIT-1".into(), from, to: rev(&repo, "HEAD").unwrap(), landed_at: 0, checkpoint: None, reverted_at: None }
+        };
+        let core = vec!["links::tests::b".to_string()];
+        let frontend = item("src/a.ts");
+        assert_eq!(unreached(&repo, &frontend, &core).as_deref(), Some("`links::tests::b`"), "a frontend change does not reach a core test");
+        assert_eq!(unreached(&repo, &frontend, &[]), None, "a failure that names no test stays the item's");
+        let unmapped = item("core/lib.rs");
+        assert_eq!(unreached(&repo, &unmapped, &core), None, "a change the map cannot place may reach anything");
+        std::fs::remove_dir_all(&base).ok();
     }
 
     /// A checkpoint whose full gate fails bisects over the goal's items: the one at fault is
