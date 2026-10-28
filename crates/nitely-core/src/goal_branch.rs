@@ -1063,7 +1063,7 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
         // failure, in tests it reaches, it is not shown to be the item's either. Nothing is reverted.
         unsettled = match repeated(&first, &again) {
             None => Some(format!("{} failed again when gated again, but not the same way (a flaky test, one of them at least)", items[hi - 1].issue)),
-            Some(tests) => unreached(&wt, &items[hi - 1], &tests).map(|names| format!("{} failed twice in {names}, which it does not reach (a flaky test, or a gap in the affected-test map)", items[hi - 1].issue)),
+            Some((command, tests)) => unreached(&wt, &items[hi - 1], &command, &tests).map(|names| format!("{} failed twice in {names}, which it does not reach (a flaky test, or a gap in the affected-test map)", items[hi - 1].issue)),
         };
         failing = again;
         break;
@@ -1132,10 +1132,11 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
     Ok(said)
 }
 
-/// The failing tests `first` and `again` share, when `again` failed the same way: the same gate
-/// step (as the playbook writes it, so two lanes' `{worktree}` paths do not differ), and where both name the tests that failed (cargo's), at least one of the same. Empty
-/// when the command failed without naming any, both times. None when it is not the same failure.
-fn repeated(first: &GateResult, again: &GateResult) -> Option<Vec<String>> {
+/// The failing step and tests `first` and `again` share, when `again` failed the same way: the
+/// same gate step (as the playbook writes it, so two lanes' `{worktree}` paths do not differ),
+/// and where both name the tests that failed, at least one of the same. The tests are empty when
+/// the step failed without naming any, both times. None when it is not the same failure.
+fn repeated(first: &GateResult, again: &GateResult) -> Option<(String, Vec<String>)> {
     if again.passed || again.skipped.is_some() {
         return None;
     }
@@ -1145,45 +1146,25 @@ fn repeated(first: &GateResult, again: &GateResult) -> Option<Vec<String>> {
     for a in first.results.iter().filter(failed) {
         let step = |r: &crate::playbook::CommandResult| r.step.clone().unwrap_or_else(|| r.command.clone());
         let Some(b) = again.results.iter().filter(failed).find(|r| step(r) == step(a)) else { continue };
-        let (x, y) = (failed_tests(&a.output), failed_tests(&b.output));
+        // The shared reader, so a CI log's job, step and time prefixes are read past too.
+        let (x, y) = (playbook::failed_tests(&a.output), playbook::failed_tests(&b.output));
         if x.is_empty() && y.is_empty() {
-            return Some(vec![]);
+            return Some((b.command.clone(), vec![]));
         }
         let both: Vec<String> = x.into_iter().filter(|t| y.contains(t)).collect();
         if !both.is_empty() {
-            return Some(both);
+            return Some((b.command.clone(), both));
         }
     }
     None
 }
 
-/// The tests a cargo run reports failed, from the end of its output: `test NAME ... FAILED`, and
-/// the names listed under `failures:`.
-fn failed_tests(output: &str) -> Vec<String> {
-    let mut names: Vec<String> = vec![];
-    let mut listing = false;
-    for line in output.lines() {
-        let line = line.trim_end();
-        if let Some(name) = line.strip_prefix("test ").and_then(|l| l.split_once(" ... FAILED")).map(|(n, _)| n.trim()) {
-            names.push(name.to_string());
-        } else if line == "failures:" {
-            listing = true;
-        } else if listing && line.starts_with("    ") && !line.trim().contains(' ') {
-            names.push(line.trim().to_string());
-        } else if !line.trim().is_empty() {
-            listing = false;
-        }
-    }
-    names.sort();
-    names.dedup();
-    names
-}
-
-/// When none of `tests` (cargo test names) is one `item` reaches, by the affected-test map: what to
-/// call them. None when it reaches one, or the map cannot tell (it places the change nowhere, or
-/// runs a whole cargo suite for it), so the failure stays the item's.
-fn unreached(wt: &Path, item: &Item, tests: &[String]) -> Option<String> {
-    if tests.is_empty() {
+/// When none of `tests`, which the cargo `command` named, is one `item` reaches, by the
+/// affected-test map: what to call them. None when it reaches one, or the map cannot tell (it
+/// places the change nowhere, runs a whole cargo suite for it, or the tests are not cargo's), so
+/// the failure stays the item's.
+fn unreached(wt: &Path, item: &Item, command: &str, tests: &[String]) -> Option<String> {
+    if tests.is_empty() || !command.trim_start().starts_with("cargo ") {
         return None;
     }
     let selection = crate::affected_tests::select_with_policy(wt, &item.from, &item.to, &item.from).ok()?;
@@ -1619,7 +1600,7 @@ test result: FAILED. 9 passed; 1 failed
         let gate = |results: Vec<crate::playbook::CommandResult>| GateResult { mode_authority: None, plan: None, skipped: None, passed: results.iter().all(|r| r.ok), commit: "c".into(), results, warnings: vec![], flaked: vec![], lane_run: None };
         let (cargo, npm) = ("cargo test --workspace", "npm test");
         let a = gate(vec![run(cargo, &["lanes::tests::a"]), run(npm, &[])]);
-        assert_eq!(repeated(&a, &gate(vec![run(cargo, &["lanes::tests::a", "x::y"]), run(npm, &[])])), Some(vec!["lanes::tests::a".to_string()]));
+        assert_eq!(repeated(&a, &gate(vec![run(cargo, &["lanes::tests::a", "x::y"]), run(npm, &[])])), Some((cargo.to_string(), vec!["lanes::tests::a".to_string()])));
         assert_eq!(repeated(&a, &gate(vec![run(cargo, &["links::tests::b"]), run(npm, &[])])), None, "another test failed: two flakes");
         assert_eq!(repeated(&a, &gate(vec![run(cargo, &[]), run(npm, &["src/x.test.ts"])])), None, "another command failed");
         assert_eq!(repeated(&a, &gate(vec![run(cargo, &[]), run(npm, &[])])), None, "it passed");
@@ -1643,7 +1624,17 @@ test result: FAILED. 9 passed; 1 failed
         broken.results[0].ok = false;
         broken.results[0].output = "error TS2304".into();
         broken.passed = false;
-        assert_eq!(repeated(&broken, &broken), Some(vec![]));
+        assert_eq!(repeated(&broken, &broken), Some(("npm run build".to_string(), vec![])));
+        // CI's log, every line behind its job, step and time: read past, so two different flaky
+        // tests there are no confirmation either.
+        let in_ci = |t: &str| {
+            let mut r = run(cargo, &[t]);
+            r.output = r.output.lines().map(|l| format!("test	Run	2026-10-27T22:59:06.1760388Z {l}
+")).collect();
+            gate(vec![r])
+        };
+        assert_eq!(repeated(&in_ci("lanes::tests::a"), &in_ci("links::tests::b")), None, "two flakes in a CI log");
+        assert!(repeated(&in_ci("lanes::tests::a"), &in_ci("lanes::tests::a")).is_some_and(|(_, t)| t == ["lanes::tests::a"]));
 
         // The map: the frontend's tests are one whole suite; the core's only the named ones.
         let base = crate::paths::unique_temp("nitely-bisect-reach", "");
@@ -1673,10 +1664,11 @@ test_patterns = [\"src/**/*.test.ts\"]
         };
         let core = vec!["links::tests::b".to_string()];
         let frontend = item("src/a.ts");
-        assert_eq!(unreached(&repo, &frontend, &core).as_deref(), Some("`links::tests::b`"), "a frontend change does not reach a core test");
-        assert_eq!(unreached(&repo, &frontend, &[]), None, "a failure that names no test stays the item's");
+        assert_eq!(unreached(&repo, &frontend, cargo, &core).as_deref(), Some("`links::tests::b`"), "a frontend change does not reach a core test");
+        assert_eq!(unreached(&repo, &frontend, cargo, &[]), None, "a failure that names no test stays the item's");
+        assert_eq!(unreached(&repo, &frontend, npm, &["src/x.test.ts".to_string()]), None, "only cargo's test names are placed");
         let unmapped = item("core/lib.rs");
-        assert_eq!(unreached(&repo, &unmapped, &core), None, "a change the map cannot place may reach anything");
+        assert_eq!(unreached(&repo, &unmapped, cargo, &core), None, "a change the map cannot place may reach anything");
         std::fs::remove_dir_all(&base).ok();
     }
 
