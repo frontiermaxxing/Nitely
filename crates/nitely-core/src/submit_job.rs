@@ -401,11 +401,27 @@ fn without_inherited_std<T>(spawn: impl FnOnce() -> T) -> T {
     spawn()
 }
 
+/// The worktree a submit runs in and the issue it is for: the one named, else the branch's.
+fn issue_of(opts: &SubmitOptions) -> Result<(std::path::PathBuf, String)> {
+    let (worktree, branch_key) = crate::playbook::current_worktree(opts.dir)?;
+    let key = opts.issue_key.map(str::to_string).or(branch_key).context("the branch names no issue; pass the issue key")?;
+    Ok((worktree, key))
+}
+
+/// Records the author's note to the reviewer (`submit` with `reviewer_note`, NIT-501) for the issue
+/// `opts` submits, before the job is handed in: a job that starts at once, or runs right here when
+/// it cannot be started apart, reads it (NIT-714).
+pub fn brief_before(db: &Db, opts: &SubmitOptions, note: Option<&str>, actor: &Actor) -> Result<()> {
+    let Some(note) = note.filter(|n| !n.trim().is_empty()) else { return Ok(()) };
+    let (_, key) = issue_of(opts)?;
+    let issue = db.issue(&key)?.with_context(|| format!("no issue {key}"))?;
+    crate::submit::brief_reviewer(db, &issue.key, note, actor)
+}
+
 /// Records a submit to run later: the cheap checks `submit` would fail on at once are made here, so
 /// the agent hears about them now. A queued job of the same issue is superseded.
 pub fn enqueue(db: &Db, opts: &SubmitOptions, actor: &Actor) -> Result<Job> {
-    let (worktree, branch_key) = crate::playbook::current_worktree(opts.dir)?;
-    let key = opts.issue_key.map(str::to_string).or(branch_key).context("the branch names no issue; pass the issue key")?;
+    let (worktree, key) = issue_of(opts)?;
     let issue = db.issue(&key)?.with_context(|| format!("no issue {key}"))?;
     let git = |args: &[&str]| crate::playbook::git(&worktree, args);
     let branch = git(&["rev-parse", "--abbrev-ref", "HEAD"])?.trim().to_string();

@@ -290,6 +290,11 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
                         let (pb, _) = review_policy(db, &root, &issue)?;
                         let diff = diff_id(&worktree, &since, &out.commit).ok();
                         db.conn.execute("UPDATE review SET rules = ?2, diff_id = ?3 WHERE id = ?1", rusqlite::params![db.conn.last_insert_rowid(), rules_of(&pb.review), diff])?;
+                        // Its P2s are filed now: the next round carries them, and carried
+                        // findings are never filed again (NIT-714).
+                        if let Some(r) = &out.review {
+                            file_minor_findings(db, &issue.key, r, actor)?;
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -1816,6 +1821,7 @@ case "$prompt" in
      esac;;
   *) case "$files" in
        *together*) touch ../review-ran; echo "- [P1] Together: together.txt, the x is never read"; echo "VERDICT: findings";;
+       *mixed*) echo "- [P1] Mixed: mixed.txt, the x is never read"; echo "- [P2] Mixed edge: mixed.txt, the empty line"; echo "VERDICT: findings";;
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
        *stuck*) echo "- [P1] Stuck: stuck.txt, the x is never read"; echo "VERDICT: findings";;
        *stale*) if [ -f ../stale-seen ]; then echo "Fine."; echo "VERDICT: clean"; else touch ../stale-seen; echo "- [P1] Stale: stale.txt, the x is never read"; echo "VERDICT: findings"; fi;;
@@ -1935,6 +1941,22 @@ reason = "money logic"
         f.submit(&wt, true).unwrap();
         let again = follow_ups(&f);
         assert_eq!((again.len(), again[0].key.as_str(), again[0].body.matches("Edge case").count()), (1, first[0].key.as_str(), 1));
+    }
+
+    /// A failed gate's review files its P2s too (NIT-714): the next round carries them, and a
+    /// carried finding is never filed again.
+    #[test]
+    fn a_failed_gates_review_files_its_p2_findings() {
+        let mut f = fixture();
+        let failing = std::fs::read_to_string(f.repo.join(playbook::PLAYBOOK_PATH)).unwrap().replace("commands = [\"exit 0\"]", "commands = [\"exit 3\"]");
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), failing).unwrap();
+        sh(&f.repo, &["commit", "-qam", "a failing gate"]);
+        let (issue, wt) = f.committed("Mix the rows", "mixed.txt");
+        let s = f.submit(&wt, true).unwrap();
+        assert!(!s.gate.passed && s.review.as_ref().is_some_and(|r| r.verdict == "changes"), "{s:?}");
+        let evidence = crate::submit_rules::minor_follow_up_evidence(&issue.key);
+        let filed = f.db.list_issues(Some("NIT"), false).unwrap().into_iter().find(|i| i.evidence == evidence).expect("the P2 is filed");
+        assert!(filed.body.contains("- [P2] Mixed edge: mixed.txt, the empty line") && !filed.body.contains("[P1]"), "{}", filed.body);
     }
 
     #[test]
