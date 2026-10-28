@@ -1164,19 +1164,24 @@ fn repeated(first: &GateResult, again: &GateResult) -> Option<(String, Vec<Strin
 /// places the change nowhere, runs a whole cargo suite for it, or the tests are not cargo's), so
 /// the failure stays the item's.
 fn unreached(wt: &Path, item: &Item, command: &str, tests: &[String]) -> Option<String> {
-    if tests.is_empty() || !command.trim_start().starts_with("cargo ") {
+    if tests.is_empty() || !is_cargo(command) {
         return None;
     }
     let selection = crate::affected_tests::select_with_policy(wt, &item.from, &item.to, &item.from).ok()?;
     if selection.full {
         return None;
     }
-    let cargo = |c: &crate::affected_tests::Check| c.command.trim_start().starts_with("cargo ");
-    let reaches = |t: &String| selection.checks.iter().any(|c| (c.whole_suite && cargo(c)) || c.required_tests.contains(t));
+    let reaches = |t: &String| selection.checks.iter().any(|c| (c.whole_suite && is_cargo(&c.command)) || c.required_tests.contains(t));
     if tests.iter().any(reaches) {
         return None;
     }
     Some(tests.iter().map(|t| format!("`{t}`")).collect::<Vec<_>>().join(", "))
+}
+
+/// Whether `command` runs cargo: `cargo`, `cargo.exe` or a path to either, as its program.
+fn is_cargo(command: &str) -> bool {
+    let program = command.split_whitespace().next().unwrap_or("").trim_matches('"');
+    Path::new(program).file_stem().is_some_and(|s| s.eq_ignore_ascii_case("cargo"))
 }
 
 fn tail(text: &str, lines: usize) -> String {
@@ -1667,6 +1672,7 @@ test_patterns = [\"src/**/*.test.ts\"]
         assert_eq!(unreached(&repo, &frontend, cargo, &core).as_deref(), Some("`links::tests::b`"), "a frontend change does not reach a core test");
         assert_eq!(unreached(&repo, &frontend, cargo, &[]), None, "a failure that names no test stays the item's");
         assert_eq!(unreached(&repo, &frontend, npm, &["src/x.test.ts".to_string()]), None, "only cargo's test names are placed");
+        assert!(unreached(&repo, &frontend, "cargo.exe test --workspace", &core).is_some(), "cargo by its Windows name");
         let unmapped = item("core/lib.rs");
         assert_eq!(unreached(&repo, &unmapped, cargo, &core), None, "a change the map cannot place may reach anything");
         std::fs::remove_dir_all(&base).ok();
