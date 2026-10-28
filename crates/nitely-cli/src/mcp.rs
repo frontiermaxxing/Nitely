@@ -1451,10 +1451,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let solution = nitely_core::submit::SolutionSummary::from_fields(str_arg(args, "solution_title"), str_arg(args, "solution_summary"))?;
             let opts = nitely_core::submit::SubmitOptions { dir: &dir, issue_key: str_arg(args, "key"), skip_review: false, local_only: false, batch: false, solution: solution.as_ref(), solution_commit: None, solution_patch_id: None };
             let runner = nitely_core::submit_job::DetachedProcess { nitely: std::env::current_exe()? };
+            nitely_core::submit_job::brief_before(&db, &opts, str_arg(args, "reviewer_note"), &actor)?;
             let job = nitely_core::submit_job::submit_async(&mut db, &config, &opts, &actor, &runner)?;
-            if let Some(note) = str_arg(args, "reviewer_note").filter(|n| !n.trim().is_empty()) {
-                nitely_core::submit::brief_reviewer(&db, &job.issue, note, &actor)?;
-            }
             if args.get("wait").and_then(Value::as_bool).unwrap_or(false) {
                 // The job runs in a process of its own, so it outlives this call and this server;
                 // waiting on it here is only waiting.
@@ -1974,8 +1972,29 @@ fn detail(args: &Value) -> bool {
     args.get("detail").and_then(Value::as_bool).unwrap_or(false)
 }
 
-/// How many lines of a failed gate step's output the short result keeps.
+/// How many lines of a failed gate step's output the short result keeps, and at most how many
+/// characters of them (log lines can be long: forty of them alone would break the 2k answer).
 const FAILED_TAIL: usize = 40;
+const FAILED_CHARS: usize = 1_000;
+/// At most how many characters of an error the short result keeps.
+const ERROR_CHARS: usize = 500;
+
+/// The last `max` characters of `s`, cut at a character boundary, marked when cut.
+fn last_chars(s: &str, max: usize) -> String {
+    let n = s.chars().count();
+    if n <= max {
+        return s.to_string();
+    }
+    format!("…{}", s.chars().skip(n - max).collect::<String>())
+}
+
+/// The first `max` characters of `s`, marked when cut.
+fn first_chars(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        return s.to_string();
+    }
+    format!("{}… (`detail` gives it in full)", s.chars().take(max).collect::<String>())
+}
 
 /// A submit's or a land's result as the agent acts on it (NIT-697): its state, the review's
 /// verdict and every finding in full, `next`, and of the gate only whether it passed, or the step
@@ -1988,6 +2007,9 @@ fn brief(result: &Value) -> Value {
         match result.get(key) {
             None | Some(Value::Null) => {}
             Some(Value::Array(a)) if a.is_empty() => {}
+            Some(Value::String(s)) if key.ends_with("error") => {
+                out.insert(key.into(), json!(first_chars(s, ERROR_CHARS)));
+            }
             Some(v) => {
                 out.insert(key.into(), v.clone());
             }
@@ -2014,7 +2036,7 @@ fn brief(result: &Value) -> Value {
 }
 
 /// A gate as `brief` tells it: passed (with how many steps flaked, if any), skipped and why, or
-/// the first step that failed with the last `FAILED_TAIL` lines of its output.
+/// the first step that failed with the last `FAILED_TAIL` lines of its output, `FAILED_CHARS` at most.
 fn brief_gate(gate: &Value) -> Value {
     if let Some(why) = gate["skipped"].as_str() {
         return json!({ "passed": false, "skipped": why });
@@ -2029,7 +2051,7 @@ fn brief_gate(gate: &Value) -> Value {
     };
     let output = failed["output"].as_str().unwrap_or("");
     let lines: Vec<&str> = output.lines().collect();
-    let tail = lines[lines.len().saturating_sub(FAILED_TAIL)..].join("\n");
+    let tail = last_chars(&lines[lines.len().saturating_sub(FAILED_TAIL)..].join("\n"), FAILED_CHARS);
     let mut out = json!({ "passed": false, "failed": failed["step"].as_str().or(failed["command"].as_str()), "output": tail });
     if failed["timed_out"].as_bool().unwrap_or(false) {
         out["timed_out"] = json!(true);
@@ -2210,6 +2232,14 @@ mod tests {
         assert!(b["land"].get("issue").is_none() && b.get("verification").is_none() && b.get("solution").is_none() && b.get("pr_url").is_none());
         assert!(b.to_string().len() < 2000 + 900 + 2 * 400, "{}", b.to_string().len());
         assert_eq!(brief_gate(&json!({ "passed": true, "flaked": [{}], "results": [] })), json!({ "passed": true, "flaked": 1 }));
+        // Long log lines and a long error stay inside the 2k answer too (NIT-714): the end of the
+        // output, where the failure is, and the start of the error.
+        let wide: String = (1..=100).map(|i| format!("{i:03} {}\n", "w".repeat(96))).collect();
+        let wide_gate = json!({ "passed": false, "results": [{ "command": "cargo test", "ok": false, "output": wide }] });
+        let b = brief(&json!({ "issue": "APP-1", "error": "e".repeat(5000), "gate": wide_gate }));
+        let out = b["gate"]["output"].as_str().unwrap();
+        assert!(out.chars().count() <= FAILED_CHARS + 1 && out.ends_with(&format!("100 {}", "w".repeat(96))), "{out}");
+        assert!(b.to_string().len() < 2000, "{}", b.to_string().len());
 
         let job = |state: &str| nitely_core::submit_job::Job {
             id: 7,

@@ -4626,7 +4626,10 @@ commands = []
         let held = try_lock(&root, &pb, 1).unwrap().expect("free at first");
         assert!(try_lock(&root, &pb, 1).unwrap().is_none(), "held by this handle");
         drop(held);
-        assert!(try_lock(&root, &pb, 1).unwrap().is_some(), "free once dropped, as after a crash");
+        // On Linux and macOS a process another test spawns meanwhile can hold a copy of the lock
+        // until it starts its program, so it is free once that copy goes, as `lock_waiting` allows
+        // for (NIT-713): the wait only bounds a lock that never comes free.
+        assert!(lock_waiting(&root, &pb, 1, Duration::from_secs(30)).unwrap().is_some(), "free once dropped, as after a crash");
 
         // A row left queued by a process that is gone reads as abandoned.
         db.conn
