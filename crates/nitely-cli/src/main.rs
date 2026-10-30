@@ -801,8 +801,8 @@ enum IssueCmd {
         project: Option<String>,
     },
     /// List open issues (add --all for closed ones too). With --closed-since or --closed-before,
-    /// what got done instead: the issues closed in that window, newest first, with when each
-    /// closed and the branch@commit it landed at.
+    /// what got done instead: the issues Done in that window (--state adds Canceled or Duplicate),
+    /// newest first, with when each closed and the branch@commit it landed at.
     List {
         #[arg(long)]
         project: Option<String>,
@@ -1622,7 +1622,7 @@ fn run(cmd: Cmd) -> Result<()> {
                     let since = closed_since.as_deref().map(parse_time).transpose()?;
                     let before = closed_before.as_deref().map(parse_time).transpose()?;
                     if since.is_some() || before.is_some() {
-                        for c in db.closed_issues(&project, since, before)?.into_iter().filter(|c| kind_and_state_match(c.kind.as_deref(), &c.state, &kinds, &states)) {
+                        for c in db.closed_issues(&project, since, before, &states)?.into_iter().filter(|c| kind_and_state_match(c.kind.as_deref(), &c.state, &kinds, &[])) {
                             println!("{}", c.line());
                         }
                         return Ok(());

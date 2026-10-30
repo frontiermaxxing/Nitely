@@ -584,16 +584,16 @@ fn tools() -> Value {
         },
         {
             "name": "list_issues",
-            "description": "Open issues of a project, most urgent first. With closed_since or closed_before it answers what got done instead: the issues closed in that window (Done, Canceled and the like), newest first, one line each with when it closed and the branch@commit it landed at. Ask the board \"what was completed since Oct 22\" this way rather than reading git log: it knows what landed through goal branches and what was closed without a commit.",
+            "description": "Open issues of a project, most urgent first. With closed_since or closed_before it answers what got done instead: the issues Done in that window (states adds Canceled or Duplicate), newest first, one line each with when it closed, the branch@commit it landed at, priority, kind, labels and goal; detail: true gives each in full with its body and closing evidence. Ask the board \"what was completed since Oct 22\" this way rather than reading git log: it knows what landed through goal branches and what was closed without a commit.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string" },
                 "include_closed": { "type": "boolean" },
                 "label": { "type": "string", "description": "Only issues with this label (open listing)." },
                 "kind": { "type": "string", "description": "Only this kind: bug, feature, chore, ..." },
-                "states": { "type": "array", "items": { "type": "string" }, "description": "Only these states, e.g. [\"Done\"] or [\"Todo\", \"In Progress\"]." },
+                "states": { "type": "array", "items": { "type": "string" }, "description": "Only these states, e.g. [\"Todo\", \"In Progress\"]; with closed_since, [\"Done\", \"Canceled\", \"Duplicate\"] adds the closed-undone ones (Done alone by default)." },
                 "closed_since": { "type": "string", "description": "Closed at or after: a day (2026-10-22, from local midnight), an RFC 3339 time or Unix seconds." },
                 "closed_before": { "type": "string", "description": "Closed before; same forms as closed_since." },
-                "detail": { "type": "boolean", "description": "Closed rows as full objects with no length cap, instead of one capped line each." }
+                "detail": { "type": "boolean", "description": "Closed issues in full, with body and closing evidence and no length cap, instead of one capped line each." }
             } }
         },
         {
@@ -1554,7 +1554,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             let when = |key: &str| str_arg(args, key).map(|t| parse_time(t).with_context(|| key.to_string())).transpose();
             let (since, before) = (when("closed_since")?, when("closed_before")?);
             if since.is_some() || before.is_some() {
-                let closed: Vec<_> = db.closed_issues(&project, since, before)?.into_iter().filter(|c| kind_and_state_match(c.kind.as_deref(), &c.state, &kinds, &states)).collect();
+                let closed: Vec<_> = db.closed_issues(&project, since, before, &states)?.into_iter().filter(|c| kind_and_state_match(c.kind.as_deref(), &c.state, &kinds, &[])).collect();
                 if detail(args) {
                     json!({ "count": closed.len(), "closed": closed })
                 } else {
@@ -2012,7 +2012,7 @@ fn closed_lines(closed: &[nitely_core::issues::ClosedIssue]) -> Value {
         used += line.len() + 4;
         lines.push(line);
     }
-    let mut out = json!({ "count": closed.len(), "closed": lines });
+    let mut out = json!({ "count": closed.len(), "closed": lines, "links": nitely_core::links::issue_url("KEY") });
     if lines.len() < closed.len() {
         out["more"] = json!(format!(
             "{} older not shown: narrow closed_since or closed_before, filter by kind or states, or pass detail: true for all of them",
@@ -2271,8 +2271,15 @@ mod tests {
                 title: "A title long enough to be cut where a line would run past its share of the budget".repeat(2),
                 state: "Done".into(),
                 kind: Some("feature".into()),
+                priority: 2,
+                labels: vec!["ui".into()],
+                goal: Some(3),
                 closed_at: 1_793_000_000 - n,
                 landed: Some("main@7aaf3e13".into()),
+                url: String::new(),
+                body: "why".repeat(500),
+                evidence: "shown".into(),
+                done: true,
             })
             .collect();
         let out = closed_lines(&closed);
