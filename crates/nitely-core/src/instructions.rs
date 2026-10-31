@@ -43,7 +43,9 @@ from a chat, a pull request or a terminal alike. Link an ask the same way, with 
 `get_answer` return: [ask 69](http://127.0.0.1:7423/a/69) opens its question, its answer and its issue.
 9. `updates` says what the person did in the app and what landed since you last looked; on Claude \
 Code it also comes with each prompt. Call it when you resume after a pause, before you tell the person \
-that something waits on them.
+that something waits on them. For what got done since a day, ask the board, not git log: \
+`list_issues` with `closed_since` (and `closed_before`, `kind`, `states`) lists the issues closed then, \
+with the commit each landed at.
 
 Priority when you file: 1 exploitable today, data loss or a leak, a production job silently stopped, \
 or a broken release; 2 a user-visible bug, a blocker for shipping, or a missing safety net (CI, \
