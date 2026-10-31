@@ -584,11 +584,16 @@ fn tools() -> Value {
         },
         {
             "name": "list_issues",
-            "description": "Open issues of a project, most urgent first.",
+            "description": "Open issues of a project, most urgent first. With closed_since or closed_before it answers what got done instead: the issues Done in that window (states adds Canceled or Duplicate), newest first, one line each with when it closed, the branch@commit it landed at, priority, kind, labels and goal; detail: true gives each in full with its body and closing evidence. Ask the board \"what was completed since Oct 22\" this way rather than reading git log: it knows what landed through goal branches and what was closed without a commit.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string" },
                 "include_closed": { "type": "boolean" },
-                "label": { "type": "string", "description": "Only issues with this label." }
+                "label": { "type": "string", "description": "Only issues with this label (open listing)." },
+                "kind": { "type": "string", "description": "Only this kind: bug, feature, chore, ..." },
+                "states": { "type": "array", "items": { "type": "string" }, "description": "Only these states, e.g. [\"Todo\", \"In Progress\"]; with closed_since, [\"Done\", \"Canceled\", \"Duplicate\"] adds the closed-undone ones (Done alone by default)." },
+                "closed_since": { "type": "string", "description": "Closed at or after: a day (2026-10-22, from local midnight), an RFC 3339 time or Unix seconds." },
+                "closed_before": { "type": "string", "description": "Closed before; same forms as closed_since." },
+                "detail": { "type": "boolean", "description": "Closed issues in full, with body and closing evidence and no length cap, instead of one capped line each." }
             } }
         },
         {
@@ -1538,11 +1543,33 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             })
         }
         "list_issues" => {
+            use nitely_core::issues::{kind_and_state_match, parse_time};
             let project = project(&db)?;
-            let include_closed = args.get("include_closed").and_then(Value::as_bool).unwrap_or(false);
-            let label = str_arg(args, "label").and_then(nitely_core::issues::normalize_label);
-            let issues: Vec<_> = db.list_issues(Some(&project), include_closed)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))).collect();
-            json!(issues)
+            let kinds: Vec<String> = str_arg(args, "kind").map(|k| vec![k.to_string()]).unwrap_or_default();
+            let states: Vec<String> = match args.get("states") {
+                Some(Value::Array(a)) => a.iter().filter_map(Value::as_str).map(String::from).collect(),
+                Some(Value::String(s)) => s.split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect(),
+                _ => Vec::new(),
+            };
+            let when = |key: &str| str_arg(args, key).map(|t| parse_time(t).with_context(|| key.to_string())).transpose();
+            let (since, before) = (when("closed_since")?, when("closed_before")?);
+            if since.is_some() || before.is_some() {
+                let closed: Vec<_> = db.closed_issues(&project, since, before, &states)?.into_iter().filter(|c| kind_and_state_match(c.kind.as_deref(), &c.state, &kinds, &[])).collect();
+                if detail(args) {
+                    json!({ "count": closed.len(), "closed": closed })
+                } else {
+                    closed_lines(&closed)
+                }
+            } else {
+                let include_closed = args.get("include_closed").and_then(Value::as_bool).unwrap_or(false) || !states.is_empty();
+                let label = str_arg(args, "label").and_then(nitely_core::issues::normalize_label);
+                let issues: Vec<_> = db
+                    .list_issues(Some(&project), include_closed)?
+                    .into_iter()
+                    .filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l)) && kind_and_state_match(i.kind.as_deref(), &i.state, &kinds, &states))
+                    .collect();
+                json!(issues)
+            }
         }
         // `test_sweep_guide`, its old name, for agents with older instructions (NIT-558).
         "test_optimize_guide" | "test_sweep_guide" => json!({ "guide": nitely_core::test_sweep::GUIDE, "classify": nitely_core::test_sweep::OPTIMIZE_GUIDE }),
@@ -1968,6 +1995,36 @@ fn triage_json(db: &Db, q: &nitely_crew::triage::Question, actor: &nitely_core::
 /// A submit job as submit and submit_status return it. A finished one is told to its submitter
 /// here, so it is not repeated as a notice.
 /// Whether the call asked for the full record (`detail`) rather than the short result (NIT-697).
+/// Closed issues as one line each, newest first, within `CLOSED_CHARS`; what does not fit is
+/// counted, with how to see it (NIT-720).
+fn closed_lines(closed: &[nitely_core::issues::ClosedIssue]) -> Value {
+    let mut lines = Vec::new();
+    let mut used = 0;
+    for c in closed {
+        let full = c.line();
+        let line = match full.char_indices().nth(120) {
+            Some((i, _)) => format!("{}…", &full[..i]),
+            None => full,
+        };
+        if used + line.len() > CLOSED_CHARS {
+            break;
+        }
+        used += line.len() + 4;
+        lines.push(line);
+    }
+    let mut out = json!({ "count": closed.len(), "closed": lines, "links": nitely_core::links::issue_url("KEY") });
+    if lines.len() < closed.len() {
+        out["more"] = json!(format!(
+            "{} older not shown: narrow closed_since or closed_before, filter by kind or states, or pass detail: true for all of them",
+            closed.len() - lines.len()
+        ));
+    }
+    out
+}
+
+/// The most a closed listing answers with by default, in line characters (the NIT-697 budget).
+const CLOSED_CHARS: usize = 1800;
+
 fn detail(args: &Value) -> bool {
     args.get("detail").and_then(Value::as_bool).unwrap_or(false)
 }
@@ -2202,6 +2259,36 @@ mod tests {
         // Codex's default tool timeout is 60 s; Claude Code's idle timeout is 30 minutes (NIT-314).
         assert!(cap_for("codex") < 60 && cap_for("cursor") < 60 && cap_for("agent") < 60);
         assert_eq!(cap_for("claude"), 600);
+    }
+
+    /// NIT-720: "what got done since X" answers within the NIT-697 budget by default, newest first,
+    /// and says how many older ones it left out and how to see them.
+    #[test]
+    fn a_closed_listing_fits_the_budget_and_counts_what_it_left_out() {
+        let closed: Vec<_> = (0..200)
+            .map(|n| nitely_core::issues::ClosedIssue {
+                key: format!("APP-{}", 200 - n),
+                title: "A title long enough to be cut where a line would run past its share of the budget".repeat(2),
+                state: "Done".into(),
+                kind: Some("feature".into()),
+                priority: 2,
+                labels: vec!["ui".into()],
+                goal: Some(3),
+                closed_at: 1_793_000_000 - n,
+                landed: Some("main@7aaf3e13".into()),
+                url: String::new(),
+                body: "why".repeat(500),
+                evidence: "shown".into(),
+                done: true,
+            })
+            .collect();
+        let out = closed_lines(&closed);
+        assert!(out.to_string().len() < 2000 + 400, "{}", out.to_string().len());
+        let shown = out["closed"].as_array().unwrap();
+        assert!(shown[0].as_str().unwrap().starts_with("APP-200 Done "), "{out}");
+        assert_eq!(out["count"], 200);
+        assert!(out["more"].as_str().unwrap().starts_with(&format!("{} older", 200 - shown.len())), "{out}");
+        assert!(closed_lines(&closed[..2]).get("more").is_none());
     }
 
     /// NIT-697: a finished submit says each thing once: its state, every finding in full, `next`,

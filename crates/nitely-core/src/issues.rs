@@ -1187,6 +1187,45 @@ impl Db {
         self.read_issues(project, include_closed, false)
     }
 
+    /// Issues of `project` closed at or after `since` and before `before`, newest first: the
+    /// board's answer to "what got done since X" (NIT-720). Done ones (state type completed) unless
+    /// `states` names others, such as Canceled or Duplicate. An issue's closing is its last move, or
+    /// its last update when nothing moved it (imported or created closed, mirrored); `landed` is the
+    /// branch and commit of its last land.
+    pub fn closed_issues(&self, project: &str, since: Option<i64>, before: Option<i64>, states: &[String]) -> Result<Vec<ClosedIssue>> {
+        // updated_at is RFC 3339 text: read as Unix seconds, so the window compares numbers.
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT {ISSUE_COLUMNS}, closed_at, landed FROM (
+               SELECT i.*,
+                 COALESCE((SELECT MAX(e.ts) FROM event e WHERE e.issue_key = i.key AND e.type = 'issue_moved'),
+                          CAST(strftime('%s', i.updated_at) AS INTEGER), 0) AS closed_at,
+                 (SELECT e.summary FROM event e WHERE e.issue_key = i.key AND e.type = 'landed' ORDER BY e.ts DESC, e.id DESC LIMIT 1) AS landed
+               FROM issue i WHERE i.project = ?1 COLLATE NOCASE AND i.state_type IN ('completed', 'canceled'))
+             WHERE (?2 IS NULL OR closed_at >= ?2) AND (?3 IS NULL OR closed_at < ?3)
+             ORDER BY closed_at DESC, number DESC"
+        ))?;
+        let rows = stmt.query_map(params![project, since, before], |r| {
+            let issue = issue_from_row(r)?;
+            Ok(ClosedIssue {
+                closed_at: r.get(22)?,
+                landed: r.get::<_, Option<String>>(23)?.as_deref().and_then(landed_at),
+                done: issue.state_type == "completed",
+                key: issue.key,
+                title: issue.title,
+                state: issue.state,
+                kind: issue.kind,
+                priority: issue.priority,
+                labels: issue.labels,
+                goal: issue.goal,
+                url: issue.url,
+                body: issue.body,
+                evidence: issue.evidence,
+            })
+        })?;
+        let closed: Vec<ClosedIssue> = rows.collect::<rusqlite::Result<_>>()?;
+        Ok(closed.into_iter().filter(|c| if states.is_empty() { c.done } else { states.iter().any(|s| s.eq_ignore_ascii_case(&c.state)) }).collect())
+    }
+
     /// Lifecycle processing must still see archived work already in flight.
     pub(crate) fn all_issues(&self, include_closed: bool) -> Result<Vec<IssueRecord>> {
         self.read_issues(None, include_closed, true)
@@ -2323,8 +2362,124 @@ pub(crate) fn keeps_waiting(open_is_finding: &[bool]) -> bool {
     open_is_finding.iter().any(|finding| !finding)
 }
 
+/// A closed issue (`Db::closed_issues`): `line` gives it in a few words, and its fields in full
+/// with the body and the closing evidence.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ClosedIssue {
+    pub key: String,
+    pub title: String,
+    pub state: String,
+    pub kind: Option<String>,
+    pub priority: i64,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal: Option<i64>,
+    pub closed_at: i64,
+    /// `branch@commit` of its last land, e.g. `main@7aaf3e13`; None when it closed without one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub landed: Option<String>,
+    pub url: String,
+    pub body: String,
+    pub evidence: String,
+    /// Done rather than canceled (its state type is completed).
+    #[serde(skip)]
+    pub done: bool,
+}
+
+/// `branch@commit` from a `landed` event's "Landed BRANCH on TARGET at COMMIT".
+fn landed_at(summary: &str) -> Option<String> {
+    let (rest, commit) = summary.rsplit_once(" at ")?;
+    let (_, target) = rest.rsplit_once(" on ")?;
+    (!commit.is_empty() && commit.chars().all(|c| c.is_ascii_hexdigit())).then(|| format!("{target}@{commit}"))
+}
+
+/// A point in time from what an agent or person types: Unix seconds, a day (`2026-10-22`, from
+/// its local midnight) or an RFC 3339 time (`2026-10-22T09:30:00Z`).
+pub fn parse_time(text: &str) -> Result<i64> {
+    use chrono::TimeZone;
+    let text = text.trim();
+    if let Ok(secs) = text.parse::<i64>() {
+        return Ok(secs);
+    }
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Ok(t.timestamp());
+    }
+    let day = chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .with_context(|| format!("{text:?} is not a day (2026-10-22), a time (2026-10-22T09:30:00Z) or Unix seconds"))?;
+    let midnight = day.and_hms_opt(0, 0, 0).context("midnight")?;
+    Ok(chrono::Local.from_local_datetime(&midnight).earliest().map(|t| t.timestamp()).unwrap_or_else(|| midnight.and_utc().timestamp()))
+}
+
+impl ClosedIssue {
+    /// One line: key, state, local closing time, landed commit, priority, kind, labels, goal and
+    /// title, e.g. `NIT-693 Done 2026-10-27 14:03 main@7aaf3e13 P2 feature [ui] goal 35: Checkpoint`.
+    pub fn line(&self) -> String {
+        use chrono::TimeZone;
+        let when = chrono::Local.timestamp_opt(self.closed_at, 0).single().map(|t| t.format("%Y-%m-%d %H:%M").to_string()).unwrap_or_default();
+        let mut line = format!("{} {} {when}", self.key, self.state);
+        if let Some(l) = &self.landed {
+            line += &format!(" {l}");
+        }
+        if self.priority > 0 {
+            line += &format!(" P{}", self.priority);
+        }
+        if let Some(k) = &self.kind {
+            line += &format!(" {k}");
+        }
+        if !self.labels.is_empty() {
+            line += &format!(" [{}]", self.labels.join(","));
+        }
+        if let Some(g) = self.goal {
+            line += &format!(" goal {g}");
+        }
+        format!("{line}: {}", self.title)
+    }
+}
+
+/// Whether an issue's kind and state pass `list_issues`' filters: `kinds` and `states` match
+/// case-insensitively, and an empty list passes everything.
+pub fn kind_and_state_match(kind: Option<&str>, state: &str, kinds: &[String], states: &[String]) -> bool {
+    (kinds.is_empty() || kind.is_some_and(|k| kinds.iter().any(|w| w.eq_ignore_ascii_case(k))))
+        && (states.is_empty() || states.iter().any(|w| w.eq_ignore_ascii_case(state)))
+}
+
 #[cfg(test)]
 mod tests {
+
+    /// NIT-720: "what got done since X" from the board. Closed issues in the window, newest first,
+    /// each with when it closed and the commit it landed at; open ones and others' are not.
+    #[test]
+    fn closed_issues_answer_what_got_done_in_a_window() {
+        let (mut db, dir) = db();
+        db.create_project("nit", "Nitely").unwrap();
+        let agent = Actor::Agent("claude:x".into());
+        let keys: Vec<String> = ["Old fix", "Landed feature", "Dropped idea", "Still open"].iter().map(|t| db.create_issue(&new(t), &agent).unwrap().key).collect();
+        let close = |db: &Db, key: &str, state: &str, ty: &str, ts: i64| {
+            db.conn.execute("UPDATE issue SET state = ?2, state_type = ?3 WHERE key = ?1", params![key, state, ty]).unwrap();
+            db.conn.execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (?1, 'claude:x', ?2, 'issue_moved', 'In Review → Done')", params![ts, key]).unwrap();
+        };
+        close(&db, &keys[0], "Done", "completed", 1_000);
+        close(&db, &keys[1], "Done", "completed", 3_000);
+        db.conn.execute("INSERT INTO event (ts, actor, issue_key, type, summary) VALUES (2990, 'claude:x', ?1, 'landed', 'Landed claude/nit-2-x on main at 7aaf3e13')", params![keys[1]]).unwrap();
+        close(&db, &keys[2], "Canceled", "canceled", 2_000);
+
+        // Closed with no move at all (imported or created Done): its last update, RFC 3339 text, dates it.
+        let imported = db.create_issue(&new("Imported as done"), &agent).unwrap().key;
+        db.conn.execute("UPDATE issue SET state = 'Done', state_type = 'completed', updated_at = '1970-01-01T00:41:40Z' WHERE key = ?1", params![imported]).unwrap();
+
+        let keys_of = |c: Vec<ClosedIssue>| c.into_iter().map(|c| (c.key, c.state, c.landed)).collect::<Vec<_>>();
+        let since = keys_of(db.closed_issues("NIT", Some(1_500), None, &[]).unwrap());
+        assert_eq!(since, [("NIT-2".into(), "Done".into(), Some("main@7aaf3e13".into())), ("NIT-5".into(), "Done".into(), None)], "Done only by default");
+        let canceled = keys_of(db.closed_issues("NIT", Some(1_500), None, &["canceled".into()]).unwrap());
+        assert_eq!(canceled, [("NIT-3".into(), "Canceled".into(), None)]);
+        assert_eq!(keys_of(db.closed_issues("NIT", None, Some(2_000), &[]).unwrap()).len(), 1, "NIT-1 alone");
+        assert_eq!(keys_of(db.closed_issues("NIT", Some(2_400), Some(2_600), &[]).unwrap())[0].0, "NIT-5", "the text date compares as a number");
+        assert_eq!(parse_time("1793136571").unwrap(), 1_793_136_571);
+        assert_eq!(parse_time("2026-10-22T00:00:00Z").unwrap(), 1_792_627_200);
+        assert!(parse_time("2026-10-22").is_ok() && parse_time("last week").is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     /// NIT-574: an open finding question does not keep an answered issue waiting.
     #[test]
