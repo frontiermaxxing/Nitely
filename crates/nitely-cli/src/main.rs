@@ -800,7 +800,9 @@ enum IssueCmd {
         #[arg(long)]
         project: Option<String>,
     },
-    /// List open issues (add --all for closed ones too).
+    /// List open issues (add --all for closed ones too). With --closed-since or --closed-before,
+    /// what got done instead: the issues Done in that window (--state adds Canceled or Duplicate),
+    /// newest first, with when each closed and the branch@commit it landed at.
     List {
         #[arg(long)]
         project: Option<String>,
@@ -809,6 +811,18 @@ enum IssueCmd {
         /// Only issues with this label.
         #[arg(long)]
         label: Option<String>,
+        /// Only this kind (bug, feature, chore, ...).
+        #[arg(long)]
+        kind: Option<String>,
+        /// Only these states; repeat it or separate them with commas (--state Done,Canceled).
+        #[arg(long = "state", value_delimiter = ',')]
+        states: Vec<String>,
+        /// Closed at or after: a day (2026-10-22, from local midnight), an RFC 3339 time or Unix seconds.
+        #[arg(long)]
+        closed_since: Option<String>,
+        /// Closed before; same forms as --closed-since.
+        #[arg(long)]
+        closed_before: Option<String>,
     },
     /// Rewrite an issue's title or body (--body - reads it from stdin), or set its priority. What it
     /// said before stays on its timeline; an issue mirrored from another tracker is changed there.
@@ -1601,10 +1615,25 @@ fn run(cmd: Cmd) -> Result<()> {
                     let key = db.current_key(&key)?;
                     print_json(&db.change_labels(&key, &add, &remove, &me)?)
                 }
-                IssueCmd::List { project, all, label } => {
+                IssueCmd::List { project, all, label, kind, states, closed_since, closed_before } => {
+                    use nitely_core::issues::{kind_and_state_match, parse_time};
                     let project = resolve_project(&config, &db, project.as_deref(), &cwd()?)?;
+                    let kinds: Vec<String> = kind.into_iter().collect();
+                    let since = closed_since.as_deref().map(parse_time).transpose()?;
+                    let before = closed_before.as_deref().map(parse_time).transpose()?;
+                    if since.is_some() || before.is_some() {
+                        for c in db.closed_issues(&project, since, before, &states)?.into_iter().filter(|c| kind_and_state_match(c.kind.as_deref(), &c.state, &kinds, &[])) {
+                            println!("{}", c.line());
+                        }
+                        return Ok(());
+                    }
                     let label = label.as_deref().and_then(nitely_core::issues::normalize_label);
-                    for i in db.list_issues(Some(&project), all)?.into_iter().filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l))) {
+                    let all = all || !states.is_empty();
+                    for i in db
+                        .list_issues(Some(&project), all)?
+                        .into_iter()
+                        .filter(|i| label.as_ref().is_none_or(|l| i.labels.contains(l)) && kind_and_state_match(i.kind.as_deref(), &i.state, &kinds, &states))
+                    {
                         let blocked = if i.blocked_by.is_empty() { String::new() } else { format!("  (blocked by {})", i.blocked_by.join(", ")) };
                         println!("{:<9} {:<12} {}{blocked}", i.key, i.state, i.title);
                     }
