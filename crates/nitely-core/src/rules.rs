@@ -22,6 +22,9 @@ use crate::review::Flag;
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RuleDefaults {
+    /// Model IDs by reviewer vendor; absent means use the vendor CLI default.
+    #[serde(skip_serializing_if="BTreeMap::is_empty")]
+    pub models: BTreeMap<String,String>,
     /// Who reviews whose branches, as `review.reviewer`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reviewer: Option<BTreeMap<String, String>>,
@@ -61,6 +64,7 @@ pub fn apply_defaults(pb: &mut Playbook, text: &str, defaults: &RuleDefaults) {
     if defaults.is_empty() {
         return;
     }
+    for (vendor,model) in &defaults.models { pb.review.models.entry(vendor.clone()).or_insert_with(||model.clone()); }
     let set = sets(text);
     if let (false, Some(r)) = (set.reviewer, &defaults.reviewer) {
         pb.review.reviewer = r.clone();
@@ -561,6 +565,7 @@ pub fn save_defaults(config: &mut crate::Config, defaults: RuleDefaults, confirm
             bail!("a reviewer map needs at least one entry; leave it unset to use Nitely's");
         }
     }
+    crate::review::validate_models(&defaults.models)?;
     let loose = defaults_loosening(&config.rule_defaults, &defaults);
     if !loose.is_empty() && !confirm {
         bail!("this loosens what sends changes to a person; confirm it first: {}", loose.join(" "));
@@ -670,6 +675,19 @@ pub fn dry_run(config: &crate::Config, repo_name: &str, branch: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn review_models_inherit_per_vendor_and_clear_to_vendor_defaults() {
+        let mut defaults=RuleDefaults::default();
+        defaults.models.insert("codex".into(),"app-model".into());
+        defaults.models.insert("claude".into(),"app-alias".into());
+        let pb=effective("[review.models]\ncodex='project-model'\n",&defaults).unwrap();
+        assert_eq!(pb.review.models["codex"],"project-model");
+        assert_eq!(pb.review.models["claude"],"app-alias");
+        let pb=effective("",&RuleDefaults::default()).unwrap();
+        assert!(pb.review.models.is_empty());
+        assert!(crate::review::validate_models(&BTreeMap::from([("codex".into(),"bad model --flag".into())])).is_err());
+    }
 
     #[test]
     fn defaults_fill_only_what_the_playbook_leaves_unset() {

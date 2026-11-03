@@ -31,6 +31,8 @@ pub struct ReviewRules {
     /// still a second reading. Cursor has no default: `cursor-agent -p` can write and run anything,
     /// and its read-only `--mode ask` has not been shown to run the `git diff` a review needs.
     pub commands: BTreeMap<String, Vec<String>>,
+    #[serde(default, skip_serializing_if="BTreeMap::is_empty")]
+    pub models: BTreeMap<String,String>,
     /// Yes-or-no questions the reviewer answers; a yes sends the change to a human. Use them for
     /// what path rules cannot see, like money logic in a file whose name does not say so.
     pub flags: Vec<Flag>,
@@ -116,6 +118,29 @@ pub struct Flag {
     pub reason: String,
 }
 
+/// User-supplied model IDs are argv values, never shell text or additional CLI flags.
+pub(crate) fn validate_models(models:&BTreeMap<String,String>)->Result<()> {
+    for (vendor,model) in models {
+        anyhow::ensure!(matches!(vendor.as_str(),"claude"|"codex"),"Model selection is supported for Claude and Codex");
+        anyhow::ensure!(!model.trim().is_empty() && model.len()<=200 && !model.starts_with('-') && !model.chars().any(char::is_whitespace) && !model.chars().any(char::is_control),"Use a model ID without spaces or flags");
+    }
+    Ok(())
+}
+fn model_args(command:&[String], model:Option<&str>)->Result<Vec<String>> {
+    let Some(model)=model else {return Ok(command[1..].to_vec())};
+    let vendor=cli_name(&command[0]);
+    anyhow::ensure!(matches!(vendor.as_str(),"claude"|"codex"),"A review model requires the vendor CLI as its command");
+    validate_models(&BTreeMap::from([(vendor,model.into())]))?;
+    let mut args=vec![];let mut iter=command[1..].iter();
+    while let Some(a)=iter.next(){
+        if matches!(a.as_str(),"--model"|"-m") {anyhow::ensure!(iter.next().is_some(),"Model flag needs a value");}
+        else if !a.starts_with("--model=") {args.push(a.clone());}
+    }
+    let at=args.iter().position(|a|a=="-" || a=="--").unwrap_or(args.len());
+    args.splice(at..at,["--model".to_string(),model.to_string()]);
+    Ok(args)
+}
+
 impl Default for ReviewRules {
     fn default() -> Self {
         let pairs = |v: &[(&str, &str)]| v.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect();
@@ -133,6 +158,7 @@ impl Default for ReviewRules {
                 // Not --ephemeral: the session log is how a review's tokens count toward the issue (usage.rs).
                 ("codex".to_string(), args(&["codex", "exec", "--sandbox", "read-only", "-o", "{output}", "-"])),
             ]),
+            models: BTreeMap::new(),
             flags: vec![],
             focus: String::new(),
             context: String::new(),
@@ -911,7 +937,8 @@ it was reviewed, to see what changed since. {rule}\n",
         let program = resolve_program(&command[0]);
         let codex_servers = if cli_name(&command[0]) == "codex" { codex_nitely_servers(&program, worktree) } else { vec![] };
         let command = without_nitely(command, &codex_servers);
-        let args: Vec<String> = command[1..].iter().map(|a| a.replace("{output}", &out_file.to_string_lossy())).collect();
+        let args = model_args(&command, self.models.get(reviewer).map(String::as_str))?;
+        let args: Vec<String> = args.into_iter().map(|a| a.replace("{output}", &out_file.to_string_lossy())).collect();
 
         let mut cmd = shell_free_command(&program);
         if cli_name(&command[0]) == "claude" {
@@ -1497,6 +1524,21 @@ mod tests {
     use super::*;
 
     /// The exit rules `runs_a_reviewer_command` checks by starting seven reviewers.
+    #[test]
+    fn review_model_selection_keeps_defaults_and_read_only_arguments() {
+        let command=vec!["codex".into(),"exec".into(),"--sandbox".into(),"read-only".into(),"-".into()];
+        assert_eq!(model_args(&command,None).unwrap(),command[1..]);
+        let args=model_args(&command,Some("chosen-model")).unwrap();
+        assert_eq!(args,["exec","--sandbox","read-only","--model","chosen-model","-"]);
+        let command=vec!["claude".into(),"-p".into(),"--model=old".into(),"--allowedTools".into(),"Read".into()];
+        assert_eq!(model_args(&command,Some("new-model")).unwrap(),["-p","--allowedTools","Read","--model","new-model"]);
+        assert!(model_args(&command,Some("--dangerous")).is_err());
+        let mut rules=ReviewRules::default();
+        let prior=serde_json::to_string(&rules).unwrap();
+        rules.models.insert("codex".into(),"chosen-model".into());
+        assert_ne!(serde_json::to_string(&rules).unwrap(),prior,"review reuse records the selected model");
+    }
+
     #[test]
     fn a_reviewers_exit_says_whether_it_replied_is_signed_out_or_failed() {
         assert_eq!(exit_outcome(true, "- [P1] something"), Exit::Replied);
