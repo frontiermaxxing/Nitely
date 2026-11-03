@@ -202,7 +202,7 @@ export function RuleDefaultsCard() {
     }
     setBusy(false);
   };
-  const DEFAULT_NAMES: Record<keyof RuleDefaults, string> = { reviewer: "Who reviews whose work", require_cross_vendor: "A review by the author's own vendor", land_by: "Who lands a change", focus: "What matters most in a review" };
+  const DEFAULT_NAMES: Record<keyof RuleDefaults, string> = { models: "Review models", reviewer: "Who reviews whose work", require_cross_vendor: "A review by the author's own vendor", land_by: "Who lands a change", focus: "What matters most in a review" };
   const changes = (Object.keys(DEFAULT_NAMES) as (keyof RuleDefaults)[]).filter((k) => JSON.stringify(draft[k]) !== JSON.stringify(view.defaults[k])).map((k) => DEFAULT_NAMES[k]);
 
   // What applies when the app sets nothing: Nitely's own defaults.
@@ -226,6 +226,18 @@ export function RuleDefaultsCard() {
           )}
         </div>
       </SettingsRow>
+      {["claude", "codex"].map((vendor) => (
+        <SettingsRow key={vendor} label={vendor === "claude" ? "Claude review model" : "Codex review model"}
+          why="Leave blank to use the vendor’s default. Enter a model ID or alias supported by your signed-in CLI."
+          htmlFor={"review-model-" + vendor} source={tag(!!draft.models?.[vendor])}>
+          <input className="ui-field-input" id={"review-model-" + vendor} placeholder="Vendor default" value={draft.models?.[vendor] ?? ""} disabled={busy}
+            onChange={(e) => {
+              const models = { ...draft.models };
+              if (e.target.value) models[vendor] = e.target.value; else delete models[vendor];
+              patch({ models: Object.keys(models).length ? models : undefined });
+            }} />
+        </SettingsRow>
+      ))}
       <SettingsRow label="A review by the author's own vendor" why="When no other vendor could review, is that enough, or does the change wait for you?" source={tag(draft.require_cross_vendor !== undefined)}>
         <OwnVendor
           value={draft.require_cross_vendor ?? null}
