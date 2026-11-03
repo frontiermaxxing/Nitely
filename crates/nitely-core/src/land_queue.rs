@@ -1524,6 +1524,18 @@ reason = "billing"
         f.queue_and_run(&[&d]);
         assert_eq!((called(), f.entry(&d).state.as_str()), (2, "landed"), "{}", f.error(&d));
         assert!(f.db.reviews(&d).unwrap()[0].batch_id.is_none());
+
+        // Rebased while it waits (an earlier land's rebase, NIT-729): the same patch on a new tip
+        // is reviewed there, not sent back as unchecked commits.
+        let (e, wt) = f.submitted("Rebased", &[("e.txt", "e
+")]);
+        std::fs::write(f.repo.join("elsewhere.txt"), "x
+").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-q", "-m", "landed meanwhile"]);
+        sh(&wt, &["rebase", "-q", "main"]);
+        f.queue_and_run(&[&e]);
+        assert_eq!((called(), f.entry(&e).state.as_str()), (3, "landed"), "{}", f.error(&e));
         std::fs::remove_dir_all(&f.base).ok();
     }
 
