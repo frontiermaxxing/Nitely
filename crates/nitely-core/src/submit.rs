@@ -1653,11 +1653,20 @@ impl Db {
 
     /// `reviews`, only those recorded before the review `before` when given.
     pub fn reviews_before(&self, issue_key: &str, before: Option<i64>) -> Result<Vec<ReviewRecord>> {
+        self.read_reviews(issue_key, before, -1)
+    }
+
+    /// An issue's newest review: one row read, not every round with its findings (NIT-730).
+    pub fn latest_review(&self, issue_key: &str) -> Result<Option<ReviewRecord>> {
+        Ok(self.read_reviews(issue_key, None, 1)?.into_iter().next())
+    }
+
+    fn read_reviews(&self, issue_key: &str, before: Option<i64>, limit: i64) -> Result<Vec<ReviewRecord>> {
         let mut stmt = self.conn.prepare(
             "SELECT issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, note, batch_id, solution, gate, branch, after_event
-             FROM review WHERE issue_key = ?1 COLLATE NOCASE AND (?2 IS NULL OR id < ?2) ORDER BY ts DESC, id DESC",
+             FROM review WHERE issue_key = ?1 COLLATE NOCASE AND (?2 IS NULL OR id < ?2) ORDER BY ts DESC, id DESC LIMIT ?3",
         )?;
-        let rows = stmt.query_map(rusqlite::params![issue_key, before], |r| {
+        let rows = stmt.query_map(rusqlite::params![issue_key, before, limit], |r| {
             Ok(ReviewRecord {
                 issue_key: r.get(0)?,
                 patch_id: r.get(1)?,

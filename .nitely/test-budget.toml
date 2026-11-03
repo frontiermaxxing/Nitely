@@ -41,6 +41,7 @@ nitely_core = 60
 "submit_job::tests::a_submit_hands_in_at_once_and_the_job_brings_the_result_back" = "async submit: enqueue, supersede, run, deliver"
 "affected_tests::tests::reverse_imports_select_helpers_and_tests_but_execute_whole_suite" = "the selector against real git: commit ids, tree, policy blob"
 "affected_tests::tests::a_repo_of_thirty_thousand_files_still_gets_a_reduced_selection" = "the selector on a 30,000-file tree: indexing and selecting at scale (NIT-726)"
+"pulse::tests::a_refresh_reads_a_small_part_of_a_large_database" = "the board and home view on a database of thousands of pages: what one refresh reads (NIT-730)"
 "goal_branch::tests::items_land_into_the_goal_branch_and_a_checkpoint_lands_the_slice_on_main" = "goal branch items and their checkpoint"
 "periodic_review::tests::periodic_scenario_threshold_failure_retry_reopen_and_duplicate_finding" = "periodic review end to end"
 "periodic_review::tests::periodic_durable_completion_preserves_new_landings_and_replays_card_actions_once" = "periodic review's crash and replay"
