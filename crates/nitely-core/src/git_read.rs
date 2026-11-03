@@ -497,12 +497,33 @@ pub(crate) fn branches(root: &Path, integration: &str) -> Option<Vec<crate::git:
         let message = commit.message_raw().ok()?;
         let subject = std::str::from_utf8(gix::objs::commit::MessageRef::from_bytes(message).summary().as_ref()).ok()?.trim().to_string();
         let tip = commit.id;
-        let ahead = count(&repo, tip, base)?;
-        let behind = count(&repo, base, tip)?;
+        let (ahead, behind) = counts(&repo, tip, base)?;
         listed.push((full, crate::git::BranchRef { name: short, ahead: Some(ahead), behind: Some(behind), last_commit_subject: (!subject.is_empty()).then_some(subject), last_commit_at: Some(at) }));
     }
     listed.sort_by(|(an, a), (bn, b)| b.last_commit_at.cmp(&a.last_commit_at).then_with(|| an.cmp(bn)));
     Some(listed.into_iter().map(|(_, b)| b).collect())
+}
+
+/// A branch's (ahead, behind) against the integration branch. Commit ids name their whole history,
+/// so the counts for a pair never change: they are kept for the process, and a board refresh after
+/// one ref moved counts only that branch again, not every branch of every repo (NIT-730).
+fn counts(repo: &gix::Repository, tip: gix::ObjectId, base: gix::ObjectId) -> Option<(u32, u32)> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    type Counts = HashMap<(gix::ObjectId, gix::ObjectId), (u32, u32)>;
+    static KNOWN: OnceLock<Mutex<Counts>> = OnceLock::new();
+    let known = KNOWN.get_or_init(Default::default);
+    if let Some(c) = known.lock().unwrap_or_else(|e| e.into_inner()).get(&(tip, base)) {
+        return Some(*c);
+    }
+    let c = (count(repo, tip, base)?, count(repo, base, tip)?);
+    let mut known = known.lock().unwrap_or_else(|e| e.into_inner());
+    // Pairs whose branch or base moved on are never asked again; a bound keeps them from piling up.
+    if known.len() >= 20_000 {
+        known.clear();
+    }
+    known.insert((tip, base), c);
+    Some(c)
 }
 
 /// How many commits `from` reaches that `not` does not.
