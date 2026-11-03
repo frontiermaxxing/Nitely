@@ -813,7 +813,7 @@ pub fn spend_of_project(config: &Config, db: &Db, project: &str, today_start: i6
     let from = today_start - (days as i64 - 1) * 86_400;
     let mut since = from;
     for (key, _) in db.landed_since(project, from)? {
-        if let Some(created) = db.issue(&key)?.and_then(|i| nitely_core::linear_import::parse_iso(&i.created_at)) {
+        if let Some(created) = db.issue_fields(&key)?.and_then(|i| nitely_core::linear_import::parse_iso(&i.created_at)) {
             since = since.min(created - 86_400);
         }
     }

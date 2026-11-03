@@ -165,7 +165,7 @@ pub fn pulse(db: &Db, since: i64, day_start: i64) -> Result<Pulse> {
                 .or_else(|| f.and_then(|f| f.starter.clone())),
             session,
             pr,
-            review: db.reviews(&issue.key)?.into_iter().next(),
+            review: db.latest_review(&issue.key)?,
             gate: f.and_then(|f| f.gate.clone()),
             worktree,
             last_activity,
@@ -286,16 +286,10 @@ impl PulseDb for Db {
     }
 
     fn events_of(&self, kinds: &[&str], since: i64) -> Result<Vec<(i64, String)>> {
-        let mut stmt = self.conn.prepare("SELECT ts, type FROM active_event WHERE ts >= ?1 ORDER BY ts")?;
-        let rows = stmt.query_map([since], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
-        let mut out = Vec::new();
-        for row in rows {
-            let (ts, kind) = row?;
-            if kinds.contains(&kind.as_str()) {
-                out.push((ts, kind));
-            }
-        }
-        Ok(out)
+        // By the (type, ts) index: the few events of these types, not every event since (NIT-730).
+        let mut stmt = self.conn.prepare("SELECT ts, type FROM active_event WHERE type IN (SELECT value FROM json_each(?2)) AND ts >= ?1 ORDER BY ts")?;
+        let rows = stmt.query_map(rusqlite::params![since, serde_json::to_string(kinds)?], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))?;
+        Ok(rows.collect::<rusqlite::Result<_>>()?)
     }
 
     fn happened_since(&self, since: i64) -> Result<Vec<Happening>> {
@@ -386,6 +380,60 @@ mod tests {
             ..Default::default()
         };
         db.create_issue(&new, &Actor::Agent("claude:c:/x".into())).unwrap()
+    }
+
+    /// NIT-730: the app reads the board and this view again whenever the database changes, which
+    /// is all the time while agents work, so a read costs what it shows: the open issues, not the
+    /// event log or the review history of work long done. Read by scanning, one round read many
+    /// times the pages the whole database holds.
+    #[test]
+    fn a_refresh_reads_a_small_part_of_a_large_database() {
+        let (mut db, dir) = db();
+        let change = nitely_core::goals::GoalChange { title: Some("Ship".into()), outcome: Some("Shipped".into()), ..Default::default() };
+        let goal = db.save_goal("NIT", None, &change, &Actor::Human).unwrap().id;
+        let keys: Vec<String> = (0..100).map(|n| file(&mut db, &format!("Issue {n}")).key).collect();
+        let (open, done) = keys.split_at(20);
+        let now = now();
+        let tx = db.conn.transaction().unwrap();
+        tx.execute("UPDATE issue SET goal = ?1", [goal]).unwrap();
+        for key in done {
+            tx.execute("UPDATE issue SET state = 'Done', state_type = 'completed', updated_at = ?2 WHERE key = ?1", rusqlite::params![key, iso(now - 30 * 86_400)]).unwrap();
+        }
+        // A busy week: most of it about work since done, every round of review with its findings.
+        let summary = "x".repeat(300);
+        let mut event = tx.prepare("INSERT INTO event (ts, actor, type, issue_key, summary) VALUES (?1, ?2, ?3, ?4, ?5)").unwrap();
+        for n in 0..20_000_usize {
+            let (key, kind) = if n % 500 == 0 { (&open[n / 500 % open.len()], "note") } else { (&done[n % done.len()], if n % 100 == 1 { "landed" } else { "status" }) };
+            event.execute(rusqlite::params![now - 600_000 + n as i64 * 30, format!("claude:{}", n % 40), kind, key, summary]).unwrap();
+        }
+        let findings = "y".repeat(6000);
+        let mut review = tx.prepare("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p', 'c', 'codex', ?2, 'agent', ?3, ?4)").unwrap();
+        for n in 0..1000_usize {
+            review.execute(rusqlite::params![keys[n % keys.len()], if n % 3 == 0 { "pass" } else { "changes" }, findings, now - 600_000 + n as i64 * 600]).unwrap();
+        }
+        drop((event, review));
+        tx.commit().unwrap();
+        let path = dir.join("t.db");
+        drop(db);
+        // A fresh connection, as each read of the app opens: nothing cached yet.
+        let db = Db::open_read_only(&path).unwrap();
+        let pages: i64 = db.conn.query_row("PRAGMA page_count", [], |r| r.get(0)).unwrap();
+        let read = || {
+            let (mut missed, mut most) = (0, 0);
+            // SAFETY: the handle is this open connection's own, and the counters are plain ints.
+            unsafe { rusqlite::ffi::sqlite3_db_status(db.conn.handle(), rusqlite::ffi::SQLITE_DBSTATUS_CACHE_MISS, &mut missed, &mut most, 0) };
+            i64::from(missed)
+        };
+        let before = read();
+        nitely_core::snapshot::snapshot(&nitely_core::Config::default(), &db).unwrap();
+        let board = read() - before;
+        let shown = pulse(&db, now - 3600, now - 36_000).unwrap();
+        let home = read() - before - board;
+        assert_eq!(shown.projects[0].issues.len(), open.len());
+        assert!(board * 10 < pages, "the board read {board} of the database's {pages} pages");
+        assert!(home * 10 < pages, "the home view read {home} of the database's {pages} pages");
+        drop(db);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

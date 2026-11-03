@@ -84,10 +84,12 @@ impl Db {
     /// Open changes whose latest review was by their author's own vendor, newest first: what a
     /// rerun would put in front of another vendor.
     pub fn same_vendor_reviews(&self) -> Result<Vec<SameVendor>> {
+        // From each open issue to its latest review by the review_issue index: read from the
+        // review side, every review row (findings and notes) is read on every board refresh (NIT-730).
         let mut stmt = self.conn.prepare(
-            "SELECT r.issue_key, i.title, i.state, r.reviewer, r.note, r.ts FROM review r JOIN active_issue i ON i.key = r.issue_key
-             WHERE r.id = (SELECT MAX(x.id) FROM review x WHERE x.issue_key = r.issue_key AND x.reviewer != '')
-               AND r.note LIKE ?1 AND i.state_type NOT IN ('completed', 'canceled')
+            "SELECT r.issue_key, i.title, i.state, r.reviewer, r.note, r.ts FROM active_issue i
+             JOIN review r ON r.id = (SELECT MAX(x.id) FROM review x WHERE x.issue_key = i.key COLLATE NOCASE AND x.reviewer != '')
+             WHERE i.state_type NOT IN ('completed', 'canceled') AND r.note LIKE ?1
              ORDER BY r.ts DESC, r.id DESC LIMIT 50",
         )?;
         let rows = stmt.query_map([format!("{SAME_VENDOR_NOTE}%")], |r| {
