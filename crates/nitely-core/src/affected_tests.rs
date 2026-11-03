@@ -12,7 +12,11 @@ use tree_sitter::{Node, Parser};
 
 pub const POLICY_PATH: &str = ".nitely/affected-tests.toml";
 pub const SELECTOR: &str = "affected-v1-ts0271-ts0232-js0250";
-const MAX_FILES: usize = 10_000;
+/// The most tree entries the selector indexes (NIT-726). Listing them is a path and an object id
+/// each, about 100 bytes, read in one git call, so this bounds memory, not work: the work is
+/// reading sources, which `MAX_SOURCE_BYTES` bounds. A repo of tens of thousands of files (a
+/// monorepo, vendored sources) is well inside it.
+const MAX_TREE_FILES: usize = 500_000;
 const MAX_SOURCE_BYTES: usize = 16 * 1024 * 1024;
 const MAX_FILE_BYTES: usize = 512 * 1024;
 
@@ -172,6 +176,10 @@ type Sources = BTreeMap<String, String>;
 
 fn snapshot(repo: &Path, revision: &str) -> Result<Snapshot> {
     let text = git(repo, &["ls-tree", "-r", "-z", revision])?;
+    let count = text.split('\0').filter(|s| !s.is_empty()).count();
+    if count > MAX_TREE_FILES {
+        bail!("the tree at {revision} lists {count} files, over the {MAX_TREE_FILES} the selector indexes");
+    }
     let mut files = BTreeMap::new();
     for entry in text.split('\0').filter(|s| !s.is_empty()) {
         let (meta, path) = entry.split_once('\t').context("malformed tree entry")?;
@@ -186,9 +194,6 @@ fn snapshot(repo: &Path, revision: &str) -> Result<Snapshot> {
                 oid: fields[2].into(),
             },
         );
-        if files.len() > MAX_FILES {
-            bail!("repository exceeds selector inventory limit");
-        }
     }
     Ok(files)
 }
@@ -1063,7 +1068,7 @@ fn js_graph(
             .map(|(_, e)| e.oid.clone())
             .collect();
         let Some(fetched) = objects.texts(&wanted, MAX_FILE_BYTES, MAX_SOURCE_BYTES - bytes)? else {
-            bail!("JavaScript inventory exceeds byte limit");
+            bail!("{}", too_much_javascript(wanted.len()));
         };
         for (path, entry) in files.iter().filter(|(p, _)| source_path(p)) {
             let source = if let Some(source) = cache.get(&entry.oid) {
@@ -1077,7 +1082,7 @@ fn js_graph(
                 };
                 bytes += source.len();
                 if bytes > MAX_SOURCE_BYTES {
-                    bail!("JavaScript inventory exceeds byte limit");
+                    bail!("{}", too_much_javascript(wanted.len()));
                 }
                 cache.insert(entry.oid.clone(), source.clone());
                 source
@@ -1094,6 +1099,15 @@ fn js_graph(
         }
     }
     Ok(graph)
+}
+
+/// Why a JavaScript change keeps the full gate in a tree with too much JavaScript: the selector
+/// parses every JS and TS source to find what imports the change (NIT-726).
+fn too_much_javascript(sources: usize) -> String {
+    format!(
+        "the tree's {sources} JavaScript and TypeScript sources come to over {} MB, the most the selector parses to find what imports a change",
+        MAX_SOURCE_BYTES / (1024 * 1024)
+    )
 }
 
 fn external(objects: &dyn Objects, files: &Snapshot, path: &str, specifier: &str) -> Result<bool> {
@@ -1378,6 +1392,60 @@ mod tests {
         assert_eq!(checks(&["src/App.tsx", "tools/x.py"]).unwrap(), ["nitely check-file \"tools/x.py\""], "a mapped file keeps its tests and adds nothing");
         assert!(checks(&["docs/diagram.svg"]).unwrap_err().contains("no check of its own"));
         assert!(checks(&["tools/Cargo.toml"]).unwrap_err().contains("build, lock or policy"));
+    }
+
+    /// NIT-726: a repo with tens of thousands of files (here 30,000 vendored ones, outside every
+    /// component) still gets a real selection for a change inside a component.
+    #[test]
+    fn a_repo_of_thirty_thousand_files_still_gets_a_reduced_selection() {
+        const MAP: &str = "version = 1
+[[components]]
+id = 'web'
+roots = ['src/']
+checks = ['npm run build']
+[[components.suites]]
+id = 'unit'
+inputs = ['src/lib/']
+[components.suites.javascript]
+command = 'npm test'
+test_files = ['src/lib/a.test.ts']
+";
+        let repo = crate::test_repo::copy("affected-large-tree", |dir| {
+            init(dir, &[(POLICY_PATH, MAP), ("src/lib/a.ts", "export const a = 1;"), ("src/lib/a.test.ts", "import {a} from './a';")]);
+        });
+        let small_base = g(&repo, &["rev-parse", "HEAD"]);
+        std::fs::write(repo.join("src/lib/a.ts"), "export const a = 2;").unwrap();
+        g(&repo, &["commit", "-qam", "a"]);
+        // The vendored files go into both commits as trees made in a few git calls, never through
+        // the index or the disk: 30 folders of the same 1,000 files.
+        let mktree = |entries: String| {
+            let mut make = std::process::Command::new("git").arg("-C").arg(&repo).arg("mktree").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
+            std::io::Write::write_all(make.stdin.as_mut().unwrap(), entries.as_bytes()).unwrap();
+            let out = make.wait_with_output().unwrap();
+            assert!(out.status.success());
+            String::from_utf8(out.stdout).unwrap().trim().to_string()
+        };
+        let blob = g(&repo, &["hash-object", "-w", POLICY_PATH]);
+        let folder = mktree((0..1_000).map(|n| format!("100644 blob {blob}	file{n:04}.c
+")).collect());
+        let vendored = mktree((0..30).map(|n| format!("040000 tree {folder}	lib{n:02}
+")).collect());
+        let with_vendored = |commit: &str, parent: Option<&str>| {
+            let root = mktree(format!("{}
+040000 tree {vendored}	third_party
+", g(&repo, &["ls-tree", commit])));
+            let mut args = vec!["commit-tree", root.as_str(), "-m", "with vendored sources"];
+            if let Some(p) = parent {
+                args.extend(["-p", p]);
+            }
+            g(&repo, &args)
+        };
+        let base = with_vendored(&small_base, None);
+        let head = with_vendored("HEAD", Some(base.as_str()));
+        assert!(snapshot(&repo, &base).unwrap().len() > 30_000);
+        let s = select(&repo, &base, &head).unwrap();
+        assert!(!s.full, "{:?}", s.reasons);
+        assert_eq!(s.components, ["web"]);
     }
 
     /// NIT-648: the map's `always` suites run with every reduced selection, the mapped one and a
