@@ -1153,18 +1153,7 @@ impl Db {
 
     /// An issue by its key, or by a key from before its project changed its key (`OLD-12`).
     pub fn issue(&self, key: &str) -> Result<Option<IssueRecord>> {
-        let find = |key: &str| {
-            self.conn
-                .query_row(&format!("SELECT {ISSUE_COLUMNS} FROM issue WHERE key = ?1 COLLATE NOCASE"), [key], issue_from_row)
-                .optional()
-        };
-        // An old key resolves through its alias first: it belongs to the project that had it, even
-        // if some other row (a mirror from an earlier sync) still carries it.
-        let issue = match self.alias_of(key)? {
-            Some(current) => find(&current)?.map_or_else(|| find(key), |i| Ok(Some(i)))?,
-            None => find(key)?,
-        };
-        Ok(match issue {
+        Ok(match self.issue_fields(key)? {
             Some(mut i) => {
                 Deps::load(&self.conn)?.fill(&mut i);
                 let changes = self.change_reviews()?.get(&i.key.to_uppercase()).copied().unwrap_or(0);
@@ -1178,6 +1167,22 @@ impl Db {
                 Some(i)
             }
             None => None,
+        })
+    }
+
+    /// `issue` without its relations and track, which read the blocker graph and its timeline: for
+    /// a read of many issues that needs only their own fields (NIT-730).
+    pub fn issue_fields(&self, key: &str) -> Result<Option<IssueRecord>> {
+        let find = |key: &str| {
+            self.conn
+                .query_row(&format!("SELECT {ISSUE_COLUMNS} FROM issue WHERE key = ?1 COLLATE NOCASE"), [key], issue_from_row)
+                .optional()
+        };
+        // An old key resolves through its alias first: it belongs to the project that had it, even
+        // if some other row (a mirror from an earlier sync) still carries it.
+        Ok(match self.alias_of(key)? {
+            Some(current) => find(&current)?.map_or_else(|| find(key), |i| Ok(Some(i)))?,
+            None => find(key)?,
         })
     }
 

@@ -113,11 +113,15 @@ impl Db {
     pub fn notices(&self) -> Result<Vec<Notice>> {
         let start = format!("%{}%", crate::submit_rules::STALLED_NOTICE_START.replace('%', ""));
         let end = format!("%{}", crate::submit_rules::STALLED_NOTICE_END);
+        // The few events of these types in the window come from the (type, ts) index; read by time
+        // alone, every event of the week is read to find them (NIT-730). An issue's newest note is
+        // found among that issue's events (`+x.type` keeps the type index out of it).
         let mut stmt = self.conn.prepare(
             "SELECT e.id, e.issue_key, e.ts, e.summary FROM active_event e
-             WHERE e.ts >= ?3 AND NOT EXISTS (SELECT 1 FROM notice_dismissed d WHERE d.event_id = e.id)
+             WHERE e.id IN (SELECT id FROM event WHERE type IN ('note', ?4, ?5, ?6) AND ts >= ?3)
+               AND NOT EXISTS (SELECT 1 FROM notice_dismissed d WHERE d.event_id = e.id)
                AND ((e.type = 'note' AND e.summary LIKE ?1 AND e.summary LIKE ?2
-                     AND e.id = (SELECT MAX(x.id) FROM event x WHERE x.issue_key = e.issue_key AND x.type = 'note' AND x.summary LIKE ?1 AND x.summary LIKE ?2))
+                     AND e.id = (SELECT MAX(x.id) FROM event x WHERE x.issue_key = e.issue_key AND +x.type = 'note' AND x.summary LIKE ?1 AND x.summary LIKE ?2))
                     OR e.type IN (?4, ?5, ?6))
              ORDER BY e.id DESC",
         )?;
