@@ -1418,22 +1418,12 @@ test_files = ['src/lib/a.test.ts']
         g(&repo, &["commit", "-qam", "a"]);
         // The vendored files go into both commits as trees made in a few git calls, never through
         // the index or the disk: 30 folders of the same 1,000 files.
-        let mktree = |entries: String| {
-            let mut make = std::process::Command::new("git").arg("-C").arg(&repo).arg("mktree").stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).spawn().unwrap();
-            std::io::Write::write_all(make.stdin.as_mut().unwrap(), entries.as_bytes()).unwrap();
-            let out = make.wait_with_output().unwrap();
-            assert!(out.status.success());
-            String::from_utf8(out.stdout).unwrap().trim().to_string()
-        };
+        let mktree = |entries: String| crate::playbook::git_with_input(&repo, &["mktree"], &entries).unwrap().trim().to_string();
         let blob = g(&repo, &["hash-object", "-w", POLICY_PATH]);
-        let folder = mktree((0..1_000).map(|n| format!("100644 blob {blob}	file{n:04}.c
-")).collect());
-        let vendored = mktree((0..30).map(|n| format!("040000 tree {folder}	lib{n:02}
-")).collect());
+        let folder = mktree((0..1_000).map(|n| format!("100644 blob {blob}\tfile{n:04}.c\n")).collect());
+        let vendored = mktree((0..30).map(|n| format!("040000 tree {folder}\tlib{n:02}\n")).collect());
         let with_vendored = |commit: &str, parent: Option<&str>| {
-            let root = mktree(format!("{}
-040000 tree {vendored}	third_party
-", g(&repo, &["ls-tree", commit])));
+            let root = mktree(format!("{}\n040000 tree {vendored}\tthird_party\n", g(&repo, &["ls-tree", commit])));
             let mut args = vec!["commit-tree", root.as_str(), "-m", "with vendored sources"];
             if let Some(p) = parent {
                 args.extend(["-p", p]);
