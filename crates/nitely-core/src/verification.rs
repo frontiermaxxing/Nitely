@@ -129,7 +129,7 @@ pub fn small_verdict(files: &[DiffFile], limits: Option<crate::project_modes::Qu
 /// `small_verdict` for the change from `base` to `head`, against the integration branch's
 /// committed playbook (never the candidate's) and its protected, human and blocked paths.
 pub fn small_change(repo: &Path, base: &str, head: &str, limits: Option<crate::project_modes::QuickLimits>) -> Result<SmallVerdict> {
-    let pb = Playbook::parse(&blob(repo, base, PLAYBOOK_PATH).unwrap_or_default())?;
+    let pb = Playbook::parse(&policy_text(repo, base).unwrap_or_default())?;
     let base = git(repo, &["merge-base", base, head])?.trim().to_string();
     let mut files = Vec::new();
     for row in git(repo, &["diff", "--numstat", "--no-renames", "--no-ext-diff", &base, head, "--"])?.lines().filter(|l| !l.is_empty()) {
@@ -244,6 +244,31 @@ fn blob(repo: &Path, revision: &str, path: &str) -> Result<String> {
     String::from_utf8(out.stdout).context("non-UTF8 source")
 }
 
+/// The integration policy's text at `revision`: the playbook committed there, or, in a repo with
+/// none committed, the one Nitely keeps for it (NIT-725), which a connected repo may run under
+/// instead. Either way the candidate cannot edit it: the one is read at the policy commit, never
+/// the branch, and the other lives outside the repo.
+fn policy_text(repo: &Path, revision: &str) -> Result<String> {
+    if !git(repo, &["ls-tree", "--name-only", revision, "--", PLAYBOOK_PATH])?.trim().is_empty() {
+        return blob(repo, revision, PLAYBOOK_PATH).context("committed integration policy unavailable");
+    }
+    let text = kept_policy(repo)?;
+    if text.trim().is_empty() {
+        bail!("no integration policy: the repo has no {PLAYBOOK_PATH} committed, and Nitely keeps no playbook for it");
+    }
+    Ok(text)
+}
+
+/// The text of the playbook Nitely keeps for the repo `repo` (a worktree of it, too), "" for none.
+fn kept_policy(repo: &Path) -> Result<String> {
+    #[cfg(test)]
+    if let Some(text) = tests::KEPT.with(|k| k.borrow().clone()) {
+        return Ok(text);
+    }
+    let root = crate::git::main_root(&repo.to_string_lossy()).map(std::path::PathBuf::from).unwrap_or_else(|| repo.to_path_buf());
+    Ok(Playbook::stored_policy(&root)?.1)
+}
+
 /// Uses immutable integration policy, never the candidate's edited rules. On uncertainty,
 /// report Full; do not turn a classifier failure into a validation exemption.
 pub fn assess(repo: &Path, base: &str, head: &str, issue: &IssueRecord) -> Result<Plan> {
@@ -293,7 +318,7 @@ fn assess_with_mode(repo:&Path,base:&str,head:&str,issue:&IssueRecord,settings:O
         plan.reasons.push("One mapped component within five files and 200 changed lines.".into());
     }
     if !plan.shadow && matches!(plan.effective.as_str(),"inert"|"contained"|"standard") {
-        let mut pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+        let mut pb=Playbook::parse(&policy_text(repo,&plan.policy_commit)?)?;
         overlay_verification(settings,&mut pb);
         if plan.effective=="inert" {
             plan.commands=pb.verification.basic.clone();
@@ -323,7 +348,7 @@ fn changed_lines(repo:&Path,base:&str,head:&str)->Result<usize> {
 }
 
 fn assess_inner(repo: &Path, issue: &IssueRecord, plan: &mut Plan,settings:Option<&crate::project_modes::ProjectReviewMode>) -> Result<()> {
-    let policy = blob(repo, &plan.policy_commit, PLAYBOOK_PATH).context("committed integration policy unavailable")?;
+    let policy = policy_text(repo, &plan.policy_commit)?;
     let mut pb = Playbook::parse(&policy)?;
     overlay_verification(settings,&mut pb);
     plan.policy_fingerprint=Some(crate::verification_audit::policy_fingerprint(policy.as_bytes(),CLASSIFIER));
@@ -414,7 +439,7 @@ fn small_selection(repo:&Path,plan:&mut Plan,limits:Option<crate::project_modes:
     if plan.affected.as_ref().is_none_or(|s|!s.full) {return Ok(());}
     let verdict=small_change(repo,&plan.policy_commit,&plan.head,limits)?;
     if !verdict.small {return Ok(());}
-    let pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+    let pb=Playbook::parse(&policy_text(repo,&plan.policy_commit)?)?;
     let selection=crate::affected_tests::select_small(repo,&plan.base,&plan.head,&plan.policy_commit,&pb.checks.files,&pb.verification.basic)?;
     if !selection.full {plan.reasons.push(format!("Small: {}",verdict.reason));}
     plan.affected=Some(selection);
@@ -429,7 +454,7 @@ fn fast_checks(repo:&Path,plan:&mut Plan,issue:&IssueRecord)->Result<()> {
     if issue.review_level.as_deref()==Some("sensitive") {return Ok(());}
     let Some(selection)=plan.affected.clone() else {return Ok(());};
     if selection.full {plan.reasons.push(format!("Fast checks unavailable, the test map keeps the full gate: {}",selection.reasons.join("; ")));return Ok(());}
-    let mut pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+    let mut pb=Playbook::parse(&policy_text(repo,&plan.policy_commit)?)?;
     if pb.verification.basic.is_empty() {return Ok(());}
     if let Some(hit)=risk_floor(repo,plan,&pb)? {plan.reasons.push(format!("The risk floor keeps the full gate: {hit}"));return Ok(());}
     plan.commands=vec![format!("git diff --check {} {}",plan.base,plan.head)];
@@ -478,7 +503,7 @@ fn project_plan(db:&Db,repo:&Path,base:&str,head:&str,issue:&IssueRecord)->Resul
                 plan.enforcement=if plan.depth=="Off" {"Automatic tests disabled by project review mode; no passing evidence."}else{"Full configured gate required by project review mode."}.into();
             }
             Some(crate::project_modes::TestDepth::Basic)=>{
-                let pb=Playbook::parse(&blob(repo,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+                let pb=Playbook::parse(&policy_text(repo,&plan.policy_commit)?)?;
                 if pb.verification.basic.is_empty() {
                     plan.commands.clear();plan.depth="Full".into();plan.reasons.push("Basic commands are not configured; Full gate required.".into());
                 }else if let Some(hit)=risk_floor(repo,&plan,&pb)? {
@@ -535,7 +560,7 @@ pub(crate) fn execution_plan(db:&Db,root:&Path,worktree:&Path,key:&str)->Result<
         let disabled=crate::verification_audit::disabled_rules(db,project)?;
         if plan.rule_ids.iter().any(|r|disabled.contains(r)) {return Ok(None);}
     }
-    let mut policy=Playbook::parse(&blob(worktree,&plan.policy_commit,PLAYBOOK_PATH)?)?;
+    let mut policy=Playbook::parse(&policy_text(worktree,&plan.policy_commit)?)?;
     crate::project_modes::apply_issue(db,key,&mut policy)?;
     let explicit_depth=crate::project_modes::for_issue(db,key)?.and_then(|s|s.options().test_depth);
     if (explicit_depth.is_none() || policy.verification.backstop.enabled) && crate::verification_backstop::reduced_ready(db,root,&policy.verification.backstop,crate::db::now()).is_err() {return Ok(None);}
@@ -676,6 +701,43 @@ mod tests {
         assert!(prove("docs/help.md", "text", "```sh\nrun\n```", &r).is_err());
         assert!(prove("src/Page.tsx", "const x=<button>Old</button>", "const x=<button>New", &r).is_err());
         assert!(prove("src/thing.ts", "// before\nlet a=1;", "// after\nlet b=1;", &r).is_err());
+    }
+
+    thread_local! {
+        /// The playbook Nitely keeps for the repo, as this test thread sets it.
+        pub(super) static KEPT: std::cell::RefCell<Option<String>> = const { std::cell::RefCell::new(None) };
+    }
+
+    /// A repo whose rules live in Nitely, with no playbook committed, plans by those rules, not
+    /// a Full fallback (NIT-725); with no rules anywhere, the reason says so in plain words.
+    #[test]
+    fn a_repo_without_a_committed_playbook_plans_by_the_one_nitely_keeps() {
+        use crate::test_repo::git as g;
+        let repo = crate::test_repo::copy("verification-kept-policy", |dir| crate::test_repo::init(dir, &[("src/Page.tsx", "const x=<button>Save</button>")]));
+        let mut db = Db::open(&repo.join("state.sqlite")).unwrap();
+        db.create_project("APP", "Example").unwrap();
+        let issue = db.create_issue(&crate::NewIssue { project: "APP".into(), title: "Improve copy".into(), body: "Clarify a display label".into(), kind: "feature".into(), source: "codex".into(), evidence: "test".into(), review_level: Some("inert".into()), ..Default::default() }, &Actor::Human).unwrap();
+        let base = g(&repo, &["rev-parse", "HEAD"]).trim().to_string();
+        std::fs::write(repo.join("src/Page.tsx"), "const x=<button>Save changes</button>").unwrap();
+        g(&repo, &["add", "src/Page.tsx"]); g(&repo, &["commit", "-m", "copy"]);
+
+        let none = assess(&repo, &base, "HEAD", &issue).unwrap();
+        assert_eq!(none.depth, "Full");
+        assert!(none.reasons.iter().any(|r| r.contains("Nitely keeps no playbook for it")) && !none.reasons.iter().any(|r| r.contains("revision blob")), "{:?}", none.reasons);
+
+        KEPT.with(|k| *k.borrow_mut() = Some("[verification]
+version=1
+mode='active'
+basic=['echo typed']
+display_copy=['src/Page[.]tsx']
+".into()));
+        let kept = assess(&repo, &base, "HEAD", &issue);
+        KEPT.with(|k| *k.borrow_mut() = None);
+        let kept = kept.unwrap();
+        assert_eq!(kept.depth, "Basic", "{:?}", kept.reasons);
+        assert!(!kept.shadow && kept.commands.iter().any(|c| c == "echo typed"), "{:?}", kept.commands);
+        drop(db);
+        std::fs::remove_dir_all(repo).ok();
     }
 
     #[test]
