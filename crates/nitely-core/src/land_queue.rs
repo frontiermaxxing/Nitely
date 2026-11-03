@@ -1154,6 +1154,24 @@ reason = "billing"
         std::fs::remove_dir_all(&f.base).ok();
     }
 
+    /// NIT-729 review: an approved change whose plan changed while it waited, and that a land
+    /// rebased with its patch unchanged, is reviewed again at its new tip and keeps its approval.
+    #[test]
+    fn a_rebased_approved_change_reviewed_again_keeps_its_approval() {
+        let mut f = fixture();
+        let (a, wt) = f.reviewed("A", &[("a.txt", "a")]);
+        f.db.conn.execute(r#"UPDATE review SET approver = 'human', reasons = '["a person approves txt"]', scope_revision = 'stale', scope_record = '{"revision":"stale","interpretation":"","obligation":"","decision":""}' WHERE issue_key = ?1"#, [&a]).unwrap();
+        // Signing commits to main: the branch is rebased onto it, as a land does.
+        f.require_and_sign(&[&a]);
+        sh(&wt, &["rebase", "-q", "main"]);
+        let outcome = crate::review_batch::review_pending(&mut f.db, &f.repo, &[a.clone()], &f.actor.clone()).unwrap();
+        assert_eq!(outcome, vec![(a.clone(), Ok(()))]);
+        let review = f.db.reviews(&a).unwrap().remove(0);
+        assert_eq!((review.reviewer.as_str(), review.commit_sha.as_str()), ("fake", sh(&wt, &["rev-parse", "HEAD"]).trim()));
+        assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Approved");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
     #[test]
     fn approval_revoked_after_the_combined_gate_prevents_any_fast_forward() {
         let mut f = fixture();

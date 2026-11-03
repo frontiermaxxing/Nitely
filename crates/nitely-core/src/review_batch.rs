@@ -363,6 +363,12 @@ fn decide(db: &mut Db, root:&Path, rules: &ReviewRules, w: &Waiting, mut review:
         }
         return Ok(Err(format!("the {} review asked for changes ({}); fix them, commit, and submit again", review.reviewer, open.join("; "))));
     }
+    // An approval the person gave stands over a review of the same patch with no new reason
+    // (`standing_approval`): the land checks its signature, and it is not asked for again (NIT-729).
+    if approver == "human" && db.standing_approval(key)?.is_some() {
+        db.add_note(key, &format!("Review by {by} at its land passed; the approval given stands"), "submit", actor)?;
+        return Ok(Ok(()));
+    }
     if approver == "human" {
         db.add_note(key, &format!("Review by {by} at its land passed; it waits for a human ({})", reasons.join("; ")), "submit", actor)?;
         if state.1 && state.0 != "Needs You" {
