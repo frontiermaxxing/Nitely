@@ -231,7 +231,7 @@ pub fn review(db: &Db, req: &Request<'_>) -> Result<Identity> {
     let c = prepare(db, req)?;
     let (gate_id, _) = latest(db, &c.identity, "gate")?;
     let id = start(db, &c.identity, "review", Some(gate_id))?;
-    let result = execute_review(req, &c).and_then(|evidence| {
+    let result = execute_review(db, req, &c).and_then(|evidence| {
         unchanged(db, req, &c.identity)?;
         if latest(db, &c.identity, "gate")?.0 != gate_id { bail!("Full gate was rerun while the release review was running"); }
         finish(db, id, true, &evidence)?;
@@ -241,12 +241,13 @@ pub fn review(db: &Db, req: &Request<'_>) -> Result<Identity> {
     result
 }
 
-fn execute_review(req: &Request<'_>, c: &Candidate) -> Result<crate::review::Review> {
+fn execute_review(db:&Db, req: &Request<'_>, c: &Candidate) -> Result<crate::review::Review> {
     let files = git(req.worktree, &["diff", "--name-only", "-z", "--no-renames", &c.identity.base, &c.identity.candidate])?.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect::<Vec<_>>();
     c.playbook.approval.check_blocked(&files)?;
     let reasons = c.playbook.human_reasons(&files)?;
     if let Some(why) = review_refusal(&reasons, None) { bail!(why); }
     let mut rules = c.playbook.review.clone();
+    rules.context = crate::review_scope::release_obligations(db,&c.root)?;
     // The project PR review toggle does not exempt releases, nor does a lighter task level.
     rules.enabled = true;
     rules.policy_root = None;

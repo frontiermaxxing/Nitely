@@ -336,6 +336,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             // The single review knows what the change is for (NIT-282).
             let mut rules = pb.review.clone();
             rules.context = review_context(db, &issue, &out.gate)?;
+            crate::review_scope::bind(db, &issue, &mut rules, false)?;
             // Under a mode that reviews in batches, its review waits for its land queue batch
             // (review_batch.rs): nothing is reviewed now, and land refuses it until it is. One that
             // started with the gate was found not to.
@@ -345,7 +346,10 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             }
             // The review that ran alongside the gate, when it reviewed the commit the gate passed.
             let alongside = match early.take() {
-                Some(e) if reused.is_none() => e.join(&worktree, &out.commit, &rules_of(&pb.review))?,
+                Some(e) if reused.is_none() => match e.join(&worktree, &out.commit, &rules_of(&pb.review))? {
+                    Some(done) if done.1.scope.as_ref().map(|s|s.current(db,&issue)).transpose()?.unwrap_or(false)=>Some(done),
+                    _=>None,
+                },
                 _ => None,
             };
             let (choice, mut review) = match (reused, alongside) {
@@ -401,6 +405,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         // accepted on it: told those, it does not raise them again in other words (NIT-331).
         let mut rules = pb.review.clone();
         rules.context = review_context(db, &issue, &out.gate)?;
+            crate::review_scope::bind(db, &issue, &mut rules, false)?;
         let accepted = told_accepted(db, &issue.key)?;
         if !accepted.is_empty() {
             rules.context.push_str(&format!("\n{}", crate::review::accepted_told(&accepted)));
@@ -546,14 +551,14 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     if let Some(why) = &stalled {
         match route {
             crate::project_modes::StalledReviews::Ask => {
-                db.ask_to_decide_findings(&issue.key, why, actor)?;
+                if let Some(r)=out.review.as_ref().filter(|r|r.scope.is_some()) { scoped_stall(db,&issue,r,actor)?; } else { db.ask_to_decide_findings(&issue.key, why, actor)?; }
             }
             crate::project_modes::StalledReviews::Fix => {
                 // The findings go to a follow-up filed now, so the notice can name it (NIT-634 review).
                 let follow_up = match &out.review {
                     Some(r) => {
                         let accepted: Vec<String> = db.accepted_for(&issue.key, &out.patch_id)?.into_iter().map(|a| a.finding).collect();
-                        Some(file_follow_up(db, &issue, r, &accepted, actor)?)
+                        Some(file_follow_up(db, &issue, r, &accepted, actor,false)?)
                     }
                     None => None,
                 };
@@ -583,6 +588,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     out.state = now_in.clone();
     out.next = match &split_follow_up {
         Some(f) => crate::submit_rules::split_into(f),
+        None if stalled.is_some() && out.review.as_ref().is_some_and(|r|r.scope.is_some()) => "The finding remains blocking. Follow the recorded repair or scope decision; repetition alone does not authorize a waiver.".into(),
         None if out.quick && state == "In Review" => "A quick change: its own checks passed. Call land; it is reviewed after landing.".into(),
         None => next.into(),
     };
@@ -686,6 +692,7 @@ fn start_early_review(
     let not_gated_yet = GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.to_string(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
     let mut rules = pb.review.clone();
     rules.context = review_context(db, issue, &not_gated_yet)?;
+    crate::review_scope::bind(db, issue, &mut rules, false)?;
     let wt = worktree.to_string_lossy().into_owned();
     db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review starts with the gate, on {}", &head[..head.len().min(7)]))?;
     let policy = pb.review.clone();
@@ -759,7 +766,7 @@ pub(crate) fn item_review_of(db: &Db, key: &str) -> Result<ItemReview> {
 /// The item review of a goal item, against its goal branch `goal_branch` (NIT-563), recorded as
 /// any review is, so the next round, acceptances and land read it. Returns the review, the patch
 /// it reviewed, and why the rounds stopped converging, when they did (NIT-568).
-fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, branch: &str, goal_branch: &str, actor: &Actor) -> Result<(Review, String, Option<String>)> {
+pub(crate) fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, branch: &str, goal_branch: &str, actor: &Actor) -> Result<(Review, String, Option<String>)> {
     let mut pb = Playbook::load(root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
     pb.review.policy_root = Some(root.to_path_buf());
@@ -775,6 +782,7 @@ fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, b
     let previous = previous_round(db, &issue.key, worktree)?;
     let mut rules = pb.review.clone();
     rules.context = review_context(db, issue, &gate)?;
+    crate::review_scope::bind(db, issue, &mut rules, false)?;
     let wt = worktree.to_string_lossy().into_owned();
     // A reviewer that cannot run (not signed in, say) is passed over for the next one, as for a
     // change to main; one that ran and did not finish stops the submit.
@@ -855,15 +863,16 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
             if let Some(why) = &stalled {
                 match route {
                     crate::project_modes::StalledReviews::Ask => {
-                        db.ask_to_decide_findings(&issue.key, why, actor)?;
+                        if review.scope.is_some() { scoped_stall(db,issue,&review,actor)?; } else { db.ask_to_decide_findings(&issue.key, why, actor)?; }
                     }
                     crate::project_modes::StalledReviews::Fix => {
-                        let f = file_follow_up(db, issue, &review, &accepted, actor)?;
+                        let f = file_follow_up(db, issue, &review, &accepted, actor,false)?;
                         db.add_note(&issue.key, &crate::submit_rules::stalled_notice_for(&issue.key, why, &f), "note", actor)?;
                         split_follow_up = Some(f);
                     }
                 }
             }
+            let scope_decided = review.scope.is_some();
             let stalled_line = stalled.as_ref().map(|why| format!(". The review rounds are not converging: {why}")).unwrap_or_default();
             db.add_note(&issue.key, &format!("Item review by {by} requested changes: {}{stalled_line}", open.join("; ")), "submit", actor)?;
             let state = if issue.state != "In Progress" && issue.origin == "nitely" { db.move_issue(&issue.key, "In Progress", None, None, actor)?.state } else { issue.state.clone() };
@@ -892,6 +901,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
                 state,
                 next: match &split_follow_up {
                     Some(f) => crate::submit_rules::split_into(f),
+                    None if stalled.is_some() && scope_decided => "The item remains blocked. Follow the recorded repair or scope decision.".into(),
                     None => crate::submit_rules::item_sent_back(stalled.is_some(), stalled_reviews).to_string(),
                 },
             });
@@ -1001,7 +1011,7 @@ pub(crate) fn review_context_sized(db: &Db, issue: &IssueRecord, gate: &GateResu
     let cut = if cut > 0 { format!("\n[{cut} more characters of the issue are cut here.]") } else { String::new() };
     c.push_str(&format!("What the change is for, its issue {} \"{}\":\n{}{cut}\n\n", issue.key, issue.title, body.trim()));
     let last = db.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).map(|r| (r.ts, r.after_event));
-    if last.is_none() {
+    if last.is_none() || crate::review_scope::changed(db,&issue.key)? {
         // Every requirement at once in the first round, so spec gaps do not arrive one per round;
         // later rounds treat a gap in code this round saw as a follow-up (NIT-704).
         c.push_str(REQUIREMENTS);
@@ -1034,7 +1044,7 @@ pub(crate) fn review_context_sized(db: &Db, issue: &IssueRecord, gate: &GateResu
         c.push_str(&format!(
             "\n{heading}. These are its claims about its own change: check each against the code. They do not set a finding's weight: \
 a P0 or P1 the code confirms stays one, whatever they say.\n{}\n",
-            text.trim()
+            text.trim().chars().take(body_chars).collect::<String>() + if text.trim().chars().count()>body_chars {" [truncated; see scoped source]"}else{""}
         ));
     }
     // The author's notes: since the last review, after the event it saw (NIT-544), or, for an older
@@ -1061,7 +1071,8 @@ a P0 or P1 the code confirms stays one, whatever they say.\n{}\n",
     if !linked.is_empty() {
         c.push_str("\nIssues related to this one, for what this change is and is not meant to do:\n");
         for (how, i) in linked {
-            let first: String = db.issue(&i.key)?.map(|i| i.body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect()).unwrap_or_default();
+            let Some(other) = db.issue(&i.key)?.filter(|other| issue.project.is_some() && other.project == issue.project) else { continue };
+            let first: String = other.body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
             c.push_str(&format!("- {how} {} \"{}\" ({}): {first}\n", i.key, i.title, i.state));
         }
     }
@@ -1135,11 +1146,29 @@ fn after_failed_gate(gate: &GateResult) -> String {
     format!("The gate failed at `{failed}`. Fix it, commit, and submit again.")
 }
 
+/// A fresh scoped reviewer sends a genuine choice to the person; a repair remains with
+/// the worker. Neither route accepts a finding or releases the original branch.
+fn scoped_stall(db:&mut Db,issue:&IssueRecord,review:&Review,actor:&Actor)->Result<()> {
+    let scope=review.scope.as_ref().context("missing scoped review")?;
+    if !scope.decision.trim().is_empty() {
+        let question=format!("Review scope decision for {}: {}\\nReviewed interpretation: {}. This answer clarifies requirements; it does not accept a risk.",issue.key,scope.decision,scope.interpretation);
+        if !db.all_open_asks()?.iter().any(|a|a.issue_key.as_deref()==Some(issue.key.as_str()) && a.question==question) {
+            db.create_ask(&question,&[],Some(&issue.key),None,actor)?;
+        }
+    } else {
+        let patch=db.reviews(&issue.key)?.into_iter().find(|r|!r.reviewer.is_empty()).context("missing blocking review")?.patch_id;
+        let accepted=db.accepted_for(&issue.key,&patch)?.into_iter().map(|a|a.finding).collect::<Vec<_>>();
+        let repair=file_follow_up(db,issue,review,&accepted,actor,true)?;
+        db.log_event(actor,Some(&issue.key),None,"review_resolution",&format!("Confirmed defect remains blocking. Repair tracked by {repair}; use fresh dispute triage for contrary evidence."))?;
+    }
+    Ok(())
+}
+
 /// The follow-up issue that takes `issue`'s open P0/P1 findings when its review rounds stop
 /// converging under `fix`, in the same goal: the one filed at an earlier stall while it is still
 /// open, with this stall's new findings added to it, else a new one. Filed before the notice, so
 /// the notice names it (NIT-634 review).
-fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &[String], actor: &Actor) -> Result<String> {
+fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &[String], actor: &Actor, repair:bool) -> Result<String> {
     let evidence = crate::submit_rules::follow_up_evidence(&issue.key);
     let open = crate::submit_rules::blocking(&review.findings, accepted);
     if let Some(existing) = db.list_issues(issue.project.as_deref(), false)?.into_iter().find(|i| i.evidence == evidence) {
@@ -1152,7 +1181,7 @@ fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &
     let new = crate::issues::NewIssue {
         project: issue.project.clone().unwrap_or_default(),
         title: format!("Open review findings of {}: {}", issue.key, issue.title),
-        body: crate::submit_rules::follow_up_body(&issue.key, &open),
+        body: if repair { format!("{} remains blocked. Repair or independently disprove the following defects on the original patch:\n{}",issue.key,open.join("\n")) } else { crate::submit_rules::follow_up_body(&issue.key, &open) },
         kind: "bug".into(),
         source: issue.source.clone().unwrap_or_else(|| "nitely".into()),
         evidence,
@@ -1218,7 +1247,7 @@ pub fn brief_reviewer(db: &Db, key: &str, note: &str, actor: &Actor) -> Result<(
 /// What the first review of a change does before anything else (NIT-696): checks every requirement
 /// of the issue at once, each one not met a finding in that round.
 pub(crate) const REQUIREMENTS: &str = "This is the change's first review. Before anything else, list every requirement the issue \
-states (each thing it says is wanted or must hold, its \"done when\" included), one per line, as `REQUIREMENT <n>: met <file>, \
+requires of this chunk at this stage (its provided contract and \"done when\" included; separately identify the consumer obligations due at integration), one per line, as `REQUIREMENT <n>: met <file>, \
 <symbol>` or `REQUIREMENT <n>: not met: <what is missing>`. Report each one not met as a finding too, in this round, graded \
 like any other: later rounds treat a gap in code this round already saw as a follow-up, not a blocker.\n";
 
@@ -1280,11 +1309,12 @@ pub(crate) fn previous_round_at(db: &Db, key: &str, dir: &Path, head: &str, befo
     let Some(last) = db.reviews_before(key, before)?.into_iter().find(|r| !r.reviewer.is_empty()) else {
         return Ok(None);
     };
-    let in_history = git(dir, &["merge-base", "--is-ancestor", &last.commit_sha, head]).is_ok();
+    let scope_changed = crate::review_scope::changed(db, key)?;
+    let in_history = !scope_changed && git(dir, &["merge-base", "--is-ancestor", &last.commit_sha, head]).is_ok();
     let told = told_accepted(db, key)?;
     let findings = last.findings.into_iter().filter(|f| !told.iter().any(|(t, _)| t.text == f.text)).collect();
     // A pass whose branch was rebased since: where its change began, for a range-diff against it.
-    let passed_on = if !in_history && last.verdict == "pass" { git(dir, &["merge-base", &last.commit_sha, head]).ok().map(|o| o.trim().to_string()) } else { None };
+    let passed_on = if !scope_changed && !in_history && last.verdict == "pass" { git(dir, &["merge-base", &last.commit_sha, head]).ok().map(|o| o.trim().to_string()) } else { None };
     Ok(Some(PreviousRound { commit: last.commit_sha, findings, in_history, accepted: told, passed_on }))
 }
 
@@ -1324,18 +1354,23 @@ fn reused_pass(
     let last = db
         .conn
         .query_row(
-            "SELECT reviewer, verdict, COALESCE(diff_id, ''), commit_sha, findings, flagged, note, rules FROM review
+            "SELECT reviewer, verdict, COALESCE(diff_id, ''), commit_sha, findings, flagged, note, rules, scope_record FROM review
              WHERE issue_key = ?1 COLLATE NOCASE AND reviewer != '' ORDER BY ts DESC, id DESC LIMIT 1",
             [key],
             |r| {
                 Ok((
                     (r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, String>(3)?),
-                    (r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, Option<String>>(7)?),
+                    (r.get::<_, String>(4)?, r.get::<_, String>(5)?, r.get::<_, String>(6)?, r.get::<_, Option<String>>(7)?, r.get::<_, Option<String>>(8)?),
                 ))
             },
         )
         .optional()?;
-    let Some(((reviewer, verdict, last_diff, commit), (findings, flagged, note, ran_under))) = last else { return Ok(None) };
+    let Some(((reviewer, verdict, last_diff, commit), (findings, flagged, note, ran_under, scope))) = last else { return Ok(None) };
+    let scope = scope.and_then(|s| serde_json::from_str::<crate::review_scope::Receipt>(&s).ok());
+    if let Some(receipt) = &scope {
+        let issue = db.issue(key)?.context("reviewed issue unavailable")?;
+        if !receipt.current(db,&issue)? { return Ok(None); }
+    }
     let previous = crate::submit_rules::LastReview { reviewer: &reviewer, verdict: &verdict, diff_id: &last_diff, rules: ran_under.as_deref() };
     let chosen = rules.choose(vendor, installed).ok().map(|c| c.reviewer);
     if !crate::submit_rules::reusable(&previous, diff, &rules_of(rules), chosen.as_deref()) {
@@ -1353,7 +1388,7 @@ fn reused_pass(
         batch: None,
         tokens: None,
         reused: Some(commit),
-        outside: vec![],
+        outside: vec![], scope,
     };
     let choice = crate::review::Choice { independent: rules.is_independent(&reviewer, vendor), reviewer, note };
     Ok(Some((choice, review)))
@@ -1604,9 +1639,9 @@ impl Db {
         let batch = s.review.as_ref().and_then(|r| r.batch.as_ref()).map(|b| b.id);
         let (seconds, tokens) = (s.review.as_ref().map(|r| r.seconds as i64), s.review.as_ref().and_then(|r| r.tokens).map(|t| t as i64));
         self.conn.execute(
-            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch, after_event)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, (SELECT COALESCE(MAX(id), 0) FROM event))",
-            rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens, s.solution.as_ref().map(to_json), to_json(&evidence), s.branch],
+            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch, scope_revision, scope_record, after_event)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, (SELECT COALESCE(MAX(id), 0) FROM event))",
+            rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens, s.solution.as_ref().map(to_json), to_json(&evidence), s.branch, s.review.as_ref().and_then(|r|r.scope.as_ref()).map(|s|&s.revision), s.review.as_ref().and_then(|r|r.scope.as_ref()).map(to_json)],
         )?;
         Ok(())
     }
@@ -1656,7 +1691,7 @@ pub fn review_pr<'a>(review: &ReviewRecord, prs: &'a [crate::db::PrRecord]) -> O
     if matches.next().is_some() { None } else { Some(first) }
 }
 
-fn to_json<T: Serialize + ?Sized>(v: &T) -> String {
+pub(crate) fn to_json<T: Serialize + ?Sized>(v: &T) -> String {
     serde_json::to_string(v).unwrap_or_else(|_| "[]".into())
 }
 
@@ -1761,7 +1796,7 @@ mod tests {
             batch: None,
             tokens: None,
             reused: None,
-            outside: vec![],
+            outside: vec![], scope: None,
         };
         // Round 2 carrying a P1 once is still a round that may converge.
         let first = record(vec![f(1, "Drops the last row: a.rs", false)]);
@@ -1810,6 +1845,22 @@ MONEY 2: no
   exit 0;;
 esac
 files=$(git diff main...HEAD --name-only)
+case "$files" in *hook.txt*)
+  # Read the scoped source, beyond the initial snippet, as a reviewer with Read access can.
+  indexdir=$(printf '%s\n' "$prompt" | sed -n 's/.*Read index.json in \(.*\) for this frozen.*/\1/p' | head -1)
+  if grep -q 'allow unknown write' hook.txt; then
+    echo "- [P1] Permission bypass: hook.txt, unknown writes are allowed"; echo "VERDICT: findings"; echo "MONEY: no"; exit 0
+  fi
+  case "$prompt" in *"Delivery scope: assembled checkpoint."*)
+    if ! grep -q 'call hook' consumer.txt; then
+      echo "- [P1] Integration: consumer.txt, production write never calls hook"; echo "VERDICT: findings"; echo "MONEY: no"; exit 0
+    fi;;
+  esac
+  if grep -q 'Enforce the hook at the write boundary' "$indexdir"/source-*.json; then
+    echo "SCOPE: Producer provides the hook. Source: consumer spec at this revision."
+    echo "OBLIGATION: consumer enforces at write boundary before release."
+  else echo "- [P1] Unverified contract: hook.txt, missing consumer evidence"; echo "VERDICT: findings"; echo "MONEY: no"; exit 0; fi;;
+esac
 money=no; case "$files" in *billing*) money=yes;; esac
 case "$prompt" in
   *"PREVIOUS <n>"*) case "$files" in
@@ -2161,10 +2212,9 @@ exit 0
     }
 
     #[test]
-    fn a_p1_that_two_rounds_leave_open_goes_to_a_person() {
+    fn a_confirmed_p1_stays_with_a_worker_without_a_risk_waiver() {
         let mut f = fixture();
-        // A P1 that two rounds of fixes leave open goes to a person instead of a fourth round, and
-        // its agent goes on (NIT-568: a project with no mode asks, as Release does).
+        // A confirmed, repairable blocker needs no automatic risk waiver, even under Ask.
         let (issue, wt) = f.started("Stuck fix");
         std::fs::write(wt.join("stuck.txt"), "let stuck = 1;").unwrap();
         sh(&wt, &["add", "."]);
@@ -2181,19 +2231,17 @@ exit 0
             .unwrap();
         // The note says how many are open, not the findings themselves (NIT-633).
         assert!(last.contains("not converging") && last.contains("1 open finding (1 P1)") && !last.contains("Stuck: stuck.txt"), "{last}");
-        // A decision about the change, not the person's own work (NIT-220): the owner stays the agent,
-        // and the open finding waits in the Inbox as a request to accept it, or send it back.
         let stuck = f.db.issue(&issue.key).unwrap().unwrap();
         assert_eq!((stuck.owner.as_str(), stuck.state.as_str()), ("agent", "In Progress"));
-        let requests: Vec<crate::issues::Ask> = f.db.open_asks().unwrap().into_iter().filter(|a| a.issue_key.as_deref() == Some(issue.key.as_str())).collect();
-        assert_eq!(requests.len(), 1, "{requests:?}");
-        assert!(requests[0].finding.as_ref().is_some_and(|f| f.priority == 1 && f.text.starts_with("Stuck: stuck.txt")), "{requests:?}");
-        assert!(requests[0].question.contains("not converging"), "{}", requests[0].question);
+        assert!(!f.db.open_asks().unwrap().iter().any(|a|a.issue_key.as_deref()==Some(&issue.key)));
+        let repair = f.db.list_issues(Some("NIT"),false).unwrap().into_iter().find(|i|i.evidence==crate::submit_rules::follow_up_evidence(&issue.key)).unwrap();
+        assert!(repair.body.contains("Stuck: stuck.txt") && repair.body.contains("remains blocked"));
         // Done is refused while the change is not landed: it is not on the integration branch.
         let done = f.db.move_issue(&issue.key, "Done", Some("Done by the human, outside Nitely."), None, &Actor::Human).unwrap_err().to_string();
         assert!(done.contains("never landed"), "{done}");
         // Sent back, the count starts over: the next round that carries it is not escalated.
-        f.db.decline_finding(requests[0].id, "fix it properly", "").unwrap();
+        let explicit=f.db.request_acceptance(&issue.key,"1","A specific product trade-off",None,&f.actor).unwrap();
+        f.db.decline_finding(explicit.id, "fix it properly", "").unwrap();
         assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
     }
 
@@ -2401,6 +2449,64 @@ exit 0
         brief_reviewer(&f.db, &long.key, "Left the old path in.", &f.actor).unwrap();
         let c = review_context_sized(&f.db, &long, &gate, true).unwrap();
         assert!(c.contains("[5 more characters of the issue are cut here.]") && c.contains("Left the old path in."), "{c}");
+    }
+
+    #[test]
+    fn review_scope_parallel_contract_survives_to_integration() {
+        use crate::review_scope::{Plan,release_obligations};
+        let mut f=fixture();
+        let (producer,wt)=f.started("Provide the permission hook");
+        let consumer=f.db.create_issue(&NewIssue {body:format!("{} Enforce the hook at the write boundary before release.","background ".repeat(50)),..new("Consume permission hook")},&f.actor).unwrap();
+        f.db.add_blocker(&consumer.key,&producer.key,&f.actor).unwrap();
+        f.db.create_project("ZZ","Unrelated").unwrap();
+        let other=f.db.create_issue(&NewIssue{project:"ZZ".into(),body:"private unrelated text".into(),..new("Private")},&f.actor).unwrap();
+        f.db.add_blocker(&producer.key,&other.key,&f.actor).unwrap();
+        let reference=f.db.create_issue(&new("Permission policy decision"),&Actor::Human).unwrap();
+        brief_reviewer(&f.db,&producer.key,&format!("Check {} for the agreed split",reference.key),&f.actor).unwrap();
+        let plan=Plan::load(&f.db,&producer).unwrap();
+        let (files,_)=plan.stage(&f.db,&producer.key,false).unwrap();
+        let index:serde_json::Value=serde_json::from_slice(&std::fs::read(files.dir.join("index.json")).unwrap()).unwrap();
+        assert_eq!(index["sources_missing_or_over_limit"],true);
+        let docs=index["sources"].as_array().unwrap();
+        assert_eq!(docs.len(),3);
+        let doc=&docs.iter().find(|s|s["role"]=="consumer").unwrap()["source"];
+        let actual=std::fs::read_to_string(files.dir.join(doc.as_str().unwrap())).unwrap();
+        assert!(actual.contains("Enforce the hook at the write boundary"));
+        // One normal submit, including the reviewer's structured interpretation; no second gate
+        // or author note is required to distinguish the producer from its consumer.
+        std::fs::write(wt.join("hook.txt"),"return decision").unwrap();
+        sh(&wt,&["add","."]);sh(&wt,&["commit","-qm","hook"]);
+        let submitted=f.submit(&wt,true).unwrap();
+        assert_eq!(submitted.review.unwrap().verdict,"pass");
+        let obligation=release_obligations(&f.db,&f.repo).unwrap();
+        assert!(obligation.contains("consumer enforces at write boundary"),"{obligation}");
+        assert!(!crate::review_scope::changed(&f.db,&producer.key).unwrap());
+        f.db.add_note(&producer.key,"Author handoff: review is complete.","handoff",&f.actor).unwrap();
+        f.db.add_note(&consumer.key,"Consumer worktree is ready.","note",&f.actor).unwrap();
+        assert!(!crate::review_scope::changed(&f.db,&producer.key).unwrap(),"routine notes must not reopen a passed review");
+        brief_reviewer(&f.db,&producer.key,"Routine handoff; no new constraints.",&f.actor).unwrap();
+        assert!(!crate::review_scope::changed(&f.db,&producer.key).unwrap(),"removing a note link cannot itself restart review");
+        f.db.add_note(&reference.key,"The permission contract now includes unknown writes.","note",&Actor::Human).unwrap();
+        assert!(crate::review_scope::changed(&f.db,&producer.key).unwrap(),"a human change to a previously consulted source invalidates even after its note link disappears");
+        f.db.edit_issue(&consumer.key,None,Some("Permission check now required in producer"),&Actor::Human).unwrap();
+        assert!(crate::review_scope::changed(&f.db,&producer.key).unwrap());
+        // The same candidate is incomplete when the assembled write path is due. A checkpoint
+        // is recognized by its board record, not an author calling the patch a foundation.
+        let goal=f.db.save_goal("NIT",None,&crate::goals::GoalChange{title:Some("Protected writes".into()),outcome:Some("Writes check permission".into()),..Default::default()},&Actor::Human).unwrap();
+        let cp=f.db.create_issue(&NewIssue{goal:Some(goal.id),body:format!("Integrate {} and {}",producer.key,consumer.key),..new("Ship protected writes")},&f.actor).unwrap();
+        f.db.conn.execute("INSERT INTO goal_checkpoint(goal_id,issue_key,head,opened_at) VALUES(?1,?2,'candidate',1)",rusqlite::params![goal.id,cp.key]).unwrap();
+        std::fs::write(wt.join("consumer.txt"),"write directly").unwrap();
+        sh(&wt,&["add","."]);sh(&wt,&["commit","-qm","consumer"]);
+        let mut rules=Playbook::load(&f.repo).unwrap().review;
+        crate::review_scope::bind(&f.db,&cp,&mut rules,false).unwrap();
+        assert!(rules.context.contains("consumer enforces at write boundary"));
+        assert_eq!(rules.run("claude",&wt,"main",None).unwrap().verdict,"changes");
+        std::fs::write(wt.join("hook.txt"),"allow unknown write").unwrap();
+        sh(&wt,&["commit","-qam","unclassified write"]);
+        let broken=f.submit(&wt,true).unwrap();
+        assert_eq!(broken.state,"In Progress");
+        assert!(broken.review.unwrap().findings.iter().any(|f|f.priority==1 && f.text.contains("Permission bypass")));
+
     }
 
     /// The first review is given the whole issue and checks every requirement in it at once; a
