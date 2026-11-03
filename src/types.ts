@@ -1079,6 +1079,7 @@ export interface RulesEdit {
 
 /** App-wide defaults for what a playbook leaves unset; a missing key keeps Nitely's own. */
 export interface RuleDefaults {
+  models?: Record<string, string>;
   reviewer?: Record<string, string>;
   require_cross_vendor?: boolean;
   land_by?: LandBy;

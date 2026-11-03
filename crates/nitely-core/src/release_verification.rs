@@ -231,22 +231,39 @@ pub fn review(db: &Db, req: &Request<'_>) -> Result<Identity> {
     let c = prepare(db, req)?;
     let (gate_id, _) = latest(db, &c.identity, "gate")?;
     let id = start(db, &c.identity, "review", Some(gate_id))?;
-    let result = execute_review(db, req, &c).and_then(|evidence| {
+    let models=review_models(&c)?;
+    let result = execute_review(db, req, &c, &models).and_then(|evidence| {
+        anyhow::ensure!(review_models(&c)?==models,"Review models changed during verification; run release-verify review again");
         unchanged(db, req, &c.identity)?;
         if latest(db, &c.identity, "gate")?.0 != gate_id { bail!("Full gate was rerun while the release review was running"); }
-        finish(db, id, true, &evidence)?;
+        finish(db, id, true, &serde_json::json!({"review":evidence,"models":models}))?;
         Ok(c.identity.clone())
     });
     if let Err(error) = &result { finish(db, id, false, &error.to_string())?; }
     result
 }
 
-fn execute_review(db:&Db, req: &Request<'_>, c: &Candidate) -> Result<crate::review::Review> {
+fn review_models(c:&Candidate)->Result<std::collections::BTreeMap<String,String>> {
+    let mut models=c.playbook.review.models.clone();
+    for(vendor,model) in crate::Config::load_read_only()?.rule_defaults.models {models.entry(vendor).or_insert(model);}
+    Ok(models)
+}
+
+fn check_models(db:&Db, review:i64, models:&std::collections::BTreeMap<String,String>)->Result<()> {
+    let raw:String=db.conn.query_row("SELECT evidence FROM release_verification WHERE id=?1",[review],|r|r.get(0))?;
+    let evidence:serde_json::Value=serde_json::from_str(&raw)?;
+    let recorded=evidence.get("models").cloned().unwrap_or_else(||serde_json::json!({}));
+    anyhow::ensure!(recorded==serde_json::to_value(models)?,"Review models changed; run release-verify review again");
+    Ok(())
+}
+
+fn execute_review(db:&Db, req: &Request<'_>, c: &Candidate, models:&std::collections::BTreeMap<String,String>) -> Result<crate::review::Review> {
     let files = git(req.worktree, &["diff", "--name-only", "-z", "--no-renames", &c.identity.base, &c.identity.candidate])?.split('\0').filter(|s| !s.is_empty()).map(str::to_string).collect::<Vec<_>>();
     c.playbook.approval.check_blocked(&files)?;
     let reasons = c.playbook.human_reasons(&files)?;
     if let Some(why) = review_refusal(&reasons, None) { bail!(why); }
     let mut rules = c.playbook.review.clone();
+    rules.models=models.clone();
     rules.context = crate::review_scope::release_obligations(db,&c.root)?;
     // The project PR review toggle does not exempt releases, nor does a lighter task level.
     rules.enabled = true;
@@ -271,6 +288,8 @@ pub fn check(db: &Db, req: &Request<'_>) -> Result<Identity> {
     let c = prepare(db, req)?;
     let (gate, _) = latest(db, &c.identity, "gate")?;
     if latest(db, &c.identity, "review")?.1 != Some(gate) { bail!("release review does not cover the latest Full gate attempt"); }
+    let (review,_) = latest(db,&c.identity,"review")?;
+    check_models(db,review,&review_models(&c)?)?;
     Ok(c.identity)
 }
 
@@ -366,6 +385,19 @@ claude = ["sh", "-c", "cat >.git/release-prompt; printf 'VERDICT: clean\\n'"]
         assert!(prompt.contains(&format!("git diff {} {}", identity.base, identity.candidate)));
         assert!(prompt.contains(&identity.source));
         assert_eq!(check(&db, &req).unwrap(), identity);
+        let review_id=latest(&db,&identity,"review").unwrap().0;
+        let model_a=std::collections::BTreeMap::from([("codex".into(),"model-a".into())]);
+        let model_b=std::collections::BTreeMap::from([("codex".into(),"model-b".into())]);
+        // Use the actual persisted release receipt. Model changes invalidate review only.
+        let evidence:String=db.conn.query_row("SELECT evidence FROM release_verification WHERE id=?1",[review_id],|r|r.get(0)).unwrap();
+        let mut value:serde_json::Value=serde_json::from_str(&evidence).unwrap();
+        value["models"]=serde_json::to_value(&model_a).unwrap();
+        db.conn.execute("UPDATE release_verification SET evidence=?2 WHERE id=?1",params![review_id,value.to_string()]).unwrap();
+        assert!(check_models(&db,review_id,&model_a).is_ok());
+        assert!(check_models(&db,review_id,&model_b).is_err());
+        assert!(check_models(&db,review_id,&Default::default()).is_err());
+        assert!(check(&db,&req).is_err(),"clearing the override cannot reuse model A's receipt");
+        assert!(latest(&db,&identity,"gate").is_ok(),"the existing gate remains valid");
         // An exact-tree rerun still needs its own review after the new gate attempt.
         gate(&db, &req).unwrap();
         assert!(check(&db, &req).unwrap_err().to_string().contains("latest Full gate"));
