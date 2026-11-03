@@ -1119,7 +1119,18 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
     }
     let head = rev(root, &branch)?;
     report.approval = Some(match goal {
-        Some(gb) => check_item(db, key, pb, &worktree, &base, gb)?,
+        Some(gb) => {
+            if crate::submit::item_review_of(db,key)? == crate::project_modes::ItemReview::Blocking && crate::review_scope::changed(db,key)? {
+                let patch=crate::submit::patch_id_range(&worktree,&base,"HEAD")?;
+                if let Some(last)=db.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()) {
+                    if last.patch_id==patch && db.review_passes(key,&last)? {
+                        let item=db.issue(key)?.context("goal item no longer exists")?;
+                        crate::submit::review_item(db,root,&worktree,&item,&branch,&gb.branch,actor)?;
+                    }
+                }
+            }
+            check_item(db, key, pb, &worktree, &base, gb)?
+        },
         None => check_approval(db, pb, key, &worktree, &base, &branch)?,
     });
     let project = db.issue(key)?.and_then(|i| i.project);
@@ -1304,6 +1315,7 @@ fn check_item(db: &Db, key: &str, pb: &Playbook, worktree: &Path, base: &str, gb
     // A blocking item review holds a direct land as it holds a submit (NIT-563).
     let mode = crate::submit::item_review_of(db, key)?;
     if mode == crate::project_modes::ItemReview::Blocking {
+        anyhow::ensure!(!crate::review_scope::changed(db,key)?, "Delivery scope changed since blocking item review; land again to refresh its review.");
         let patch = crate::submit::patch_id_range(worktree, base, "HEAD")?;
         let latest = db.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty());
         let seen = match latest {
@@ -1376,6 +1388,9 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
     let pb = &current;
     let patch = crate::submit::patch_id_range(worktree, base, head)?;
     let review = db.reviews(key)?.into_iter().next().with_context(|| format!("{key} has no review; submit it first"))?;
+    if review.verdict=="pass" && !review.reviewer.is_empty() && crate::review_scope::changed(db,key)? {
+        bail!("The delivery plan changed since review. Land again to refresh the review of this scope; no code commit is needed.");
+    }
     if review.patch_id != patch && !crate::rebase_review::covers(pb, worktree, base, head, &review)? {
         bail!(
             "the branch changed since its review (reviewed {}, now {}); submit again",
