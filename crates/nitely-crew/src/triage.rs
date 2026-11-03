@@ -278,7 +278,10 @@ fn fresh_look(db: &Db, config: &nitely_core::Config, q: &Question, f: &Disputed)
     let choice = rules.choose(&f.raised_by, &|r| rules.is_installed(r, &dir))?;
     let base = nitely_core::playbook::diff_base(&dir, pb.integration_branch());
     let gate = nitely_core::playbook::GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: String::new(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None };
-    let context = nitely_core::submit::review_context(db, &issue, &gate)?;
+    let mut rules=rules;
+    rules.context=nitely_core::submit::review_context(db, &issue, &gate)?;
+    nitely_core::review_scope::bind(db,&issue,&mut rules,false)?;
+    let context=&rules.context;
     let prompt = format!(
         "A review of this branch raised a finding, and the change's author disputes it. Check it fresh: run `git diff {base}...HEAD`, \
 read the code the finding cites and its callers, and say whether the failure it names still happens with the current code. Do \

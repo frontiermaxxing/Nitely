@@ -68,6 +68,7 @@ pub mod remote;
 pub mod similar;
 pub mod slim;
 pub mod review;
+pub mod review_scope;
 pub mod reviewer_health;
 pub mod rules;
 pub mod sessions;

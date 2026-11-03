@@ -71,6 +71,7 @@ fn last_flagged(db: &Db, issue: &str) -> Result<bool> {
 
 /// A change whose review waits: its handed-in row and what the reviewer reads.
 struct Waiting {
+    sources: std::sync::Arc<crate::review_scope::Files>,
     pending: ReviewRecord,
     change: BatchChange,
     vendor: String,
@@ -87,7 +88,7 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
     let mut pending = Vec::new();
     for key in keys {
         match db.reviews(key)?.into_iter().next() {
-            Some(r) if r.verdict == PENDING => pending.push((key.clone(), r)),
+            Some(r) if r.verdict == PENDING || (r.verdict=="pass" && crate::review_scope::changed(db,key)?) => pending.push((key.clone(), r)),
             _ => out.push((key.clone(), Ok(()))),
         }
     }
@@ -133,9 +134,11 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
             let choice = rules.choose(&vendor, &|r| rules.is_installed(r, &dir))?;
             // Told what a single review would be, more briefly (NIT-501).
             let gate = record.gate.clone().unwrap_or(crate::playbook::GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.clone(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
-            let context = crate::submit::review_context_sized(db, &issue, &gate, true)?;
+            let mut context = crate::submit::review_context_sized(db, &issue, &gate, true)?;
+            let (sources, scope) = crate::review_scope::Plan::load(db,&issue)?.stage(db,&issue.key,true)?;
+            context.push_str(&scope);
             let change = BatchChange { key: key.clone(), title: issue.title, branch, base, head, worktree: dir, files, previous, context };
-            Ok(Waiting { pending: record, change, vendor, choice })
+            Ok(Waiting { sources, pending: record, change, vendor, choice })
         })();
         match prepared {
             Ok(w) => waiting.push(w),
@@ -150,7 +153,7 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
         let reviews = review_group(db, &rules, root, &reviewer, &group, actor)?;
         for (w, review) in group.into_iter().zip(reviews) {
             let decided = match review {
-                Ok(review) => decide(db, &rules, w, review, actor)?,
+                Ok(review) => decide(db, root, &rules, w, review, actor)?,
                 Err(why) => Err(format!("its review did not finish: {why}; land again")),
             };
             out.push((w.change.key.clone(), decided));
@@ -183,13 +186,15 @@ pub fn review_rebased(db: &mut Db, root: &Path, pb: &Playbook, key: &str, worktr
     pending.reasons = pb.human_reasons(&files)?;
     // Reviewed alone: told what a single review would be (NIT-501).
     let gate = pending.gate.clone().unwrap_or(crate::playbook::GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.clone(), results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
-    let context = crate::submit::review_context(db, &issue, &gate)?;
+    let mut context = crate::submit::review_context(db, &issue, &gate)?;
+            let (sources, scope) = crate::review_scope::Plan::load(db,&issue)?.stage(db,&issue.key,true)?;
+            context.push_str(&scope);
     let change = BatchChange { key: key.to_string(), title: issue.title, branch: branch.to_string(), base: base.to_string(), head, worktree: worktree.to_path_buf(), files, previous, context };
-    let w = Waiting { pending, change, vendor, choice };
+    let w = Waiting { sources, pending, change, vendor, choice };
     db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "status", "The rebase changed more than its conflicts: it is reviewed at its land, on how it differs from the change that passed")?;
     let reviewer = w.choice.reviewer.clone();
     match review_group(db, &rules, root, &reviewer, &[&w], actor)?.remove(0) {
-        Ok(review) => decide(db, &rules, &w, review, actor),
+        Ok(review) => decide(db, root, &rules, &w, review, actor),
         Err(why) => Ok(Err(format!("its review at the land did not finish: {why}; land again"))),
     }
 }
@@ -201,6 +206,7 @@ fn review_group(db: &Db, rules: &ReviewRules, root: &Path, reviewer: &str, group
         db.log_event(actor, Some(&w.change.key), None, "review_started", &format!("Review by {reviewer}{} started", noted(&w.choice.note))).ok();
         // Told what the change is for, as a batch tells each change (NIT-501; NIT-712 review).
         let mut told = rules.clone();
+        told.scope_files = vec![w.sources.clone()];
         if !w.change.context.is_empty() {
             told.context = if told.context.is_empty() { w.change.context.clone() } else { format!("{}\n{}", told.context, w.change.context) };
         }
@@ -223,8 +229,10 @@ fn review_group(db: &Db, rules: &ReviewRules, root: &Path, reviewer: &str, group
         db.log_event(actor, Some(&w.change.key), None, "review_started", &format!("Review by {reviewer}{} started in a batch with {}", noted(&w.choice.note), with.join(", ")))?;
     }
     let changes: Vec<BatchChange> = group.iter().map(|w| w.change.clone()).collect();
+    let mut rules = rules.clone();
+    rules.scope_files = group.iter().map(|w| w.sources.clone()).collect();
     let reply = match rules.run_review_prompt(reviewer, &changes[0].worktree, &rules.batch_prompt(&changes)) {
-        Ok(reply) if reply.only_a_login_message => Err(reply.signed_out(rules)),
+        Ok(reply) if reply.only_a_login_message => Err(reply.signed_out(&rules)),
         other => other,
     };
     let reply = match reply {
@@ -296,8 +304,9 @@ fn review_group(db: &Db, rules: &ReviewRules, root: &Path, reviewer: &str, group
 
 /// Records a change's review as its own row, bound to the patch it reviewed, and says whether the
 /// change may go on to its gate.
-fn decide(db: &mut Db, rules: &ReviewRules, w: &Waiting, mut review: Review, actor: &Actor) -> Result<std::result::Result<(), String>> {
+fn decide(db: &mut Db, root:&Path, rules: &ReviewRules, w: &Waiting, mut review: Review, actor: &Actor) -> Result<std::result::Result<(), String>> {
     let key = &w.change.key;
+    if let Some(s)=&mut review.scope { s.repo=crate::paths::normalize(&root.to_string_lossy()); }
     hold_interactions(db, &w.change.worktree, &mut review)?;
     review.note = w.choice.note.clone();
     let mut reasons = w.pending.reasons.clone();
@@ -311,8 +320,8 @@ fn decide(db: &mut Db, rules: &ReviewRules, w: &Waiting, mut review: Review, act
     let verdict = if accepted_only { "pass".to_string() } else { review.verdict.clone() };
     let approver = if reasons.is_empty() { "agent" } else { "human" };
     db.conn.execute(
-        "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch, after_event)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, (SELECT COALESCE(MAX(id), 0) FROM event))",
+        "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, batch_id, seconds, tokens, solution, gate, branch, scope_revision, scope_record, after_event)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, (SELECT COALESCE(MAX(id), 0) FROM event))",
         params![
             key,
             patch,
@@ -331,6 +340,7 @@ fn decide(db: &mut Db, rules: &ReviewRules, w: &Waiting, mut review: Review, act
             w.pending.solution.as_ref().map(to_json),
             w.pending.gate.as_ref().map(to_json),
             w.change.branch,
+            review.scope.as_ref().map(|s|&s.revision), review.scope.as_ref().map(crate::submit::to_json),
         ],
     )?;
     db.close_superseded_requests(key, &review.findings)?;
@@ -502,7 +512,7 @@ mod tests {
             batch: None,
             tokens: None,
             reused: None,
-            outside: vec![],
+            outside: vec![], scope: None,
         };
         let mut r = review("fixed");
         hold_interactions(&db, &wt, &mut r).unwrap();

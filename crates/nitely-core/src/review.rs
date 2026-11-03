@@ -40,6 +40,8 @@ pub struct ReviewRules {
     /// the author's notes since the last round, what the person accepted elsewhere (NIT-282).
     #[serde(skip)]
     pub context: String,
+    #[serde(skip)]
+    pub scope_files: Vec<std::sync::Arc<crate::review_scope::Files>>,
     pub timeout_minutes: u64,
     /// A review by the author's own vendor (because no other reviewer is installed, or the
     /// `reviewer` map says so) sends the change to a human instead of approving it.
@@ -134,6 +136,7 @@ impl Default for ReviewRules {
             flags: vec![],
             focus: String::new(),
             context: String::new(),
+            scope_files: vec![],
             timeout_minutes: 20,
             require_cross_vendor: false,
             batch: BatchMode::Off,
@@ -236,6 +239,8 @@ pub struct Review {
     /// they are listed so a real one can be filed against the base.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub outside: Vec<Finding>,
+    #[serde(default, skip_serializing_if="Option::is_none")]
+    pub scope: Option<crate::review_scope::Receipt>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -690,7 +695,7 @@ anything. Start each finding with the key of the change it is about.\n{changes}\
             .unwrap_or("")
             .to_string();
         let verdict = if findings.iter().any(|f| f.priority <= 1) { "changes" } else { "pass" };
-        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None, outside: base_findings })
+        Ok(Review { reviewer: reviewer.into(), verdict: verdict.into(), findings, flagged, summary, seconds, previous, note: String::new(), batch: None, tokens: None, reused: None, outside: base_findings, scope: self.scope_files.first().map(|f| { let mut s=crate::review_scope::Receipt::parse(f,text); s.repo=worktree.and_then(|p| crate::git::main_root(&p.to_string_lossy())).map(|p|crate::paths::normalize(&p)).unwrap_or_default(); s }) })
     }
 
     /// The instructions for several changes reviewed in one call (docs/batching.md): one section
@@ -822,7 +827,7 @@ it was reviewed, to see what changed since. {rule}\n",
                         interactions.push((a.min(b), a.max(b), value.trim().to_string()));
                     }
                 }
-            } else if name == "VERDICT" || self.flags.iter().any(|f| f.name.eq_ignore_ascii_case(&name)) {
+            } else if matches!(name.as_str(), "VERDICT" | "SCOPE" | "OBLIGATION" | "DECISION") || self.flags.iter().any(|f| f.name.eq_ignore_ascii_case(&name)) {
                 if let Some(k) = index(at) {
                     parts[k].push(format!("{name}: {}", value.trim()));
                 }
@@ -848,7 +853,9 @@ it was reviewed, to see what changed since. {rule}\n",
                 if !parts[k].iter().any(|l| l.starts_with("VERDICT:")) {
                     return Err(format!("the batched review gave no VERDICT for it (change {} of {n})", k + 1));
                 }
-                self.parse(reviewer, &parts[k].join("\n"), seconds, c.previous.as_ref(), Some(&c.worktree)).map_err(|e| format!("its part of the batched review was unfinished: {e:#}"))
+                let mut item = self.clone();
+                item.scope_files = self.scope_files.get(k).cloned().into_iter().collect();
+                item.parse(reviewer, &parts[k].join("\n"), seconds, c.previous.as_ref(), Some(&c.worktree)).map_err(|e| format!("its part of the batched review was unfinished: {e:#}"))
             })
             .collect();
         BatchReply { reviews, interactions }
@@ -860,6 +867,7 @@ it was reviewed, to see what changed since. {rule}\n",
             .iter()
             .filter(|f| review.flagged.contains(&f.name))
             .map(|f| format!("{} review: {}", review.reviewer, if f.reason.is_empty() { &f.question } else { &f.reason }))
+            .chain(review.scope.iter().filter(|s| !s.decision.trim().is_empty()).map(|s| format!("Open scope decision: {}",s.decision)))
             .collect()
     }
 
@@ -906,6 +914,9 @@ it was reviewed, to see what changed since. {rule}\n",
         let args: Vec<String> = command[1..].iter().map(|a| a.replace("{output}", &out_file.to_string_lossy())).collect();
 
         let mut cmd = shell_free_command(&program);
+        if cli_name(&command[0]) == "claude" {
+            for f in &self.scope_files { cmd.arg("--add-dir").arg(&f.dir); }
+        }
         cmd.args(&args).current_dir(worktree).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
         without_session_markers(&mut cmd);
         let could_not = |why: &str, detail: String| anyhow::Error::new(CouldNotRun { reviewer: reviewer.to_string(), why: why.to_string(), detail });
