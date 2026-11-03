@@ -763,7 +763,7 @@ pub(crate) fn item_review_of(db: &Db, key: &str) -> Result<ItemReview> {
 /// The item review of a goal item, against its goal branch `goal_branch` (NIT-563), recorded as
 /// any review is, so the next round, acceptances and land read it. Returns the review, the patch
 /// it reviewed, and why the rounds stopped converging, when they did (NIT-568).
-fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, branch: &str, goal_branch: &str, actor: &Actor) -> Result<(Review, String, Option<String>)> {
+pub(crate) fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &IssueRecord, branch: &str, goal_branch: &str, actor: &Actor) -> Result<(Review, String, Option<String>)> {
     let mut pb = Playbook::load(root)?;
     crate::project_modes::apply_issue(db, &issue.key, &mut pb)?;
     pb.review.policy_root = Some(root.to_path_buf());
@@ -2476,6 +2476,9 @@ exit 0
         let obligation=release_obligations(&f.db,&f.repo).unwrap();
         assert!(obligation.contains("consumer enforces at write boundary"),"{obligation}");
         assert!(!crate::review_scope::changed(&f.db,&producer.key).unwrap());
+        f.db.add_note(&producer.key,"Author handoff: review is complete.","handoff",&f.actor).unwrap();
+        f.db.add_note(&consumer.key,"Consumer worktree is ready.","note",&f.actor).unwrap();
+        assert!(!crate::review_scope::changed(&f.db,&producer.key).unwrap(),"routine notes must not reopen a passed review");
         f.db.edit_issue(&consumer.key,None,Some("Permission check now required in producer"),&Actor::Human).unwrap();
         assert!(crate::review_scope::changed(&f.db,&producer.key).unwrap());
         // The same candidate is incomplete when the assembled write path is due. A checkpoint

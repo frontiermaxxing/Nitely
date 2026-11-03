@@ -1425,8 +1425,16 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
 ").unwrap();
         sh(&wt, &["add", "."]);
         sh(&wt, &["commit", "-q", "-m", "safe"]);
-        let s = f.submit(&wt);
-        assert!(s.land.as_ref().is_some_and(|l| l.landed) && f.has("goal-1", "safe.txt"), "{:?}", s.next);
+        // The code passed; while its landing was paused the owner edited the contract.
+        let item=f.db.issue(&b).unwrap().unwrap();
+        let branch=sh(&wt,&["branch","--show-current"]);
+        let (r,_,_)=crate::submit::review_item(&mut f.db,&f.repo,&wt,&item,&branch,"goal-1",&f.actor).unwrap();
+        assert_eq!(r.verdict,"pass");
+        let before=f.db.reviews(&b).unwrap().len();
+        f.db.edit_issue(&b,None,Some("Now also check the consumer contract"),&Actor::Human).unwrap();
+        let landed=f.land(&b);
+        assert!(landed.landed && f.has("goal-1","safe.txt"),"{landed:?}");
+        assert!(f.db.reviews(&b).unwrap().len()>before,"a paused goal item refreshed its stale review on the same code");
         // A goal item that lands on main (the mode no longer routes through the branch) still gets
         // its blocking item review with the pre-merge review off (NIT-597 review).
         let to_main = Options { goal_branches: Some(false), pre_review: Some(crate::project_modes::PreReview::Off), item_review: Some(ItemReview::Blocking), ..Default::default() };

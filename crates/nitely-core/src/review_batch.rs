@@ -153,7 +153,7 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
         let reviews = review_group(db, &rules, root, &reviewer, &group, actor)?;
         for (w, review) in group.into_iter().zip(reviews) {
             let decided = match review {
-                Ok(review) => decide(db, &rules, w, review, actor)?,
+                Ok(review) => decide(db, root, &rules, w, review, actor)?,
                 Err(why) => Err(format!("its review did not finish: {why}; land again")),
             };
             out.push((w.change.key.clone(), decided));
@@ -194,7 +194,7 @@ pub fn review_rebased(db: &mut Db, root: &Path, pb: &Playbook, key: &str, worktr
     db.log_event(actor, Some(key), Some(&worktree.to_string_lossy()), "status", "The rebase changed more than its conflicts: it is reviewed at its land, on how it differs from the change that passed")?;
     let reviewer = w.choice.reviewer.clone();
     match review_group(db, &rules, root, &reviewer, &[&w], actor)?.remove(0) {
-        Ok(review) => decide(db, &rules, &w, review, actor),
+        Ok(review) => decide(db, root, &rules, &w, review, actor),
         Err(why) => Ok(Err(format!("its review at the land did not finish: {why}; land again"))),
     }
 }
@@ -304,8 +304,9 @@ fn review_group(db: &Db, rules: &ReviewRules, root: &Path, reviewer: &str, group
 
 /// Records a change's review as its own row, bound to the patch it reviewed, and says whether the
 /// change may go on to its gate.
-fn decide(db: &mut Db, rules: &ReviewRules, w: &Waiting, mut review: Review, actor: &Actor) -> Result<std::result::Result<(), String>> {
+fn decide(db: &mut Db, root:&Path, rules: &ReviewRules, w: &Waiting, mut review: Review, actor: &Actor) -> Result<std::result::Result<(), String>> {
     let key = &w.change.key;
+    if let Some(s)=&mut review.scope { s.repo=crate::paths::normalize(&root.to_string_lossy()); }
     hold_interactions(db, &w.change.worktree, &mut review)?;
     review.note = w.choice.note.clone();
     let mut reasons = w.pending.reasons.clone();

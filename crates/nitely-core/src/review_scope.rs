@@ -57,8 +57,8 @@ impl Receipt {
 }
 #[derive(Debug)]
 pub struct Files {
-    pub sources: Vec<Value>,
-    pub dir: PathBuf,
+    pub(crate) sources: Vec<Value>,
+    pub(crate) dir: PathBuf,
     pub revision: String,
 }
 impl Drop for Files {
@@ -103,17 +103,16 @@ impl Plan {
             )
             .optional()?;
         // Explicit links in the spec or author's brief are leads, never authority to waive a finding.
-        for word in issue.body.split(|c: char| !c.is_ascii_alphanumeric() && c != '-').chain(
-            note.as_deref()
-                .unwrap_or("")
-                .split(|c: char| !c.is_ascii_alphanumeric() && c != '-'),
-        ) {
-            if word.split_once('-').is_some_and(|(p, n)| {
-                project.is_some_and(|s| s.eq_ignore_ascii_case(p)) && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
-            }) {
-                add(&word.to_ascii_uppercase(), "referenced");
+        let references = |text: &str, role, add: &mut dyn FnMut(&str, &'static str)| {
+            for word in text.split(|c: char| !c.is_ascii_alphanumeric() && c != '-') {
+                if word.split_once('-').is_some_and(|(p, n)| {
+                    project.is_some_and(|s| s.eq_ignore_ascii_case(p)) && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+                }) {
+                    add(&word.to_ascii_uppercase(), role);
+                }
             }
-        }
+        };
+        references(&issue.body, "referenced", &mut add);
         let mut goal = Value::Null;
         if let Some(g) = issue
             .goal
@@ -136,6 +135,7 @@ impl Plan {
                 add(&k?, "goal sibling");
             }
         }
+        references(note.as_deref().unwrap_or(""), "author lead", &mut add);
         let checkpoint = db.checkpoint_of_issue(&issue.key)?.is_some();
         if let Some(cp) = db.checkpoint_of_issue(&issue.key)? {
             goal["checkpoint_head"] = json!(cp.head);
@@ -162,7 +162,7 @@ impl Plan {
                 omitted = true;
                 continue;
             };
-            let mut q=db.conn.prepare("SELECT id,actor,type,summary FROM event WHERE issue_key=?1 AND (type IN ('reviewer_note','handoff','note','answer') OR (actor='human' AND type='issue_edited')) AND summary IS NOT NULL ORDER BY id DESC LIMIT 33")?;
+            let mut q=db.conn.prepare("SELECT id,actor,type,summary FROM event WHERE issue_key=?1 AND (type IN ('reviewer_note','handoff','answer') OR (type='note' AND actor!='nitely') OR (actor='human' AND type='issue_edited')) AND summary IS NOT NULL ORDER BY id DESC LIMIT 33")?;
             let mut records=q.query_map([&key],|r|Ok(json!({"event":r.get::<_,i64>(0)?,"actor":r.get::<_,String>(1)?,"kind":r.get::<_,String>(2)?,"text":excerpt(&r.get::<_,String>(3)?,MAX_CHARS)})))?.collect::<rusqlite::Result<Vec<_>>>()?;
             let cut = records.len() > 32;
             records.truncate(32);
@@ -178,8 +178,25 @@ impl Plan {
                     |r| r.get(0),
                 )
                 .optional()?;
+            // A later chunk review may not restate the integration obligation. Keep the last
+            // recorded obligation as a lead until the assembled path is actually examined.
+            let obligation: Option<Value> = db
+                .conn
+                .query_row(
+                    "SELECT reviewer,commit_sha,json_extract(scope_record,'$.obligation') FROM review
+                 WHERE issue_key=?1 AND scope_record IS NOT NULL AND json_extract(scope_record,'$.obligation')!=''
+                 ORDER BY id DESC LIMIT 1",
+                    [&key],
+                    |r| Ok(json!({"reviewer":r.get::<_,String>(0)?,"head":r.get::<_,String>(1)?,"text":r.get::<_,String>(2)?})),
+                )
+                .optional()?;
+            let human_note: Option<i64> = db.conn.query_row(
+                "SELECT MAX(id) FROM event WHERE issue_key=?1 AND actor='human' AND type IN ('note','handoff')",
+                [&key],
+                |r| r.get(0),
+            )?;
             docs.push(json!({"key":key,"role":role,"title":i.title,"spec":excerpt(&i.body,MAX_CHARS),"evidence":excerpt(&i.evidence,MAX_CHARS),"source":i.source,"owner":i.owner,
-                "state":i.state,"updated":i.updated_at,"submitted_head":head,"records":records,"answered_questions":answers,"older_records_omitted":cut}));
+                "state":i.state,"updated":i.updated_at,"submitted_head":head,"records":records,"answered_questions":answers,"older_records_omitted":cut,"recorded_integration_obligation":obligation,"human_scope_note":human_note}));
             bytes += docs.last().unwrap().to_string().len();
         }
         Ok(Self {
@@ -194,10 +211,17 @@ impl Plan {
         let mut docs = self.docs.clone();
         // Submitting the reviewed issue changes its workflow state, not its contract. The patch
         // identity is separately checked by the reuse path; sibling changes are evidence.
+        docs.retain(|d| d["role"] != "author lead");
         for d in &mut docs {
-            if d["role"] == "current chunk" {
-                for k in ["state", "updated", "submitted_head"] {
-                    d.as_object_mut().unwrap().remove(k);
+            // Notes remain readable in the evidence directory. Only authoritative sources can
+            // change the required contract; housekeeping, a handoff and a reviewer brief cannot.
+            let obj = d.as_object_mut().unwrap();
+            for k in ["records", "updated", "older_records_omitted"] {
+                obj.remove(k);
+            }
+            if obj["role"] == "current chunk" {
+                for k in ["state", "submitted_head", "recorded_integration_obligation"] {
+                    obj.remove(k);
                 }
             }
         }
