@@ -346,7 +346,10 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             }
             // The review that ran alongside the gate, when it reviewed the commit the gate passed.
             let alongside = match early.take() {
-                Some(e) if reused.is_none() => e.join(&worktree, &out.commit, &rules_of(&pb.review))?.filter(|(_,r)|r.scope.as_ref().zip(rules.scope_files.first()).is_some_and(|(a,b)| a.revision==b.revision)),
+                Some(e) if reused.is_none() => match e.join(&worktree, &out.commit, &rules_of(&pb.review))? {
+                    Some(done) if done.1.scope.as_ref().map(|s|s.current(db,&issue)).transpose()?.unwrap_or(false)=>Some(done),
+                    _=>None,
+                },
                 _ => None,
             };
             let (choice, mut review) = match (reused, alongside) {
@@ -1068,8 +1071,8 @@ a P0 or P1 the code confirms stays one, whatever they say.\n{}\n",
     if !linked.is_empty() {
         c.push_str("\nIssues related to this one, for what this change is and is not meant to do:\n");
         for (how, i) in linked {
-            if !db.issue(&i.key)?.is_some_and(|other| other.project == issue.project) { continue; }
-            let first: String = db.issue(&i.key)?.filter(|i| i.project == issue.project).map(|i| i.body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect()).unwrap_or_default();
+            let Some(other) = db.issue(&i.key)?.filter(|other| issue.project.is_some() && other.project == issue.project) else { continue };
+            let first: String = other.body.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(200).collect();
             c.push_str(&format!("- {how} {} \"{}\" ({}): {first}\n", i.key, i.title, i.state));
         }
     }
@@ -1366,7 +1369,7 @@ fn reused_pass(
     let scope = scope.and_then(|s| serde_json::from_str::<crate::review_scope::Receipt>(&s).ok());
     if let Some(receipt) = &scope {
         let issue = db.issue(key)?.context("reviewed issue unavailable")?;
-        if receipt.revision != crate::review_scope::Plan::load(db,&issue)?.revision() { return Ok(None); }
+        if !receipt.current(db,&issue)? { return Ok(None); }
     }
     let previous = crate::submit_rules::LastReview { reviewer: &reviewer, verdict: &verdict, diff_id: &last_diff, rules: ran_under.as_deref() };
     let chosen = rules.choose(vendor, installed).ok().map(|c| c.reviewer);
@@ -2458,12 +2461,14 @@ exit 0
         f.db.create_project("ZZ","Unrelated").unwrap();
         let other=f.db.create_issue(&NewIssue{project:"ZZ".into(),body:"private unrelated text".into(),..new("Private")},&f.actor).unwrap();
         f.db.add_blocker(&producer.key,&other.key,&f.actor).unwrap();
+        let reference=f.db.create_issue(&new("Permission policy decision"),&Actor::Human).unwrap();
+        brief_reviewer(&f.db,&producer.key,&format!("Check {} for the agreed split",reference.key),&f.actor).unwrap();
         let plan=Plan::load(&f.db,&producer).unwrap();
         let (files,_)=plan.stage(&f.db,&producer.key,false).unwrap();
         let index:serde_json::Value=serde_json::from_slice(&std::fs::read(files.dir.join("index.json")).unwrap()).unwrap();
         assert_eq!(index["sources_missing_or_over_limit"],true);
         let docs=index["sources"].as_array().unwrap();
-        assert_eq!(docs.len(),2);
+        assert_eq!(docs.len(),3);
         let doc=&docs.iter().find(|s|s["role"]=="consumer").unwrap()["source"];
         let actual=std::fs::read_to_string(files.dir.join(doc.as_str().unwrap())).unwrap();
         assert!(actual.contains("Enforce the hook at the write boundary"));
@@ -2479,6 +2484,10 @@ exit 0
         f.db.add_note(&producer.key,"Author handoff: review is complete.","handoff",&f.actor).unwrap();
         f.db.add_note(&consumer.key,"Consumer worktree is ready.","note",&f.actor).unwrap();
         assert!(!crate::review_scope::changed(&f.db,&producer.key).unwrap(),"routine notes must not reopen a passed review");
+        brief_reviewer(&f.db,&producer.key,"Routine handoff; no new constraints.",&f.actor).unwrap();
+        assert!(!crate::review_scope::changed(&f.db,&producer.key).unwrap(),"removing a note link cannot itself restart review");
+        f.db.add_note(&reference.key,"The permission contract now includes unknown writes.","note",&Actor::Human).unwrap();
+        assert!(crate::review_scope::changed(&f.db,&producer.key).unwrap(),"a human change to a previously consulted source invalidates even after its note link disappears");
         f.db.edit_issue(&consumer.key,None,Some("Permission check now required in producer"),&Actor::Human).unwrap();
         assert!(crate::review_scope::changed(&f.db,&producer.key).unwrap());
         // The same candidate is incomplete when the assembled write path is due. A checkpoint

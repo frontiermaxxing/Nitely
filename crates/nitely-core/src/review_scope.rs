@@ -25,6 +25,8 @@ pub struct Receipt {
     pub repo: String,
     #[serde(default)]
     pub sources: Vec<Value>,
+    #[serde(default)]
+    pub leads: Vec<String>,
     pub revision: String,
     pub interpretation: String,
     pub obligation: String,
@@ -32,6 +34,11 @@ pub struct Receipt {
 }
 
 impl Receipt {
+    /// Revalidate the actual read set. A new author note is not a plan change, but the
+    /// authority consulted through the old one remains part of the contract.
+    pub(crate) fn current(&self, db: &Db, issue: &IssueRecord) -> Result<bool> {
+        Ok(Plan::from_sources(db, issue, &self.leads, false)?.revision() == self.revision)
+    }
     fn lines(text: &str, label: &str) -> String {
         excerpt(
             &text
@@ -49,6 +56,7 @@ impl Receipt {
             repo: String::new(),
             revision: files.revision.clone(),
             sources: files.sources.clone(),
+            leads: files.leads.clone(),
             interpretation: Self::lines(text, "SCOPE:"),
             obligation: Self::lines(text, "OBLIGATION:"),
             decision: Self::lines(text, "DECISION:"),
@@ -58,6 +66,7 @@ impl Receipt {
 #[derive(Debug)]
 pub struct Files {
     pub(crate) sources: Vec<Value>,
+    leads: Vec<String>,
     pub(crate) dir: PathBuf,
     pub revision: String,
 }
@@ -69,6 +78,7 @@ impl Drop for Files {
 
 pub(crate) struct Plan {
     docs: Vec<Value>,
+    leads: Vec<String>,
     goal: Value,
     omitted: bool,
     stage: &'static str,
@@ -76,6 +86,11 @@ pub(crate) struct Plan {
 
 impl Plan {
     pub fn load(db: &Db, issue: &IssueRecord) -> Result<Self> {
+        let prior = latest(db, &issue.key)?;
+        Self::from_sources(db, issue, prior.as_ref().map_or(&[], |r| r.leads.as_slice()), true)
+    }
+
+    fn from_sources(db: &Db, issue: &IssueRecord, earlier: &[String], discover: bool) -> Result<Self> {
         let project = issue.project.as_deref();
         let mut keys = BTreeMap::<String, &str>::new();
         let mut omitted = false;
@@ -135,7 +150,17 @@ impl Plan {
                 add(&k?, "goal sibling");
             }
         }
-        references(note.as_deref().unwrap_or(""), "author lead", &mut add);
+        for key in earlier {
+            references(key, "author lead", &mut add);
+        }
+        if discover {
+            references(note.as_deref().unwrap_or(""), "author lead", &mut add);
+        }
+        let leads = keys
+            .iter()
+            .filter(|(_, role)| **role == "author lead")
+            .map(|(k, _)| k.clone())
+            .collect();
         let checkpoint = db.checkpoint_of_issue(&issue.key)?.is_some();
         if let Some(cp) = db.checkpoint_of_issue(&issue.key)? {
             goal["checkpoint_head"] = json!(cp.head);
@@ -200,6 +225,7 @@ impl Plan {
             bytes += docs.last().unwrap().to_string().len();
         }
         Ok(Self {
+            leads,
             docs,
             goal,
             omitted,
@@ -211,7 +237,6 @@ impl Plan {
         let mut docs = self.docs.clone();
         // Submitting the reviewed issue changes its workflow state, not its contract. The patch
         // identity is separately checked by the reuse path; sibling changes are evidence.
-        docs.retain(|d| d["role"] != "author lead");
         for d in &mut docs {
             // Notes remain readable in the evidence directory. Only authoritative sources can
             // change the required contract; housekeeping, a handoff and a reviewer brief cannot.
@@ -225,10 +250,7 @@ impl Plan {
                 }
             }
         }
-        format!(
-            "{:x}",
-            Sha256::digest(json!([self.stage, self.goal, docs, self.omitted]).to_string())
-        )
+        format!("{:x}", Sha256::digest(json!([self.stage, self.goal, docs, self.leads]).to_string()))
     }
 
     pub fn stage(self, db: &Db, _key: &str, compact: bool) -> Result<(Arc<Files>, String)> {
@@ -250,6 +272,7 @@ impl Plan {
             sources.push(json!({"goal":self.goal["id"],"revision":self.goal["revision"],"created_by":self.goal["created_by"]}));
         }
         let files = Arc::new(Files {
+            leads: self.leads,
             dir: path,
             revision,
             sources,
@@ -313,17 +336,21 @@ pub fn bind(db: &Db, i: &IssueRecord, rules: &mut crate::review::ReviewRules, co
 
 /// Recompute from board sources rather than timestamps alone (two edits can share a second).
 pub(crate) fn changed(db: &Db, key: &str) -> Result<bool> {
-    let last: Option<Option<String>> = db
+    let Some(prior) = latest(db, key)? else { return Ok(false) };
+    let Some(issue) = db.issue(key)? else { return Ok(true) };
+    Ok(!prior.current(db, &issue)?)
+}
+
+fn latest(db: &Db, key: &str) -> Result<Option<Receipt>> {
+    let raw: Option<Option<String>> = db
         .conn
         .query_row(
-            "SELECT scope_revision FROM review WHERE issue_key=?1 COLLATE NOCASE AND reviewer!='' ORDER BY ts DESC,id DESC LIMIT 1",
+            "SELECT scope_record FROM review WHERE issue_key=?1 COLLATE NOCASE AND reviewer!='' ORDER BY ts DESC,id DESC LIMIT 1",
             [key],
             |r| r.get(0),
         )
         .optional()?;
-    let Some(rev) = last.flatten() else { return Ok(false) };
-    let Some(issue) = db.issue(key)? else { return Ok(true) };
-    Ok(Plan::load(db, &issue)?.revision() != rev)
+    Ok(raw.flatten().map(|s| serde_json::from_str(&s)).transpose()?)
 }
 
 pub(crate) fn release_obligations(db: &Db, root: &std::path::Path) -> Result<String> {
