@@ -109,17 +109,22 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
     // A worktree already cleaned up: a scratch clone at the change's head stands in for it.
     let scratch = Scratch(std::cell::RefCell::new(vec![]));
     let mut waiting: Vec<Waiting> = Vec::new();
-    for (key, record) in pending {
+    for (key, mut record) in pending {
         let prepared = (|| -> Result<Waiting> {
             rules.require_enabled()?;
             let issue = db.issue(&key)?.with_context(|| format!("no issue {key}"))?;
             let (branch, worktree) = crate::land::branch_of(root, &key)?;
             let head = crate::land::rev(root, &branch)?;
+            let base = change_base(root, &integration, &head)?;
+            // A branch rebased since it was handed in, by an earlier land or by hand, still holds
+            // the change handed in when its patch is the same, or its conflicts were resolved by
+            // combining the two sides (NIT-729): it is reviewed at its new tip, not sent back.
             anyhow::ensure!(
-                !record.commit_sha.is_empty() && head.starts_with(&record.commit_sha),
+                !record.commit_sha.is_empty()
+                    && (head.starts_with(&record.commit_sha) || crate::rebase_review::covers(&pb, root, &base, &head, &record).unwrap_or(false)),
                 "{branch} gained commits since it was handed in, which were never checked; submit again"
             );
-            let base = change_base(root, &integration, &head)?;
+            record.commit_sha = head.clone();
             let dir = match worktree.filter(|w| w.is_dir() && crate::land::rev(w, "HEAD").ok().as_deref() == Some(head.as_str())) {
                 Some(w) => w,
                 None => {
@@ -138,7 +143,7 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
             let (sources, scope) = crate::review_scope::Plan::load(db,&issue)?.stage(db,&issue.key,true)?;
             context.push_str(&scope);
             let change = BatchChange { key: key.clone(), title: issue.title, branch, base, head, worktree: dir, files, previous, context };
-            Ok(Waiting { sources, pending: record, change, vendor, choice })
+            Ok(Waiting { sources, pending: record.clone(), change, vendor, choice })
         })();
         match prepared {
             Ok(w) => waiting.push(w),
@@ -357,6 +362,12 @@ fn decide(db: &mut Db, root:&Path, rules: &ReviewRules, w: &Waiting, mut review:
             db.move_issue(key, "In Progress", None, None, actor)?;
         }
         return Ok(Err(format!("the {} review asked for changes ({}); fix them, commit, and submit again", review.reviewer, open.join("; "))));
+    }
+    // An approval the person gave stands over a review of the same patch with no new reason
+    // (`standing_approval`): the land checks its signature, and it is not asked for again (NIT-729).
+    if approver == "human" && db.standing_approval(key)?.is_some() {
+        db.add_note(key, &format!("Review by {by} at its land passed; the approval given stands"), "submit", actor)?;
+        return Ok(Ok(()));
     }
     if approver == "human" {
         db.add_note(key, &format!("Review by {by} at its land passed; it waits for a human ({})", reasons.join("; ")), "submit", actor)?;
