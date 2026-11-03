@@ -247,6 +247,9 @@ fn execute_review(db:&Db, req: &Request<'_>, c: &Candidate) -> Result<crate::rev
     let reasons = c.playbook.human_reasons(&files)?;
     if let Some(why) = review_refusal(&reasons, None) { bail!(why); }
     let mut rules = c.playbook.review.clone();
+    for (vendor,model) in crate::Config::load_read_only()?.rule_defaults.models {
+        rules.models.entry(vendor).or_insert(model);
+    }
     rules.context = crate::review_scope::release_obligations(db,&c.root)?;
     // The project PR review toggle does not exempt releases, nor does a lighter task level.
     rules.enabled = true;
