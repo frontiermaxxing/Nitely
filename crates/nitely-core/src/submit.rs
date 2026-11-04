@@ -393,40 +393,17 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     }
     // Read before this round is recorded: the rounds before it, since the human last decided on the
     // issue's findings or handed it back (their decision to go on starts a new count).
-    let mut stalled = match &out.review {
+    let stalled = match &out.review {
         Some(r) if verdict == "changes" && issue.origin == "nitely" => stalled_rounds(db, &issue.key, r)?,
         _ => None,
     };
-    // Before stalled rounds go to the person, a fresh review that has not seen them looks (NIT-245):
-    // what it no longer finds was carried stale, and what it still finds is what the person decides.
-    if let (Some(why), Some(r)) = (stalled.clone(), out.review.clone()) {
-        db.log_event(actor, Some(&issue.key), Some(&wt), "status", "The review rounds are not converging: a fresh review, without the earlier rounds, looks before it goes to the person")?;
-        // Fresh of the rounds, not of what the change is for (NIT-282) or of what the person
-        // accepted on it: told those, it does not raise them again in other words (NIT-331).
-        let mut rules = pb.review.clone();
-        rules.context = review_context(db, &issue, &out.gate)?;
-            crate::review_scope::bind(db, &issue, &mut rules, false)?;
-        let accepted = told_accepted(db, &issue.key)?;
-        if !accepted.is_empty() {
-            rules.context.push_str(&format!("\n{}", crate::review::accepted_told(&accepted)));
-        }
-        if let Ok(mut fresh) = rules.run(&r.reviewer, &worktree, &since, None) {
-            fresh.note = if r.note.is_empty() { FRESH.to_string() } else { format!("{}; {FRESH}", r.note) };
-            // What the person accepted as it is blocks nothing, whichever review says it again.
-            let accepted: Vec<String> = db.accepted_for(&issue.key, &out.patch_id)?.into_iter().map(|a| a.finding).collect();
-            stalled = crate::submit_rules::settle_fresh(&r, &mut fresh, &accepted, &why);
-            if stalled.is_none() {
-                verdict = "pass".into();
-            }
-            for reason in pb.review.flag_reasons(&fresh) {
-                if !out.reasons.contains(&reason) {
-                    out.reasons.push(reason);
-                }
-            }
-            out.review = Some(fresh);
-            out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
-        }
-    }
+    // Once the rounds stop converging, an agent that has not worked on the change reads every
+    // round's blocking findings side by side and says whether they share a cause (NIT-735), once
+    // per run of rounds: its answer goes to the worker with what the stall tells it.
+    let shared_cause = match (&stalled, &out.review) {
+        (Some(_), Some(r)) => ask_shared_cause(db, &pb, &issue, &worktree, &since, r, actor)?,
+        _ => None,
+    };
     if out.yolo || out.gate.skipped.is_some() {
         let current_head = git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string();
         if current_head != checked_head || git(&worktree, &["rev-parse", &out.commit])?.trim() != checked_head {
@@ -592,6 +569,11 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         None if out.quick && state == "In Review" => "A quick change: its own checks passed. Call land; it is reviewed after landing.".into(),
         None => next.into(),
     };
+    if let Some(told) = &shared_cause {
+        out.next = format!("{}
+
+{told}", out.next);
+    }
     match crate::submit_rules::final_move(state, &now_in, meanwhile) {
         Some(to) if issue.origin == "nitely" => out.state = db.move_issue(&issue.key, to, None, None, actor)?.state,
         _ if meanwhile == Meanwhile::Accepted => out.next = format!("The person accepted the review's blocking findings while this submit ran, so it goes on as their acceptance moved it ({now_in})."),
@@ -756,6 +738,54 @@ pub(crate) fn stalled_rounds(db: &Db, key: &str, review: &Review) -> Result<Opti
     let decided = [db.handed_back_event(key)?, db.findings_decided_event(key)?].into_iter().flatten().max_by_key(|d| (d.ts, d.id));
     let earlier: Vec<ReviewRecord> = db.reviews(key)?.into_iter().filter(|r| decided.is_none_or(|d| d.came_before(r))).collect();
     Ok(not_converging(&earlier, review))
+}
+
+/// The shared-cause question, asked once the rounds stalled and not yet asked since they began to:
+/// the rounds since the person last decided, with `review` the newest, go to an agent of the same
+/// reviewer that has not worked on the change, in `worktree` (NIT-735). Its answer, recorded on
+/// the issue, is what the worker is told; None when it was asked before in this run, or when the
+/// agent did not answer in the form asked (the stall goes on as it would without it).
+fn ask_shared_cause(db: &Db, pb: &Playbook, issue: &IssueRecord, worktree: &Path, since: &str, review: &Review, actor: &Actor) -> Result<Option<String>> {
+    let decided = [db.handed_back_event(&issue.key)?, db.findings_decided_event(&issue.key)?].into_iter().flatten().max_by_key(|d| (d.ts, d.id));
+    let earlier: Vec<ReviewRecord> = db.reviews(&issue.key)?.into_iter().filter(|r| !r.reviewer.is_empty() && decided.is_none_or(|d| d.came_before(r))).collect();
+    let run: Vec<&ReviewRecord> = earlier.iter().take_while(|r| r.verdict == "changes").collect();
+    let asked: Option<(i64, i64)> = db
+        .conn
+        .query_row(
+            "SELECT id, ts FROM event WHERE issue_key = ?1 COLLATE NOCASE AND type = ?2 ORDER BY id DESC LIMIT 1",
+            rusqlite::params![issue.key, crate::shared_cause::EVENT],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    // Asked after the oldest round of this run was recorded: this run has its answer.
+    if let (Some((id, ts)), Some(oldest)) = (asked, run.last()) {
+        let after = match oldest.after_event {
+            Some(seen) => id > seen,
+            None => ts >= oldest.ts,
+        };
+        if after {
+            return Ok(None);
+        }
+    }
+    let newest_first: Vec<Vec<crate::review::Finding>> = std::iter::once(review.findings.clone()).chain(run.iter().map(|r| r.findings.clone())).collect();
+    let rounds = crate::shared_cause::rounds(&newest_first);
+    let open_now: Vec<String> = review.findings.iter().filter(|f| f.priority <= 1).map(|f| f.text.clone()).collect();
+    let prompt = crate::shared_cause::prompt(&issue.title, since, newest_first.len(), &rounds, &open_now);
+    let wt = worktree.to_string_lossy().into_owned();
+    db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review rounds are not converging: {} reads every round's findings side by side for a shared cause", review.reviewer))?;
+    // Whatever stops it (it cannot run, it runs past its timeout), the stall goes on as it would
+    // have: the round's own review is recorded, and nothing about the change depends on the answer.
+    let answer = match pb.review.run_review_prompt(&review.reviewer, worktree, &prompt) {
+        Ok(reply) => crate::shared_cause::parse(&reply.text),
+        Err(e) => {
+            db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The shared-cause question did not finish: {}", e.to_string().lines().next().unwrap_or_default()))?;
+            None
+        }
+    };
+    let Some(answer) = answer else { return Ok(None) };
+    let told = crate::shared_cause::told(&answer, &review.reviewer);
+    db.log_event(actor, Some(&issue.key), Some(&wt), crate::shared_cause::EVENT, &told)?;
+    Ok(Some(told))
 }
 
 /// The item review the issue's mode asks for (Off with no mode).
@@ -1264,9 +1294,6 @@ pub(crate) const REQUIREMENTS: &str = "This is the change's first review. Before
 requires of this chunk at this stage (its provided contract and \"done when\" included; separately identify the consumer obligations due at integration), one per line, as `REQUIREMENT <n>: met <file>, \
 <symbol>` or `REQUIREMENT <n>: not met: <what is missing>`. Report each one not met as a finding too, in this round, graded \
 like any other: later rounds treat a gap in code this round already saw as a follow-up, not a blocker.\n";
-
-/// The note on a review run fresh, without the rounds before it, before stalled rounds escalate.
-const FRESH: &str = "fresh, without the earlier rounds";
 
 /// How many review rounds in a row may ask for changes before the issue goes to a person.
 pub const MAX_ROUNDS: usize = 5;
@@ -1857,6 +1884,13 @@ mod tests {
     }
 
     const REVIEW_SH: &str = r#"prompt=$(cat)
+case "$prompt" in *"SHARED CAUSE: none"*)
+  printf '%s
+' "$prompt" | grep -q "round 1, \[P1\], open now: Stuck" || { echo "SHARED CAUSE: none"; exit 0; }
+  echo "One defect."; echo "SHARED CAUSE: the x is never read: stuck.txt, x"; echo "EXPLAINS: 1"
+  echo "PREDICTION 1: a second x"; echo "PREDICTION 2: an x read late"; echo "FIX: read x where it is set"; echo "TEST: every x is read"
+  exit 0;;
+esac
 case "$prompt" in *"CHANGE 2: NIT"*)
   echo "Two small changes."
   echo "- [P1] CHANGE 2: Wrong total: shared.txt, the second line"
@@ -2263,7 +2297,15 @@ exit 0
         let stuck = "Stuck: stuck.txt, the x is never read";
         round(&f, &issue.key, &wt, "changes", &[(1, stuck, false)], 2);
         round(&f, &issue.key, &wt, "changes", &[(1, stuck, true)], 1);
-        assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
+        let s = f.submit(&wt, true).unwrap();
+        assert_eq!(s.state, "In Progress");
+        // Once the rounds stall, an agent that has not worked on the change reads every round's
+        // findings side by side, and the worker is told the cause it names (NIT-735).
+        assert!(s.next.contains("names one shared cause") && s.next.contains("the x is never read: stuck.txt") && s.next.contains("2. an x read late"), "{}", s.next);
+        let asked = |f: &Fixture| -> i64 {
+            f.db.conn.query_row("SELECT COUNT(*) FROM event WHERE issue_key = ?1 AND type = ?2", [&issue.key, crate::shared_cause::EVENT], |r| r.get(0)).unwrap()
+        };
+        assert_eq!(asked(&f), 1);
         let last: String = f
             .db
             .conn
@@ -2279,10 +2321,15 @@ exit 0
         // Done is refused while the change is not landed: it is not on the integration branch.
         let done = f.db.move_issue(&issue.key, "Done", Some("Done by the human, outside Nitely."), None, &Actor::Human).unwrap_err().to_string();
         assert!(done.contains("never landed"), "{done}");
+        // Still stalled in the same run: the answer stands on the issue, and nothing asks again.
+        let again = f.submit(&wt, true).unwrap();
+        assert!(!again.next.contains("shared cause"), "{}", again.next);
+        assert_eq!(asked(&f), 1);
         // Sent back, the count starts over: the next round that carries it is not escalated.
         let explicit=f.db.request_acceptance(&issue.key,"1","A specific product trade-off",None,&f.actor).unwrap();
         f.db.decline_finding(explicit.id, "fix it properly", "").unwrap();
         assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
+        assert_eq!(asked(&f), 1, "a round that does not stall asks nothing");
     }
 
     /// NIT-568: the question about a finding holds the land, never the agent, and a fix closes it.
@@ -2590,34 +2637,4 @@ VERDICT: findings
         assert!(!old.timed_out);
     }
 
-    #[test]
-    fn the_fresh_review_is_told_what_the_person_accepted_so_a_reworded_repeat_does_not_reach_them() {
-        let mut f = fixture();
-        // Round one raises two P1s; the person accepts one, and the rounds after carry the other as
-        // open. The fresh review no longer finds the open one, and would say the accepted one again
-        // in other words unless it is told the person accepted it (NIT-331).
-        let (issue, wt) = f.started("Worded again");
-        std::fs::write(wt.join("worded.txt"), "let worded = 1;").unwrap();
-        sh(&wt, &["add", "."]);
-        sh(&wt, &["commit", "-q", "-m", "worded"]);
-        let first = f.submit(&wt, true).unwrap();
-        assert_eq!(first.state, "In Progress");
-        let secret = [7u8; 32];
-        crate::approval::trust_in_tests(Some(crate::approval::public_of(&secret)));
-        let (finding, reason) = ("No migration: worded.txt, load", "no outside users yet");
-        let signature = crate::approval::sign(&secret, &crate::accept::message(&issue.key, &first.patch_id, finding, reason, 5));
-        f.db.conn
-            .execute(
-                "INSERT INTO accepted_finding (issue_key, patch_id, priority, finding, reason, ts, signature) VALUES (?1, ?2, 1, ?3, ?4, 5, ?5)",
-                rusqlite::params![issue.key, first.patch_id, finding, reason, signature],
-            )
-            .unwrap();
-        // Round two as submit records it: the accepted finding no longer told, the other carried open.
-        round(&f, &issue.key, &wt, "changes", &[(1, "Worded: worded.txt, the x is never read", true)], 0);
-        assert_eq!(f.submit(&wt, true).unwrap().state, "In Review");
-        let last = &f.db.reviews(&issue.key).unwrap()[0];
-        assert!(last.note.ends_with("fresh, without the earlier rounds") && last.verdict == "pass", "{last:?}");
-        assert!(last.findings.is_empty(), "the accepted finding is not raised again: {:?}", last.findings);
-        assert!(f.db.open_asks().unwrap().iter().all(|a| a.issue_key.as_deref() != Some(issue.key.as_str())), "nothing for the person");
-    }
 }
