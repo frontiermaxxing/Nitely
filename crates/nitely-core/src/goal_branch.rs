@@ -396,6 +396,12 @@ fn source_of(actor: &Actor) -> String {
     }
 }
 
+/// The project of the open goal branch `branch` in `root`, if there is one.
+fn goal_of_branch(db: &Db, root: &Path, branch: &str) -> Result<Option<String>> {
+    let Some(gb) = db.goal_branches_in(root)?.into_iter().find(|g| g.branch == branch) else { return Ok(None) };
+    Ok(db.goal(gb.goal)?.map(|g| g.project))
+}
+
 fn repo_key(root: &Path) -> String {
     crate::paths::normalize(&root.to_string_lossy())
 }
@@ -589,6 +595,14 @@ fn work_tree(root: &Path, pb: &Playbook, goal: i64, at: &str) -> Result<PathBuf>
 pub(crate) fn item_gate(db: &Db, root: &Path, worktree: &Path, key: Option<&str>, base: &str, branch: &str, actor: &Actor) -> Result<GateResult> {
     let head = rev(worktree, "HEAD")?;
     let base = rev(worktree, base)?;
+    // A goal branch kept from before its project became Tracking runs no item checks (NIT-739).
+    let tracking = match key {
+        Some(key) => crate::project_modes::tracking_issue(db, key)?,
+        None => goal_of_branch(db, root, branch)?.is_some_and(|project| db.project_review_mode(&project).is_ok_and(|m| m.tracking())),
+    };
+    if tracking {
+        return Ok(GateResult { mode_authority: None, passed: true, plan: None, skipped: Some(crate::submit::TRACKING_NOTE.into()), commit: head, results: vec![], warnings: vec![], flaked: vec![], lane_run: None });
+    }
     let pb = Playbook::load(root)?;
     let selection = crate::affected_tests::select_with_policy(worktree, &base, &head, &base)?;
     if selection.full || pb.verification.basic.is_empty() {

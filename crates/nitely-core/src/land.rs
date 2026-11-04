@@ -544,6 +544,14 @@ fn nitely_lands_approved(pb: &Playbook) -> bool {
     pb.land.by.by_nitely() || !crate::approval::agents_can_verify()
 }
 
+/// `nitely_lands_approved` under the issue's project mode: a Tracking project lands by Nitely
+/// whatever the playbook says, since its agents are told they need not land (NIT-739).
+fn lands_approved(db: &Db, key: &str, root: &Path) -> Result<bool> {
+    let mut pb = Playbook::load(root)?;
+    crate::project_modes::apply_issue(db, key, &mut pb)?;
+    Ok(nitely_lands_approved(&pb))
+}
+
 /// After a human approves `key`: when its project's playbook lands by Nitely, Nitely lands it
 /// now. None when it is not Approved or the playbook leaves the land to the author. `dir` helps
 /// find the repo when no single repo is linked to the issue's project.
@@ -553,7 +561,7 @@ pub fn land_on_approval(db: &mut Db, config: &crate::Config, key: &str, dir: &st
         return Ok(None);
     }
     let root = approval_repo(config, &issue, dir)?;
-    if !nitely_lands_approved(&Playbook::load(&root)?) {
+    if !lands_approved(db, key, &root)? {
         return Ok(None);
     }
     let actor = Actor::Agent(AUTO_LANDER.into());
@@ -577,7 +585,7 @@ pub fn land_approved(db: &mut Db, config: &crate::Config, reported: &mut HashMap
         if crate::db::now() - at < 10 && db.approval_unsigned_yet(&issue.key, at)? {
             continue;
         }
-        let ready = approval_repo(config, &issue, "").and_then(|root| Ok((nitely_lands_approved(&Playbook::load(&root)?), root)));
+        let ready = approval_repo(config, &issue, "").and_then(|root| Ok((lands_approved(db, &issue.key, &root)?, root)));
         let result = match ready {
             Ok((false, _)) => continue,
             // Another land is running: a later round lands it. A lock that old is probably left by a

@@ -14,6 +14,8 @@ fn issue(db: &mut Db, title: &str) -> crate::issues::IssueRecord {
     db.create_issue(&NewIssue { project: "RES".into(), title: title.into(), body: format!("{title}: a research note."), evidence: "Asked for by the team.".into(), source: "claude".into(), kind: "feature".into(), allow_similar: true, ..Default::default() }, &Actor::Human).unwrap()
 }
 
+const SECRET: [u8; 32] = [7; 32];
+
 fn lane_runs(db: &Db) -> i64 {
     db.conn.query_row("SELECT COUNT(*) FROM lane_run", [], |r| r.get(0)).unwrap()
 }
@@ -94,6 +96,20 @@ fn a_tracking_project_lands_markdown_with_no_lane_run_and_no_review() {
     commit(std::path::Path::new(&started.worktree), &[("budget/estimate.md", "# Estimate\n")], "Budget (RES-3)");
     submit(&mut db, &config, &started.worktree, &agent);
     assert_eq!(db.issue(&c.key).unwrap().unwrap().state, "Needs You");
+    // Once the person approves it, Nitely lands it: the agent was told it need not land.
+    crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
+    db.move_issue(&c.key, "Approved", None, None, &Actor::Human).unwrap();
+    db.sign_approval(&c.key, &SECRET).unwrap();
+    let landed = crate::land::land_on_approval(&mut db, &config, &c.key, &repo.to_string_lossy()).unwrap().expect("Nitely lands an approved Tracking change");
+    assert!(landed.landed, "{landed:?}");
+    assert_eq!(db.issue(&c.key).unwrap().unwrap().state, "Done");
+
+    // A review that waited for its land batch from before the switch is not run now.
+    let queued = issue(&mut db, "Queued under Development");
+    db.conn.execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p1', 'c1', '', ?2, 'agent', '[]', 1)", rusqlite::params![queued.key, crate::review_batch::PENDING]).unwrap();
+    let outcome = crate::review_batch::review_pending(&mut db, &repo, &[queued.key.clone()], &agent).unwrap();
+    assert_eq!(outcome, vec![(queued.key.clone(), Ok(()))]);
+    assert_eq!(db.reviews(&queued.key).unwrap()[0].verdict, "yolo");
 
     // A rebase conflict still stops the land and goes back to the agent.
     let (d, e) = (issue(&mut db, "Answer the open question"), issue(&mut db, "Reword the open question"));
@@ -107,6 +123,11 @@ fn a_tracking_project_lands_markdown_with_no_lane_run_and_no_review() {
     assert_eq!(back.state, "In Progress", "the conflict goes back to the agent");
     assert_eq!(g(&remote, &["show", "main:notes/plan.md"]), "# Plan\n\nAnswered.", "and nothing of it landed");
     assert_eq!((lane_runs(&db), review_events(&db)), (0, vec![]));
+
+    // What landed under Tracking is the baseline: switching back does not check it after the fact.
+    let main = g(&repo, &["rev-parse", "main"]);
+    let health = crate::verification_backstop::health(&db, &repo).unwrap().expect("a baseline");
+    assert_eq!((health.verified_head.as_deref(), health.observed_head.as_str()), (Some(main.as_str()), main.as_str()));
 
     // Back to Development: the next submit runs the gate again (it fails here) and nothing lands.
     db.set_project_review_mode("RES", Mode::Release, Options::default(), 1, &Actor::Human).unwrap();

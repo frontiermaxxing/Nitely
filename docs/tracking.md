@@ -38,7 +38,13 @@ change of a new Development project until its review rules are approved.
 ## Switching
 
 A switch applies to the next submit and land. Work queued under Development when you switch to
-Tracking lands without the gate and review it was waiting for. Switching back to Development starts on
+Tracking lands without the gate and review it was waiting for. Items of a goal branch kept from
+before the switch run no item checks, quick changes waiting for their review after landing are
+not reviewed, and a change you approve lands by itself.
+
+Each Tracking land becomes the baseline for the full suite on main, marked as unchecked, so a
+switch back does not run the full suite over what landed under Tracking. Release verification
+still refuses that baseline until the full gate has run on main. Switching back to Development starts on
 Fast (or, before you save, the preset you had picked); choose another preset there if you want one.
 The next submit runs its gate and review again. Nothing that already landed is checked again.
 
