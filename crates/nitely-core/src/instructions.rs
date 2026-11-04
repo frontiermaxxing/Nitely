@@ -54,6 +54,29 @@ State: Todo when an agent can do it now; Backlog for ideas, priority 4 and work 
 issue (or Todo with blocked_by naming it); owner human for work only the human can do; product \
 decisions go through `ask`.", "\n\nTesting standard:\n", include_str!("testing_standard.md"));
 
+/// The workflow in a Tracking project (NIT-739): the same coordination, with no tests to write and
+/// no review to wait for, since nothing checks what lands there.
+pub const TRACKING_WORKFLOW: &str = "Nitely tracks this work. Use the `nitely` MCP tools; do not track work anywhere else. `get_project` returns the project's brief, what earlier agents learned about it: read it before exploring the repo, and when you learn something about the project as a whole that the next agent needs, add it with `set_project_brief`.
+
+This project is in Tracking mode: Nitely coordinates the work and checks none of it. There is no gate, no review and no pull request, so do not write tests for your changes or wait for a review. A change lands on the integration branch as soon as you hand it in.
+
+1. `next_task` claims the most urgent Todo issue. Then `start_task` with its key creates the issue's branch and worktree from the integration branch. Work only in that worktree. An issue whose body says \"Changes no repo files:\" gets no branch or worktree: do the work, then close it with `update_issue` Done and evidence. For a change you make right where you are, `quick_start` with a title (or the key you were given), edit in the worktree it returns, then `quick_land`: any size of change lands that way.
+2. `report` one line on what you are doing at each step; it shows live on the human's board.
+3. `file_issue` anything you find but will not do now (it refuses likely duplicates); `file_issues` files up to 10 at once.
+4. When only the human can decide, `ask` with the issue's key, and keep working on what does not depend on the answer. A question about the board or the work (who holds a file, whether an issue is done) goes to `triage`, not the human. Never set Approved: only the human approves.
+5. Commit, then `submit` with `solution_title` and `solution_summary` saying what you did. Nitely lands it in the same call: it rebases onto the integration branch, pushes, closes the issue as Done and cleans up the worktree. A rebase conflict comes back to you: resolve it in the worktree, commit and submit again. A change to a path the person approves waits for them in their inbox, and lands once they approve it; you do not call land.
+6. Before you stop, `note` with handoff: true: what is done, what is left, what you were unsure about.
+7. Link every issue you name, in replies, commit messages and notes, with the `url` the tools return, for example [NIT-14](http://127.0.0.1:7423/i/NIT-14). Link an ask the same way.
+8. `updates` says what the person did in the app and what landed since you last looked. Call it when you resume after a pause, before you tell the person that something waits on them. For what got done since a day, `list_issues` with `closed_since` lists the issues closed then.
+
+Priority when you file: 1 data loss or a leak; 2 something wrong that people rely on, or a blocker; 3 matters but can wait; 4 cleanup and nice-to-haves. State: Todo when an agent can do it now; Backlog for ideas and work waiting on another issue (or Todo with blocked_by naming it); owner human for work only the human can do; decisions go through `ask`.";
+
+/// What the user-level skill says, for every project: the workflow, and where a Tracking project
+/// differs. The session start and the MCP server give a Tracking project its own text.
+pub fn skill_text() -> String {
+    format!("{WORKFLOW}\n\nIn a Tracking project (the session start or the MCP instructions say so), follow this instead:\n\n{TRACKING_WORKFLOW}")
+}
+
 /// Shared by connected-agent instructions and both single and batch reviewer prompts.
 pub const TESTING_STANDARD: &str = include_str!("testing_standard.md");
 
@@ -70,6 +93,10 @@ pub fn for_dir(config: &Config, dir: &str) -> Option<String> {
     let repo = config.repo_for_dir(dir)?;
     let pb = Playbook::load(std::path::Path::new(&repo.root)).unwrap_or_default();
     let project = repo.project.as_deref().map(|p| format!(" Its issues are in project {p} ({p}-n keys).")).unwrap_or_default();
+    // A Tracking project gets its own workflow and no gate line: nothing checks its changes (NIT-739).
+    if repo.project.as_deref().is_some_and(crate::project_modes::tracking_project) {
+        return Some(format!("This repo ({}) is connected to Nitely.{project} Tasks branch from and land on {}.\n\n{TRACKING_WORKFLOW}", repo.name, pb.integration_branch()));
+    }
     let gate = gate_line(&pb);
     // Read-only, and skipped when the database cannot be read: this runs at every session start.
     let offer = repo
@@ -127,6 +154,13 @@ yes, or when `next_task` handed you {project}'s setup issue. Without a yes, run 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A Tracking project's agents are not taught to test or to wait for review (NIT-739).
+    #[test]
+    fn the_tracking_workflow_leaves_out_tests_and_review_rounds() {
+        assert!(!TRACKING_WORKFLOW.contains(TESTING_STANDARD.trim()) && !TRACKING_WORKFLOW.contains("request_acceptance") && !TRACKING_WORKFLOW.contains("reviewer_note"));
+        assert!(skill_text().starts_with(WORKFLOW) && skill_text().ends_with(TRACKING_WORKFLOW));
+    }
 
     #[test]
     fn the_setup_offer_names_the_project_and_holds_back_the_full_sweep() {

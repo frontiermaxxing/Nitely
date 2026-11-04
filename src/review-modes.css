@@ -1,6 +1,8 @@
 /* A project's review mode (ProjectReviewMode.tsx): settings sections and rows, then what each repo ends up with and the periodic reviews. */
 .review-mode-settings { display: grid; min-width: 0; }
 .review-mode-loading { margin: 16px 0 0; }
+.review-mode-tracking { margin:12px 0 0; padding:12px 14px; border-radius:var(--radius); background:var(--sunken); color:var(--fg); font-size:13px; display:grid; gap:8px; }
+.review-mode-tracking p { margin:0; }
 .review-mode-count { width: 120px; }
 .review-mode-migrated { margin:12px 0 0; padding:12px 14px; border-radius:var(--radius); background:var(--attention-wash); color:var(--fg); font-size:13px; }
 .review-mode-migrated p { margin:0; }

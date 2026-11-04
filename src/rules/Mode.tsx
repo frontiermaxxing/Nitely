@@ -73,7 +73,8 @@ export function ModeChip(props: { projectKey: string; control: ReviewModeControl
   } catch {
     // A preset the backend did not send: the chip still names the mode.
   }
-  const tone = checks.some((c) => c.tone === "off") ? "off" : "plain";
+  // Tracking turns tests and review off on purpose, so its chip is plain, not a warning.
+  const tone = mode.mode !== "tracking" && checks.some((c) => c.tone === "off") ? "off" : "plain";
   const label = `${MODE_LABEL[mode.mode]} mode`;
 
   const show = async (path: string) => {

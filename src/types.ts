@@ -788,6 +788,8 @@ export interface ConnectPlan {
   warnings: string[];
   /** The integration branch has no commit yet: the page offers the first commit (NIT-685). */
   first_commit_needed: boolean;
+  /** Connect it as a Tracking project: changes land with no tests and no review (NIT-739). */
+  tracking: boolean;
 }
 
 /** What a repo's first commit would hold (first_commit.rs). */
