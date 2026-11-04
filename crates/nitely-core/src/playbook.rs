@@ -1897,8 +1897,16 @@ fn record_gate(db: &Db, issue_key: Option<&str>, worktree: &Path, actor: &Actor,
         let tests = if f.tests.is_empty() { String::new() } else { format!(": {}", f.tests.join(", ")) };
         db.log_event(actor, issue_key, at.as_deref(), "gate_flaked", &format!("{} failed at {commit}, then passed when run again{tests}", f.command))?;
     }
-    let summary = if passed { format!("Gate passed at {commit}") } else { format!("Gate failed at {commit}: {}", failed_step(&results, &warnings)) };
-    db.log_event(actor, issue_key, at.as_deref(), if passed { "gate_passed" } else { "gate_failed" }, &summary)?;
+    let stopped = !passed && results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED));
+    let (kind, summary) = if passed {
+        ("gate_passed", format!("Gate passed at {commit}"))
+    } else if stopped {
+        // Not a failure of the change: its review asked for changes first (NIT-732).
+        ("gate_stopped", format!("Gate stopped at {commit}: the review that ran with it asked for changes"))
+    } else {
+        ("gate_failed", format!("Gate failed at {commit}: {}", failed_step(&results, &warnings)))
+    };
+    db.log_event(actor, issue_key, at.as_deref(), kind, &summary)?;
     // Whether the fix of a failure changed product code or only tests (NIT-557); never fails a gate.
     if let Some(key) = issue_key {
         db.record_gate_catches(key, worktree, commit, &results, passed).ok();
