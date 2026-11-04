@@ -74,11 +74,15 @@ fn a_tracking_project_lands_markdown_with_no_lane_run_and_no_review() {
     let b = db.create_issue(&crate::quick::new_issue("RES", "Long literature notes", "claude"), &agent).unwrap();
     let started = crate::quick::start(&db, &repo, &b, "claude", &agent).unwrap();
     let long = "- A finding worth keeping.\n".repeat(300);
-    std::fs::create_dir_all(std::path::Path::new(&started.worktree).join("notes")).unwrap();
-    std::fs::write(std::path::Path::new(&started.worktree).join("notes/literature.md"), &long).unwrap();
+    // A new file at the root, one in a new directory, and a binary: none of it stops the quick path.
+    let qwt = std::path::Path::new(&started.worktree);
+    std::fs::create_dir_all(qwt.join("sources/2026")).unwrap();
+    std::fs::write(qwt.join("summary.md"), &long).unwrap();
+    std::fs::write(qwt.join("sources/2026/scan.bin"), [0u8, 159, 146, 150, 0, 1]).unwrap();
     let quick = crate::quick::land(&mut db, &config, &started.worktree, None, &agent).unwrap();
     assert!(quick.small && quick.landed, "{quick:?}");
     assert_eq!(db.issue(&b.key).unwrap().unwrap().state, "Done");
+    assert_eq!(g(&remote, &["cat-file", "-t", "main:sources/2026/scan.bin"]), "blob");
     assert!(crate::quick_review::waiting(&db, "RES", &repo).unwrap().is_empty(), "nothing waits for a review after landing");
 
     assert_eq!(lane_runs(&db), 0, "no gate ran in a lane");
