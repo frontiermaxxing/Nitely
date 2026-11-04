@@ -773,11 +773,14 @@ fn ask_shared_cause(db: &Db, pb: &Playbook, issue: &IssueRecord, worktree: &Path
     let prompt = crate::shared_cause::prompt(&issue.title, since, newest_first.len(), &rounds, &open_now);
     let wt = worktree.to_string_lossy().into_owned();
     db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review rounds are not converging: {} reads every round's findings side by side for a shared cause", review.reviewer))?;
+    // Whatever stops it (it cannot run, it runs past its timeout), the stall goes on as it would
+    // have: the round's own review is recorded, and nothing about the change depends on the answer.
     let answer = match pb.review.run_review_prompt(&review.reviewer, worktree, &prompt) {
         Ok(reply) => crate::shared_cause::parse(&reply.text),
-        // The stall goes on as it would have: nothing about the change depends on the answer.
-        Err(e) if e.is::<crate::review::CouldNotRun>() => None,
-        Err(e) => return Err(e),
+        Err(e) => {
+            db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The shared-cause question did not finish: {}", e.to_string().lines().next().unwrap_or_default()))?;
+            None
+        }
     };
     let Some(answer) = answer else { return Ok(None) };
     let told = crate::shared_cause::told(&answer, &review.reviewer);

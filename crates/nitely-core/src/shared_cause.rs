@@ -33,11 +33,19 @@ pub fn rounds(newest_first: &[Vec<Finding>]) -> Vec<Round> {
     out
 }
 
-/// Where a finding says it is: `title: file, symbol: what goes wrong` gives `file, symbol`.
-fn place(text: &str) -> Option<&str> {
+/// Where a finding says it is: `title: file:line, symbol: what goes wrong` gives `file, symbol`,
+/// without the line, so paths through one function show together.
+fn place(text: &str) -> Option<String> {
     let (_, rest) = text.split_once(": ")?;
     let (place, _) = rest.split_once(": ")?;
-    Some(place.trim()).filter(|p| !p.is_empty() && p.len() <= 160)
+    let place = place.trim();
+    let (file, symbol) = place.split_once(',').map_or((place, ""), |(f, s)| (f, s));
+    let file = match file.rsplit_once(':') {
+        Some((path, line)) if !line.is_empty() && line.chars().all(|c| c.is_ascii_digit() || c == '-') => path,
+        _ => file,
+    };
+    let place = if symbol.is_empty() { file.trim().to_string() } else { format!("{}, {}", file.trim(), symbol.trim()) };
+    Some(place).filter(|p| !p.is_empty() && p.len() <= 160)
 }
 
 /// The prompt: what the change is for, every round's blocking findings grouped by where they are
@@ -48,7 +56,7 @@ pub fn prompt(title: &str, base: &str, total: usize, rounds: &[Round], open_now:
     let mut by_place: BTreeMap<String, Vec<(usize, &Finding)>> = BTreeMap::new();
     for r in rounds {
         for f in &r.findings {
-            let at = place(&f.text).map(str::to_string).unwrap_or_else(|| "(no file named)".into());
+            let at = place(&f.text).unwrap_or_else(|| "(no file named)".into());
             by_place.entry(at).or_default().push((r.number, f));
         }
     }
@@ -154,8 +162,8 @@ mod tests {
     /// still open; P2s and repeats are left out.
     #[test]
     fn every_round_s_blocking_findings_show_once_side_by_side() {
-        let a = "Two threads merge: intake.ts, conversationKey: same subject collides on a held reply";
-        let b = "Lost reply: intake.ts, conversationKey: an unlisted sender with the same subject";
+        let a = "Two threads merge: intake.ts:40, conversationKey: same subject collides on a held reply";
+        let b = "Lost reply: intake.ts:73, conversationKey: an unlisted sender with the same subject";
         let c = "Seeded scan: mail.ts, scan: the seed reuses the subject key";
         let newest_first = vec![
             vec![f(1, c, false), f(1, b, true), f(2, "Typo: x.ts, y: z", false)],
