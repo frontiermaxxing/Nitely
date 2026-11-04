@@ -1388,9 +1388,9 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
     let pb = &current;
     let patch = crate::submit::patch_id_range(worktree, base, head)?;
     let review = db.reviews(key)?.into_iter().next().with_context(|| format!("{key} has no review; submit it first"))?;
-    if review.verdict=="pass" && !review.reviewer.is_empty() && crate::review_scope::changed(db,key)? {
-        bail!("The delivery plan changed since review. Land again to refresh the review of this scope; no code commit is needed.");
-    }
+    // A delivery plan that moved since the review (a linked issue's note, edit or head, a newly
+    // linked issue) is refreshed before the land's gate (`review_batch::review_pending`); a move
+    // during the gate does not undo a passing review of this same patch, or its approval (NIT-734).
     if review.patch_id != patch && !crate::rebase_review::covers(pb, worktree, base, head, &review)? {
         bail!(
             "the branch changed since its review (reviewed {}, now {}); submit again",
