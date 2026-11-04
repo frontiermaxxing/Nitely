@@ -65,6 +65,7 @@ pub mod project_yolo;
 pub mod project_modes;
 pub mod relay;
 pub mod remote;
+pub mod shared_cause;
 pub mod similar;
 pub mod slim;
 pub mod review;
