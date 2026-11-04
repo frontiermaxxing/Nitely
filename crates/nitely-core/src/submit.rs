@@ -1198,6 +1198,20 @@ fn file_follow_up(db: &mut Db, issue: &IssueRecord, review: &Review, accepted: &
 /// any goal so minor work holds no checkpoint. Says so on the change when it added any, and
 /// returns the follow-up's key.
 pub(crate) fn file_minor_findings(db: &mut Db, key: &str, review: &Review, actor: &Actor) -> Result<Option<String>> {
+    if crate::submit_rules::minor(&review.findings).is_empty() {
+        return Ok(None);
+    }
+    // The follow-up it files or edits is a lead of the review just recorded: the review's own
+    // writes do not make its plan stale (NIT-734), unless the plan had moved already.
+    let current = !crate::review_scope::changed(db, key)?;
+    let filed = file_minor(db, key, review, actor)?;
+    if current {
+        crate::review_scope::restamp(db, key)?;
+    }
+    Ok(filed)
+}
+
+fn file_minor(db: &mut Db, key: &str, review: &Review, actor: &Actor) -> Result<Option<String>> {
     let minor = crate::submit_rules::minor(&review.findings);
     let Some(issue) = db.issue(key)?.filter(|_| !minor.is_empty()) else { return Ok(None) };
     let evidence = crate::submit_rules::minor_follow_up_evidence(key);
@@ -2001,6 +2015,23 @@ reason = "money logic"
         f.submit(&wt, true).unwrap();
         let again = follow_ups(&f);
         assert_eq!((again.len(), again[0].key.as_str(), again[0].body.matches("Edge case").count()), (1, first[0].key.as_str(), 1));
+    }
+
+    /// A review's P2s go to a follow-up its plan reads (the author named it): that write of the
+    /// review's own leaves the plan it recorded current, so the land does not stop on it (NIT-734).
+    #[test]
+    fn a_review_filing_its_p2s_into_a_follow_up_it_reads_keeps_its_plan_current() {
+        let mut f = fixture();
+        let (issue, wt) = f.committed("Count the rows", "edge.txt");
+        let tracked = NewIssue { evidence: crate::submit_rules::minor_follow_up_evidence(&issue.key), body: "Earlier findings, all fixed.".into(), ..new("Minor findings") };
+        let follow_up = f.db.create_issue(&tracked, &f.actor).unwrap();
+        brief_reviewer(&f.db, &issue.key, &format!("The P2s are tracked in {}.", follow_up.key), &f.actor).unwrap();
+        f.submit(&wt, true).unwrap();
+        assert!(f.db.issue(&follow_up.key).unwrap().unwrap().body.contains("Edge case"), "the review wrote to it");
+        assert!(!crate::review_scope::changed(&f.db, &issue.key).unwrap());
+        // A change by someone else afterwards still counts.
+        f.db.edit_issue(&follow_up.key, None, Some("Now also covers the totals."), &Actor::Human).unwrap();
+        assert!(crate::review_scope::changed(&f.db, &issue.key).unwrap());
     }
 
     /// A failed gate's review files its P2s too (NIT-714): the next round carries them, and a
