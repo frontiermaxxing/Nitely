@@ -224,9 +224,15 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     let mut verification = crate::verification::assess_and_record(db, &worktree, &base, &checked_head, &issue,actor)?;
     // The review starts as the gate is queued, on the commit it gates (NIT-699), so a round costs
     // the longer of the two and not their sum.
-    let mut early = start_early_review(db, &root, &issue, &worktree, &branch, &since, &checked_head, &files, quick || opts.skip_review, actor)?;
+    // A review that asks for changes stops the gate it runs with, still queued or running: its
+    // result would be thrown away, and the lane goes to other work (NIT-732).
+    let stop = crate::lanes::GateStop::default();
+    let mut early = start_early_review(db, &root, &issue, &worktree, &branch, &since, &checked_head, &files, quick || opts.skip_review, &stop, actor)?;
     let early_started = early.is_some();
-    let gate = playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)?;
+    let gate = match stop.watch(|| playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)) {
+        Err(_) if stop.stopped() => stopped_gate(&checked_head),
+        gate => gate?,
+    };
     if gate.skipped.is_some() {
         verification.enforcement="Project mode: automatic tests did not run; classification is advice only.".into();
         verification.commands.clear();
@@ -268,7 +274,8 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         out.next = after_failed_gate(&out.gate);
         // A goal's checkpoint: the item at fault is found, reverted on the goal branch and sent
         // back, and the next checkpoint opened (goal_branch.rs).
-        if let Some(said) = crate::goal_branch::after_failed_gate(db, &root, &issue.key, &out.gate, actor) {
+        let stopped = out.gate.results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED));
+        if let Some(said) = (!stopped).then(|| crate::goal_branch::after_failed_gate(db, &root, &issue.key, &out.gate, actor)).flatten() {
             db.add_note(&issue.key, &said, "goal_branch", actor)?;
             out.next = format!("{said}. {}", out.next);
             out.state = db.issue(&issue.key)?.map(|i| i.state).unwrap_or_default();
@@ -294,6 +301,11 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
                         // findings are never filed again (NIT-714).
                         if let Some(r) = &out.review {
                             file_minor_findings(db, &issue.key, r, actor)?;
+                        }
+                        // Its findings are the worker's, whatever state a resubmit started from.
+                        let now = db.issue(&issue.key)?.map(|i| (i.state, i.origin)).unwrap_or_default();
+                        if now.0 != "In Progress" && now.1 == "nitely" {
+                            out.state = db.move_issue(&issue.key, "In Progress", None, None, actor)?.state;
                         }
                     }
                 }
@@ -653,6 +665,7 @@ fn start_early_review(
     head: &str,
     files: &[String],
     no_review: bool,
+    stop: &crate::lanes::GateStop,
     actor: &Actor,
 ) -> Result<Option<EarlyReview>> {
     let Some(path) = db.conn.path().filter(|p| !p.is_empty()).map(PathBuf::from) else { return Ok(None) };
@@ -678,10 +691,19 @@ fn start_early_review(
     let wt = worktree.to_string_lossy().into_owned();
     db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review starts with the gate, on {}", &head[..head.len().min(7)]))?;
     let policy = pb.review.clone();
-    let (key, worktree, since, actor) = (issue.key.clone(), worktree.to_path_buf(), since.to_string(), actor.clone());
+    let (key, worktree, since, actor, stop, head_now) = (issue.key.clone(), worktree.to_path_buf(), since.to_string(), actor.clone(), stop.clone(), head.to_string());
     let handle = std::thread::spawn(move || {
         let db = Db::open(&path)?;
-        run_review(&db, &policy, &rules, &vendor, &worktree, &since, previous.as_ref(), &key, &actor)
+        let done = run_review(&db, &policy, &rules, &vendor, &worktree, &since, previous.as_ref(), &key, &actor)?;
+        // Changes the person has not accepted end the round whatever the gate says.
+        if done.1.verdict == "changes" {
+            let patch = patch_id_range(&worktree, &since, &head_now)?;
+            let accepted: Vec<String> = db.accepted_for(&key, &patch)?.into_iter().map(|a| a.finding).collect();
+            if !crate::submit_rules::accepted_only(&done.1.findings, &accepted) {
+                stop.stop(&db)?;
+            }
+        }
+        Ok(done)
     });
     Ok(Some(EarlyReview { head: head.to_string(), rules: rules_of(&pb.review), handle }))
 }
@@ -1164,7 +1186,16 @@ does not.\n",
 
 /// What to do after a gate that did not pass: fix the step that failed, or, when a step ran past
 /// the lane's time limit, nothing in the change (NIT-310).
+/// The gate a review stopped while it was still queued: it ran nothing.
+fn stopped_gate(head: &str) -> GateResult {
+    let result = crate::playbook::CommandResult { step: None, command: "gate".into(), ok: false, seconds: 0, output: crate::lanes::GATE_STOPPED.into(), skipped: false, timed_out: false };
+    GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head[..head.len().min(7)].to_string(), results: vec![result], warnings: vec![], flaked: vec![], lane_run: None }
+}
+
 fn after_failed_gate(gate: &GateResult) -> String {
+    if gate.results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED)) {
+        return "The gate was stopped once the review asked for changes, so the lane went to other work.".into();
+    }
     if let Some(r) = gate.timed_out() {
         return format!(
             "The gate did not finish: {}, which says nothing about this change. Read its log for where it stopped, then submit again; a gate that needs longer needs a larger `[lanes] timeout_minutes`.",
@@ -2283,6 +2314,37 @@ exit 0
         let recorded = &f.db.reviews(&issue.key).unwrap()[0];
         assert_eq!((recorded.verdict.as_str(), recorded.patch_id.as_str()), ("changes", s.patch_id.as_str()));
         assert!(previous_round(&f.db, &issue.key, &wt).unwrap().is_some_and(|p| p.findings.iter().any(|f| f.text.contains("Together"))));
+    }
+
+    /// A review that asks for changes stops the gate it runs with, so the lane is not held for a
+    /// result the round throws away (NIT-732).
+    #[test]
+    fn a_review_that_asks_for_changes_stops_its_gate() {
+        let mut f = fixture();
+        // A gate that would pass, but only after half a minute.
+        let gate = format!("commands = ['\"{}\" gate.sh']", playbook::posix_sh());
+        let policy = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("commands = [\"exit 0\"]", &gate);
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), format!("[lanes]
+count = 1
+{policy}")).unwrap();
+        std::fs::write(f.repo.join("gate.sh"), "sleep 30
+exit 0
+").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "a slow gate in a lane"]);
+        let (issue, wt) = f.committed("Together", "together.txt");
+        // A resubmit: the issue is with the reviewer when its review asks for changes.
+        f.db.move_issue(&issue.key, "In Review", None, None, &Actor::Human).unwrap();
+        let started = std::time::Instant::now();
+        let s = f.submit(&wt, true).unwrap();
+        assert!(started.elapsed().as_secs() < 25, "the gate ran to its end: {:?}", started.elapsed());
+        assert!(!s.gate.passed && s.gate.results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED)), "{s:?}");
+        assert!(s.review.as_ref().is_some_and(|r| r.verdict == "changes"), "{s:?}");
+        assert_eq!(s.state, "In Progress");
+        assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "In Progress", "the findings go back to the worker");
+        assert_eq!(f.db.reviews(&issue.key).unwrap()[0].verdict, "changes");
+        let (state, error): (String, String) = f.db.conn.query_row("SELECT state, error FROM lane_run ORDER BY id DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
+        assert_eq!((state.as_str(), error.as_str()), ("abandoned", crate::lanes::GATE_STOPPED));
     }
 
     #[test]
