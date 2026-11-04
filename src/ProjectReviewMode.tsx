@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, isLive } from "./backend";
-import { MODE_DESCRIPTION, MODE_LABEL, RETIRED_LABEL, editMode, modeSave, modeValidation, optionsFor, type EffectiveRepository, type ModeDraft, type ModeOptions, type PeriodicStatus, type ProjectReviewMode, type ReviewMode } from "./reviewModes";
+import { DEVELOPMENT_MODES, MODE_DESCRIPTION, MODE_LABEL, RETIRED_LABEL, editMode, kindOf, modeForKind, modeSave, modeValidation, optionsFor, type EffectiveRepository, type ModeDraft, type ModeOptions, type PeriodicStatus, type ProjectKind, type ProjectReviewMode, type ReviewMode } from "./reviewModes";
 import { Button, RadioCards, Segmented, Select, SettingsRow, SettingsSection, TextField, type ChoiceOption, type SelectOption } from "./ui";
 import "./review-modes.css";
 
@@ -67,8 +67,11 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
   const custom = useRef<ModeOptions | null>(null);
   const customProject = useRef<string | null>(null);
   const [localError, setLocalError] = useState<string | null>(null);
+  // The Development mode to go back to when Tracking is switched off again, before saving.
+  const lastDevelopment = useRef<ReviewMode | null>(null);
   useEffect(() => {
     if (!saved) { setDraft(null); return; }
+    lastDevelopment.current = saved.mode === "tracking" ? null : saved.mode;
     if (customProject.current !== saved.project || saved.mode === "custom") custom.current = structuredClone(saved.overrides);
     customProject.current = saved.project;
     setDraft({ mode: saved.mode, overrides: optionsFor(saved.mode, saved.presets, saved.overrides) });
@@ -82,11 +85,14 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
   };
   const pick = (mode: ReviewMode) => {
     if (!saved || !draft) return;
+    if (mode !== "tracking") lastDevelopment.current = mode;
     try {
       setDraft({ mode, overrides: optionsFor(mode, saved.presets, custom.current ?? draft.overrides) });
       setLocalError(null);
     } catch (e) { setLocalError(String(e)); }
   };
+  const pickKind = (kind: ProjectKind) => pick(modeForKind(kind, lastDevelopment.current));
+  const tracking = draft?.mode === "tracking";
   const options = draft?.overrides;
   const validation = options ? modeValidation(options) : null;
   // Saving the mode the migration chose acknowledges its notice.
@@ -98,18 +104,35 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
   const audits: [string, string][] = [["0", "Off"], ["10", "10%"], ["25", "25%"], ["50", "50%"], ["100", "Every eligible change"]];
   if (options && options.audit_percent !== null && !audits.some(([v]) => Number(v) === options.audit_percent)) audits.push([String(options.audit_percent), `${options.audit_percent}%`]);
   return <div className="review-mode-settings">
-    <SettingsSection title="Review mode" description={<>How this project checks changes before and after they reach main, in every connected repository.{saved && <> Saved: <strong>{MODE_LABEL[saved.mode]}</strong>.</>}</>}>
+    <SettingsSection title="Review mode" description={<>How this project checks changes before and after they reach main, in every connected repository.{saved && <> Saved: <strong>{saved.mode === "tracking" ? "Tracking" : <>Development, {MODE_LABEL[saved.mode]}</>}</strong>.</>}</>}>
       {!saved && !control.error && <p className="muted small review-mode-loading">Loading review modes…</p>}
-      {saved && draft && <SettingsRow label="Mode" why="The settings below show what it does. Editing one of them makes it Custom.">
-        <RadioCards<ReviewMode> aria-label="Review mode" options={(Object.keys(MODE_LABEL) as ReviewMode[]).map((mode) => ({ value: mode, label: MODE_LABEL[mode], why: MODE_DESCRIPTION[mode] }))} value={draft.mode} disabled={off} onChange={pick} />
+      {saved && draft && <SettingsRow label="Project" why="Switch any time. A switch applies to the next submit and land; work that already landed is not checked again.">
+        <RadioCards<ProjectKind> aria-label="Project" options={[
+          { value: "development", label: "Development", why: "Nitely tests and reviews each change before it lands, as the mode below sets." },
+          { value: "tracking", label: "Tracking", why: MODE_DESCRIPTION.tracking },
+        ]} value={kindOf(draft.mode)} disabled={off} onChange={pickKind} />
       </SettingsRow>}
+      {saved && draft && !tracking && <SettingsRow label="Mode" why="The settings below show what it does. Editing one of them makes it Custom.">
+        <RadioCards<ReviewMode> aria-label="Review mode" options={DEVELOPMENT_MODES.map((mode) => ({ value: mode, label: MODE_LABEL[mode], why: MODE_DESCRIPTION[mode] }))} value={draft.mode} disabled={off} onChange={pick} />
+      </SettingsRow>}
+      {saved && draft && tracking && <div className="review-mode-tracking">
+        <p>Agents keep the whole coordination flow: the board, claims, branches and worktrees, notes, questions, triage, the crew and goals. When an agent hands a change in, Nitely rebases it onto main, pushes it and closes the issue. A rebase conflict goes back to the agent.</p>
+        <p className="muted small">Nothing runs on it: no tests, no review, no pull request, no audits and no full suite on main. Paths your rules send to you, and blocked paths, still wait for you. Agents are told not to write tests or wait for a review.</p>
+      </div>}
       {saved && saved.migration_changes.length > 0 && <div className="review-mode-migrated" role="status">
         <p><strong>{saved.migrated_from === saved.mode ? `${MODE_LABEL[saved.mode]} changed` : `${RETIRED_LABEL[saved.migrated_from ?? ""] ?? "The old mode"} became ${MODE_LABEL[saved.mode]}`}.</strong> Nitely's modes are now Fast, Careful and Release. What changed for this project:</p>
         <ul>{saved.migration_changes.slice(1).map((c) => <li key={c}>{c}</li>)}</ul>
         <p className="muted small">Save the review mode to keep it and dismiss this note, or pick another.</p>
       </div>}
     </SettingsSection>
-    {saved && draft && options && <>
+    {saved && draft && options && tracking && <>
+      <div className="review-mode-save">
+        <Button variant="primary" disabled={!changed || off} onClick={() => void control.save(draft)}>{control.busy ? "Saving…" : "Save"}</Button>
+        <span className="muted small">{changed ? "Unsaved changes" : "Saved"}</span>
+      </div>
+      {isLive && <p className="settings-hint">Live preview is read-only. Change review modes in the desktop app.</p>}
+    </>}
+    {saved && draft && options && !tracking && <>
       <SettingsSection title="Before merging" description="Nitely's default runs the full suite and reviews each change, landing it alone. The playbook's own policy keys no longer decide these.">
         <SettingsRow label="Automatic tests" why="Basic and risk-based checks use the repository's configured commands. Without that configuration the full checks run.">
           <Choice label="Automatic tests" fallback="Full suite" value={options.test_depth} choices={[["off", "Off"], ["basic", "Basic checks"], ["risk", "Match the change's risk"], ["full", "Full suite"]]} disabled={off} onChange={(test_depth) => edit({ test_depth })} />
@@ -181,7 +204,7 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
         </SettingsRow>
       </SettingsSection>
       <div className="review-mode-save">
-        <Button variant="primary" disabled={!changed || !!validation || off} onClick={() => void control.save(draft)}>{control.busy ? "Saving…" : "Save review mode"}</Button>
+        <Button variant="primary" disabled={!changed || !!validation || off} onClick={() => void control.save(draft)}>{control.busy ? "Saving…" : "Save"}</Button>
         <span className="muted small">{changed ? "Unsaved changes" : "Saved"}</span>
       </div>
       {validation && <p className="error small" role="alert">{validation}</p>}

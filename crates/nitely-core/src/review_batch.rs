@@ -87,6 +87,20 @@ pub fn review_pending(db: &mut Db, root: &Path, keys: &[String], actor: &Actor) 
     let mut out = Vec::new();
     let mut pending = Vec::new();
     for key in keys {
+        // A change handed in before its project became Tracking lands without the review it was
+        // waiting for: Tracking reviews nothing, from the moment it is saved (NIT-739).
+        if crate::project_modes::tracking_issue(db, key)? {
+            if db.reviews(key)?.first().is_some_and(|r| r.verdict == PENDING) {
+                db.conn.execute(
+                    "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, flagged, note, ts, solution, gate, branch, after_event)
+                     SELECT issue_key, patch_id, commit_sha, '', 'yolo', approver, reasons, '[]', '[]', ?2, ?3, solution, gate, branch, (SELECT COALESCE(MAX(id), 0) FROM event)
+                     FROM review WHERE issue_key = ?1 COLLATE NOCASE ORDER BY id DESC LIMIT 1",
+                    rusqlite::params![key, crate::submit::TRACKING_NOTE, crate::db::now()],
+                )?;
+            }
+            out.push((key.clone(), Ok(())));
+            continue;
+        }
         match db.reviews(key)?.into_iter().next() {
             Some(r) if r.verdict == PENDING || (r.verdict=="pass" && crate::review_scope::changed(db,key)?) => pending.push((key.clone(), r)),
             _ => out.push((key.clone(), Ok(()))),

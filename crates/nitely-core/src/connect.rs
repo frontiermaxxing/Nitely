@@ -51,6 +51,9 @@ pub struct ConnectPlan {
     /// The integration branch has no commit yet (a repo just made): tasks need a first commit,
     /// which Add a project offers with a preview (first_commit.rs, NIT-685).
     pub first_commit_needed: bool,
+    /// A new project starts as a Tracking project (NIT-739) rather than on Fast. The person picks it
+    /// when they add the project; it does nothing for a repo joining a project that exists.
+    pub tracking: bool,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -246,6 +249,7 @@ pub fn plan(db: &Db, config: &Config, path: &str, key: Option<&str>, name: Optio
         agents,
         warnings,
         first_commit_needed,
+        tracking: false,
     })
 }
 
@@ -264,9 +268,14 @@ pub fn apply(db: &mut Db, config: &mut Config, plan: &ConnectPlan, actor: &crate
     let mut done = Vec::new();
     let mut failed = Vec::new();
     if !plan.project_exists {
+        // Whether a project only tracks its agents' work is the person's choice, as its review mode is.
+        if plan.tracking && *actor != crate::Actor::Human {
+            bail!("only the person makes a project Tracking, when they add it in the app or in its settings");
+        }
         db.create_project(&plan.project_key, &plan.project_name)?;
-        crate::project_modes::start_on_fast(&db.conn, &plan.project_key)?;
-        done.push(format!("created project {} ({}) on the Fast review mode", plan.project_key, plan.project_name));
+        let mode = if plan.tracking { crate::project_modes::Mode::Tracking } else { crate::project_modes::Mode::Fast };
+        crate::project_modes::start_on(&db.conn, &plan.project_key, mode)?;
+        done.push(format!("created project {} ({}) {}", plan.project_key, plan.project_name, if plan.tracking { "as a Tracking project: changes land with no tests and no review" } else { "on the Fast review mode" }));
     }
     config.upsert_repo(RepoConfig {
         name: plan.repo_name.clone(),
@@ -278,7 +287,10 @@ pub fn apply(db: &mut Db, config: &mut Config, plan: &ConnectPlan, actor: &crate
     done.push(format!("watching {} for project {}", plan.root, plan.project_key));
 
     if plan.playbook.source == "generated" {
-        write(Path::new(&plan.playbook.path), &plan.playbook.text)?;
+        // A new Tracking project lands each change as it is handed in, so its first playbook does not
+        // hold every change for the person until the setup sweep's rules are approved.
+        let text = if plan.tracking && !plan.project_exists { without_approval_wait(&plan.playbook.text) } else { plan.playbook.text.clone() };
+        write(Path::new(&plan.playbook.path), &text)?;
         done.push(format!("wrote its playbook to {}", plan.playbook.path));
     }
 
@@ -312,7 +324,9 @@ fn file_setup_issue(db: &mut Db, plan: &ConnectPlan, actor: &crate::Actor) -> Re
     if db.list_issues(Some(&plan.project_key), false)?.iter().any(|i| i.title == title) {
         return Ok(None);
     }
-    let safe = if plan.playbook.source == "generated" {
+    let safe = if plan.tracking {
+        "This is a Tracking project: changes land with no tests and no review, so propose only approval.human_paths and approval.blocked_paths the person would want, and no review.flags."
+    } else if plan.playbook.source == "generated" {
         "Until rules are approved, every change waits for you (the playbook's approval.always_human); the proposal turns that off along with the rules it drafts."
     } else {
         "The repo already has a playbook; propose only what it is missing."
@@ -506,6 +520,15 @@ pub(crate) fn generated_playbook(root: &Path) -> String {
     )
 }
 
+/// The generated playbook without the `always_human` wait that holds every change until the setup
+/// sweep's rules are approved.
+fn without_approval_wait(text: &str) -> String {
+    match text.find("[approval]\n") {
+        Some(at) => text[..at].trim_end().to_string() + "\n",
+        None => text.to_string(),
+    }
+}
+
 /// The nitely executable as a shell word: quoted when its path has spaces.
 fn shell_word(nitely: &str) -> String {
     if nitely.contains(' ') { format!("\"{nitely}\"") } else { nitely.to_string() }
@@ -610,7 +633,7 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     changes.push(Change::file(
         &skill,
         "a skill with the Nitely workflow",
-        format!("---\nname: nitely\ndescription: How to take, report, submit and land work in a repo Nitely tracks. Use it whenever the nitely MCP tools are available or the session says the repo is connected to Nitely.\n---\n\n{WORKFLOW}\n"),
+        format!("---\nname: nitely\ndescription: How to take, report, submit and land work in a repo Nitely tracks. Use it whenever the nitely MCP tools are available or the session says the repo is connected to Nitely.\n---\n\n{}\n", crate::instructions::skill_text()),
     ));
     changes.push(Change::file(
         &dir.join("skills").join("nitely-test-optimize").join("SKILL.md"),
@@ -1197,6 +1220,7 @@ args = [\"nitely\", \"mcp\"]
             agents: vec![],
             warnings: vec![],
             first_commit_needed: false,
+            tracking: false,
         };
         let key = file_setup_issue(&mut db, &plan, &crate::Actor::Human).unwrap().unwrap();
         let issue = db.issue(&key).unwrap().unwrap();
@@ -1229,6 +1253,9 @@ args = [\"nitely\", \"mcp\"]
         assert_eq!(pb.gate.commands, vec!["npm test", "npm run build"]);
         assert!(pb.approval.always_human, "a new repo's changes wait for a human until its rules are approved");
         assert!(pb.unknown.is_empty());
+        let tracking = Playbook::parse(&without_approval_wait(&generated_playbook(&dir))).unwrap();
+        assert!(!tracking.approval.always_human, "a new Tracking project lands changes as they are handed in");
+        assert_eq!(tracking.gate.commands, pb.gate.commands);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

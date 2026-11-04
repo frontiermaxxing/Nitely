@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { editMode, modeSave, modeValidation, optionsFor, INHERITED_OPTIONS, type ModeOptions } from "./reviewModes.ts";
+import { editMode, kindOf, modeForKind, modeSave, modeValidation, optionsFor, INHERITED_OPTIONS, type ModeOptions } from "./reviewModes.ts";
 
 test("editing a preset makes Custom without mutating preset policy or losing saved custom choices", () => {
   const custom: ModeOptions = { test_depth: null, pre_review: "off", land_batch: null, shared_lanes: true, full_backstop: null, audit_percent: null, periodic: { enabled: true, every_landings: 12, max_delay_seconds: 3600, reviewer: "codex", findings_strategy: "create" }, goal_branches: null, item_review: null, checkpoint: null, goal_plans: null, stalled_reviews: null };
@@ -19,4 +19,14 @@ test("editing a preset makes Custom without mutating preset policy or losing sav
   assert.match(modeValidation({ ...edited.overrides, periodic: { ...edited.overrides.periodic!, every_landings: NaN } })!, /at least one merge/);
   assert.match(modeValidation({ ...edited.overrides, audit_percent: 1 })!, /10%/);
   assert.match(modeValidation({ ...edited.overrides, checkpoint: { items: 0, daily: true } })!, /checkpoint/);
+});
+
+test("switching a project to Tracking and back returns to the Development mode it had", () => {
+  const tracking = modeForKind("tracking", "careful");
+  assert.equal(tracking, "tracking");
+  assert.equal(kindOf(tracking), "tracking");
+  assert.equal(modeForKind("development", "careful"), "careful");
+  // A project that was Tracking when the page opened has no earlier mode: it goes back to Fast.
+  assert.equal(modeForKind("development", null), "fast");
+  assert.equal(kindOf(modeForKind("development", "custom")), "development");
 });

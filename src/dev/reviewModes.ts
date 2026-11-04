@@ -8,6 +8,7 @@ const backstop = { enabled: true, landings: 5, delay_seconds: 1800 };
 const presets: ModePreset[] = [
   { mode: "fast", options: { test_depth: "risk", pre_review: "batched", land_batch: true, shared_lanes: true, full_backstop: backstop, audit_percent: 10, periodic, goal_branches: true, item_review: "off", checkpoint: { items: 10, daily: true }, goal_plans: "asked", stalled_reviews: "fix" } },
   { mode: "careful", options: { test_depth: "risk", pre_review: "individual", land_batch: true, shared_lanes: true, full_backstop: backstop, audit_percent: 10, periodic, goal_branches: true, item_review: "advisory", checkpoint: { items: 5, daily: true }, goal_plans: "asked", stalled_reviews: "fix" } },
+  { mode: "tracking", options: { test_depth: "off", pre_review: "off", land_batch: false, shared_lanes: false, full_backstop: { ...backstop, enabled: false }, audit_percent: 0, periodic, goal_branches: false, item_review: "off", checkpoint: null, goal_plans: "asked", stalled_reviews: "fix" } },
   { mode: "release", options: { test_depth: "full", pre_review: "individual", land_batch: false, shared_lanes: true, full_backstop: { ...backstop, landings: 1 }, audit_percent: 0, periodic, goal_branches: false, item_review: "blocking", checkpoint: null, goal_plans: "approve", stalled_reviews: "ask" } },
 ];
 // The sample project shows the notice a project moved from a retired mode sees until it saves.
@@ -36,6 +37,7 @@ export function effectiveModes(project: string) {
   const fallback: ModeOptions = { ...presets.find((p) => p.mode === "release")!.options, full_backstop: { enabled: false, landings: 5, delay_seconds: 1800 }, audit_percent: 10, goal_branches: false, item_review: "off", checkpoint: null, goal_plans: "approve", stalled_reviews: "ask" };
   const effective = Object.fromEntries(Object.entries(options).map(([key, value]) => [key, value ?? fallback[key as keyof ModeOptions]])) as unknown as ModeOptions;
   // Mirrors project_modes::flags_wait: the sample playbook asks the reviewer one flag (src/dev/rules.ts).
+  if (mode.mode === "tracking") return [{ repo: "Sample project", options: effective, warnings: [], backstop_off: false, tracking: true }];
   const flags_wait = effective.pre_review === "off" ? "Review is off, but the playbook asks the reviewer this review flag: MONEY_OR_RELEASE. With no reviewer to answer it, each change will wait for you to approve it. To go without approving each one, propose a playbook change that drops it, or turn a flag into an [[approval.human_paths]] rule on the paths it is about." : undefined;
   return [{ repo: "Sample project", options: effective, warnings: [], backstop_off: effective.full_backstop?.enabled === false, flags_wait }];
 }
