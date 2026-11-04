@@ -1,4 +1,5 @@
-export type ReviewMode = "fast" | "careful" | "release" | "custom";
+/** The four Development modes, and Tracking: a project whose changes nothing checks (NIT-739). */
+export type ReviewMode = "fast" | "careful" | "release" | "custom" | "tracking";
 export interface BackstopOptions { enabled: boolean; landings: number; delay_seconds: number }
 export interface PeriodicOptions {
   enabled: boolean;
@@ -39,13 +40,24 @@ export interface ProjectReviewMode {
 }
 export const INHERITED_OPTIONS: ModeOptions = { test_depth: null, pre_review: null, land_batch: null, shared_lanes: null, full_backstop: null, audit_percent: null, periodic: null, goal_branches: null, item_review: null, checkpoint: null, goal_plans: null, stalled_reviews: null };
 export interface ModeDraft { mode: ReviewMode; overrides: ModeOptions }
-export const MODE_LABEL: Record<ReviewMode, string> = { fast: "Fast", careful: "Careful", release: "Release", custom: "Custom" };
+export const MODE_LABEL: Record<ReviewMode, string> = { fast: "Fast", careful: "Careful", release: "Release", custom: "Custom", tracking: "Tracking" };
+/** The Development modes, in the order Settings offers them. */
+export const DEVELOPMENT_MODES: ReviewMode[] = ["fast", "careful", "release", "custom"];
 export const MODE_DESCRIPTION: Record<ReviewMode, string> = {
   fast: "Quick checks before landing. Goals land through a goal branch, with one full run and one review per checkpoint.",
   careful: "Quick checks, and every change is reviewed. Goal items are reviewed without blocking.",
   release: "The full suite and a blocking review for every change, landing alone on main.",
   custom: "Choose every setting. Only Custom can turn a safety net off.",
+  tracking: "Nitely coordinates the agents and checks nothing: no tests, no review, no pull request. A change lands as soon as it is handed in.",
 };
+/** Development checks changes before and after they land; Tracking only coordinates the agents. */
+export type ProjectKind = "development" | "tracking";
+export const kindOf = (mode: ReviewMode): ProjectKind => (mode === "tracking" ? "tracking" : "development");
+/** The mode a switch of kind lands on: Tracking, or back to the Development mode last chosen (Fast if none). */
+export function modeForKind(kind: ProjectKind, lastDevelopment: ReviewMode | null): ReviewMode {
+  if (kind === "tracking") return "tracking";
+  return lastDevelopment && lastDevelopment !== "tracking" ? lastDevelopment : "fast";
+}
 /** What the retired modes were called, for the migration notice. */
 export const RETIRED_LABEL: Record<string, string> = { yolo: "YOLO", fast: "Fast", balanced: "Balanced", thorough: "Thorough" };
 export function optionsFor(mode: ReviewMode, presets: ModePreset[], custom: ModeOptions): ModeOptions {
@@ -87,4 +99,4 @@ export interface PeriodicStatus {
   observed_head: string; pending_landings: number; pending_since: number | null;
   last_success_at: number | null; error: string | null; jobs: PeriodicJob[];
 }
-export interface EffectiveRepository { repo: string; options: ModeOptions; warnings: string[]; backstop_off: boolean; flags_wait?: string }
+export interface EffectiveRepository { repo: string; options: ModeOptions; warnings: string[]; backstop_off: boolean; flags_wait?: string; tracking?: boolean }

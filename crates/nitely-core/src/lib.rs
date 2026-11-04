@@ -3,6 +3,8 @@
 //! on it are in nitely-crew.
 
 pub mod accept;
+#[cfg(test)]
+mod tracking_scenario;
 pub mod crew_rules;
 pub mod activity;
 pub mod approval;

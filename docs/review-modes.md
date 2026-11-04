@@ -1,6 +1,11 @@
 # Project review modes
 
-Open a project's **Settings → Review mode**. Pick a preset, inspect the settings it selects, and
+A project is either **Development** or **Tracking**. Development, the default, tests and reviews
+each change before it lands, as one of the presets below sets. Tracking checks nothing: Nitely
+coordinates the agents and lands each change as soon as it is handed in. It suits a project that is
+not code, such as research or writing. [tracking.md](tracking.md) explains it and when to use each.
+
+Open a project's **Settings → Review mode**. Choose Development or Tracking; under Development, pick a preset, inspect the settings it selects, and
 save. Changing any individual setting switches the selection to Custom. The mode applies to the
 project's connected repositories. Required human approvals and release verification stay separate.
 The landing model behind the presets is in [verification-settings.md](verification-settings.md).

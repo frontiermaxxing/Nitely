@@ -54,6 +54,7 @@ pub fn release_ready(db: &Db, repo: &Path, _head: &str) -> Result<()> {
         let branch=Playbook::load(repo)?.integration_branch().to_string();
         let current=git(repo,&["rev-parse",&format!("refs/heads/{branch}")])?;
         optional_policy(db,repo,current.trim())?.context("recorded backstop no longer has its committed policy")?;
+        if h.message==TRACKING_BASELINE { bail!("{}; run the full gate on main before release",TRACKING_BASELINE); }
         if current.trim()!=h.observed_head || h.status != "green" || h.verified_head.as_deref()!=Some(&h.observed_head) {
             bail!("integration backstop is {}: {}; resolve the unverified range before release",h.status,h.message);
         }
@@ -179,8 +180,23 @@ fn optional_policy(db:&Db,repo:&Path,head:&str)->Result<Option<(Playbook,String)
     }
     Ok(None)
 }
+/// A Tracking land is the baseline a switch back to Development checks from: what landed under
+/// Tracking is never checked after the fact (NIT-739). It is recorded as unchecked, not as passed.
+fn tracking_baseline(db:&Db,repo:&Path,project:&str,head:&str)->Result<()> {
+    let id=repo_id(repo)?;
+    let head=git(repo,&["rev-parse",&format!("{head}^{{commit}}")])?.trim().to_string();
+    db.conn.execute("INSERT INTO verification_health(repo,project,observed_head,verified_head,pending_since,checked_at,status,message) VALUES(?1,?2,?3,?3,?4,?4,'green',?5)
+        ON CONFLICT(repo) DO UPDATE SET project=?2,observed_head=?3,verified_head=?3,reduced_count=0,pending_since=?4,checked_at=?4,status='green',message=?5,recovery_issue=NULL",
+        params![id,project,head,now(),TRACKING_BASELINE])?;
+    db.conn.execute("UPDATE verification_landing SET covered=1 WHERE repo=?1",[&id])?;
+    Ok(())
+}
+/// The backstop's message for a head that landed under Tracking.
+pub const TRACKING_BASELINE: &str = "Landed in a Tracking project, unchecked: a switch back to Development checks only what lands after it";
 fn automatic_policy(db:&Db,repo:&Path,head:&str,project:&str)->Result<Option<(Playbook,String)>> {
     let settings=db.project_review_mode(project)?;
+    // Tracking checks nothing after a land, and needs no committed policy for it (NIT-739).
+    if settings.tracking() {return Ok(None);}
     let chosen=settings.mode!=crate::project_modes::Mode::Custom || settings.overrides.full_backstop.is_some();
     let policy=if chosen {Some(committed_policy(repo,head)?)}else{optional_policy(db,repo,head)?};
     let Some((mut pb,mut identity))=policy else{return Ok(None);};
@@ -190,7 +206,9 @@ fn automatic_policy(db:&Db,repo:&Path,head:&str,project:&str)->Result<Option<(Pl
 }
 pub(crate) fn on_landed(db:&mut Db,repo:&Path,issue:&crate::issues::IssueRecord,land:&crate::land::Landed)->Result<()> {
     let Some(head)=&land.head else { return Ok(()); };
-    let Some((pb,_))=automatic_policy(db,repo,head,issue.project.as_deref().unwrap_or(""))? else {return Ok(());};
+    let project=issue.project.as_deref().unwrap_or("");
+    if db.project_review_mode(project)?.tracking() { return tracking_baseline(db,repo,project,head); }
+    let Some((pb,_))=automatic_policy(db,repo,head,project)? else {return Ok(());};
     if !pb.verification.backstop.enabled { return Ok(()); }
     let commands:Vec<_>=pb.gate.commands.iter().chain(pb.gate.steps.iter().map(|s|&s.run)).collect();
     let full=!commands.is_empty() && land.gate.as_ref().is_some_and(|g|g.passed && commands.iter().all(|c|g.results.iter().any(|r|r.command==c.as_str() && r.ok && (!r.skipped || r.output.starts_with("skipped: this tree passed it in lane run ")))));
