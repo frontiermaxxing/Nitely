@@ -341,6 +341,27 @@ pub(crate) fn changed(db: &Db, key: &str) -> Result<bool> {
     Ok(!prior.current(db, &issue)?)
 }
 
+/// The latest review's receipt brought to the plan as it is now: for the review's own writes made
+/// right after it (its follow-up issue), never for a plan that moved while it ran.
+pub(crate) fn restamp(db: &Db, key: &str) -> Result<()> {
+    let row: Option<(i64, Option<String>)> = db
+        .conn
+        .query_row(
+            "SELECT id, scope_record FROM review WHERE issue_key=?1 COLLATE NOCASE AND reviewer!='' ORDER BY ts DESC,id DESC LIMIT 1",
+            [key],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let (Some((id, Some(raw))), Some(issue)) = (row, db.issue(key)?) else { return Ok(()) };
+    let mut receipt: Receipt = serde_json::from_str(&raw)?;
+    receipt.revision = Plan::from_sources(db, &issue, &receipt.leads, false)?.revision();
+    db.conn.execute(
+        "UPDATE review SET scope_revision=?2, scope_record=?3 WHERE id=?1",
+        params![id, receipt.revision, serde_json::to_string(&receipt)?],
+    )?;
+    Ok(())
+}
+
 fn latest(db: &Db, key: &str) -> Result<Option<Receipt>> {
     let raw: Option<Option<String>> = db
         .conn

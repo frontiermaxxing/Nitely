@@ -442,7 +442,14 @@ fn run_batch(db: &mut Db, root: &Path, pb: &Playbook, batch: Vec<Entry>) -> Resu
     // land batch is reviewed now, in one reviewer call, before the gate. One the review sends back
     // or hands to a person leaves the run.
     let mut batch = batch;
-    if batch.iter().any(|e| db.reviews(&e.issue).ok().and_then(|r| r.into_iter().next()).is_some_and(|r| r.verdict == crate::review_batch::PENDING)) {
+    // A passing review whose delivery plan moved since is refreshed here too, before the gate, as
+    // a land by itself refreshes it (NIT-734).
+    let waits = |key: &str| -> bool {
+        db.reviews(key).ok().and_then(|r| r.into_iter().next()).is_some_and(|r| {
+            r.verdict == crate::review_batch::PENDING || (r.verdict == "pass" && !r.reviewer.is_empty() && crate::review_scope::changed(db, key).unwrap_or(false))
+        })
+    };
+    if batch.iter().any(|e| waits(&e.issue)) {
         step(db, run, "reviewing the batch")?;
         let actor = batch.first().map(Entry::actor).unwrap_or(Actor::Agent(land::AUTO_LANDER.into()));
         let reviewed = crate::review_batch::review_pending(db, root, &issues, &actor)?;
@@ -1169,6 +1176,21 @@ reason = "billing"
         let review = f.db.reviews(&a).unwrap().remove(0);
         assert_eq!((review.reviewer.as_str(), review.commit_sha.as_str()), ("fake", sh(&wt, &["rev-parse", "HEAD"]).trim()));
         assert_eq!(f.db.issue(&a).unwrap().unwrap().state, "Approved");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// NIT-734: an approved change whose delivery plan moved while it waited (a linked issue's
+    /// note or edit) is reviewed again before the queue's gate and lands on its approval, instead
+    /// of stopping after the gate and losing the approval.
+    #[test]
+    fn an_approved_change_whose_plan_moved_lands_on_its_approval() {
+        let mut f = fixture();
+        let (a, _) = f.reviewed("A", &[("a.txt", "a")]);
+        f.db.conn.execute(r#"UPDATE review SET approver = 'human', reasons = '["a person approves txt"]', scope_revision = 'stale', scope_record = '{"revision":"stale","interpretation":"","obligation":"","decision":""}' WHERE issue_key = ?1"#, [&a]).unwrap();
+        f.require_and_sign(&[&a]);
+        f.queue_and_run(&[&a]);
+        assert_eq!(f.entry(&a).state, "landed", "{}", f.error(&a));
+        assert_eq!(f.db.reviews(&a).unwrap().len(), 2, "reviewed again before the gate");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
