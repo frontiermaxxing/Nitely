@@ -3,7 +3,7 @@ import { invoke } from "./backend";
 import { open } from "@tauri-apps/plugin-dialog";
 import type { Applied, ConnectPlan, FirstCommitPreview } from "./types";
 import { bytesWords } from "./lanes";
-import { Checkbox } from "./ui/Toggles";
+import { Checkbox, RadioCards } from "./ui/Toggles";
 import { AgentChanges, pendingChanges } from "./Agents";
 
 const PLAYBOOK_SOURCE: Record<string, string> = {
@@ -33,6 +33,8 @@ export function AddProject(props: { onAdded: (projectKey: string) => void; embed
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [made, setMade] = useState<string | null>(null);
+  // A new project is Development (tested and reviewed) unless the person picks Tracking (NIT-739).
+  const [tracking, setTracking] = useState(false);
 
   const load = async (p: string, k: string, n: string) => {
     if (!p.trim()) return;
@@ -86,7 +88,7 @@ export function AddProject(props: { onAdded: (projectKey: string) => void; embed
   const add = async () => {
     setBusy(true);
     try {
-      const result = await invoke<Applied>("connect_apply", { path, key: key || null, name: name || null });
+      const result = await invoke<Applied>("connect_apply", { path, key: key || null, name: name || null, tracking: tracking && !plan?.project_exists });
       setApplied(result);
       setError(null);
       if (result.failed.length === 0) props.onAdded(result.project);
@@ -156,13 +158,24 @@ export function AddProject(props: { onAdded: (projectKey: string) => void; embed
               {plan.project_exists ? "Joins the existing project" : "A new project"} for <span className="mono">{plan.root}</span>.
               Tasks branch from and land on <span className="mono">{plan.integration_branch}</span>.
             </p>
+            {!plan.project_exists && (
+              <RadioCards<"development" | "tracking">
+                aria-label="Kind of project"
+                options={[
+                  { value: "development", label: "Development", why: "Nitely tests and reviews each change before it lands. Start on the Fast review mode and change it in Settings." },
+                  { value: "tracking", label: "Tracking", why: "Nitely coordinates the agents and checks nothing: no tests, no review, no pull request. Each change lands as soon as it is handed in. For research, writing or anything that is not code." },
+                ]}
+                value={tracking ? "tracking" : "development"}
+                onChange={(v) => setTracking(v === "tracking")}
+              />
+            )}
             <p className="small">
               Playbook: {PLAYBOOK_SOURCE[plan.playbook.source] ?? plan.playbook.source}, kept at{" "}
               <span className="mono">{plan.playbook.path}</span>.
             </p>
             {(plan.playbook.source === "generated" || !plan.project_exists) && (
               <p className="small">
-                {plan.playbook.source === "generated" && "Until you approve its review rules, every change waits for you. "}
+                {plan.playbook.source === "generated" && !(tracking && !plan.project_exists) && "Until you approve its review rules, every change waits for you. "}
                 {!plan.project_exists && (
                   <>
                     Nitely files a first issue: an agent sweeps the repo without changing it, seeds the board and proposes those
