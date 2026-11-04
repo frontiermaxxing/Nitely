@@ -92,7 +92,13 @@ pub fn land(db: &mut Db, config: &crate::Config, dir: &str, message: Option<&str
     if files.is_empty() {
         bail!("{wt} has no change against {base}: make the change there first");
     }
-    let mut verdict = crate::verification::small_change(&worktree, &base, "HEAD", limits_for_issue(db, &key)?)?;
+    // A Tracking project checks nothing, so any change takes the quick path: new files, new
+    // directories, binaries and protected paths alike (NIT-739). Its human and blocked paths still apply below.
+    let mut verdict = if crate::project_modes::tracking_issue(db, &key)? {
+        crate::verification::SmallVerdict { small: true, reason: format!("a Tracking project: {} file{}, unchecked.", files.len(), if files.len() == 1 { "" } else { "s" }) }
+    } else {
+        crate::verification::small_change(&worktree, &base, "HEAD", limits_for_issue(db, &key)?)?
+    };
     // A path the person approves, or one blocked, takes the usual path, where they see it.
     if verdict.small {
         let mut needs = pb.human_reasons(&files)?;

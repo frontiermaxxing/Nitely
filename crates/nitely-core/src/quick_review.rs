@@ -100,6 +100,8 @@ pub fn tick_all(db: &mut Db, config: &Config) -> Result<()> {
     for r in &config.repos {
         let Some(project) = &r.project else { continue };
         if db.project_archived(project)? { continue; }
+        // Tracking reviews nothing, including quick changes landed before the switch (NIT-739).
+        if db.project_review_mode(project)?.tracking() { continue; }
         let root = Path::new(&r.root);
         let waiting = waiting(db, project, root)?;
         if due(waiting.len(), waiting.first().map(|w| w.landed_at), now()) {

@@ -10,7 +10,11 @@ use crate::{Db, Actor, playbook::{Playbook, GateResult, LandBatch}, review::Batc
 /// The retired names read as their closest preset, for anything stored before the migration.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="lowercase")]
-pub enum Mode { #[serde(alias="yolo")] Fast, #[serde(alias="balanced")] Careful, #[serde(alias="thorough")] Release, Custom }
+pub enum Mode { #[serde(alias="yolo")] Fast, #[serde(alias="balanced")] Careful, #[serde(alias="thorough")] Release, Custom,
+ /// A project that uses Nitely to coordinate agents, not to check code (NIT-739, docs/tracking.md):
+ /// no gate, no review, no audits and no full suite on main; a change lands as soon as it is handed
+ /// in. Its own variant, so the four Development modes above stay exactly as they were.
+ Tracking }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all="lowercase")]
 pub enum TestDepth { Off, Basic, Risk, Full }
@@ -76,11 +80,12 @@ pub struct ProjectReviewMode {
  /// What that move changed, in the person's words.
  pub migration_changes:Vec<String>,
 }
-pub const PRESETS:[Mode;3]=[Mode::Fast,Mode::Careful,Mode::Release];
+pub const PRESETS:[Mode;4]=[Mode::Fast,Mode::Careful,Mode::Release,Mode::Tracking];
 fn presets()->Vec<Preset> {PRESETS.into_iter().map(|mode|Preset {mode,options:preset(mode)}).collect()}
 /// Every value each preset decides. Every preset keeps the backstop on; only Custom turns it off.
 pub fn preset(mode:Mode)->Options {
  if mode==Mode::Custom {return Options::default();}
+ if mode==Mode::Tracking {return tracking();}
  let release=mode==Mode::Release;
  Options {
   test_depth:Some(if release {TestDepth::Full}else{TestDepth::Risk}),
@@ -98,6 +103,18 @@ pub fn preset(mode:Mode)->Options {
   stalled_reviews:Some(if release {StalledReviews::Ask}else{StalledReviews::Fix}),
   // Release has no small changes: everything goes the usual way.
   quick_limits:(!release).then(QuickLimits::default),
+ }
+}
+/// Tracking (NIT-739): nothing checks a change, before landing or after. Coordination is untouched:
+/// the board, claims, worktrees, notes, asks, triage, crew and goals work as in any mode. Goals land
+/// straight on main, the quick path has no size limit, and plans the person asked for start.
+fn tracking()->Options {
+ Options {
+  test_depth:Some(TestDepth::Off),pre_review:Some(PreReview::Off),land_batch:Some(false),shared_lanes:Some(false),
+  full_backstop:Some(Backstop{enabled:false,landings:5,delay_seconds:1800}),audit_percent:Some(0),
+  periodic:Some(Periodic::default()),goal_branches:Some(false),item_review:Some(ItemReview::Off),checkpoint:None,
+  goal_plans:Some(GoalPlans::Asked),stalled_reviews:Some(StalledReviews::Fix),
+  quick_limits:Some(QuickLimits{lines:u32::MAX,files:u32::MAX}),
  }
 }
 /// What Custom uses for a value it leaves unset: Nitely's own default, never the playbook, whose
@@ -140,6 +157,8 @@ fn migration_changes(from:&str)->Vec<String> {
  lines.iter().map(|l|l.to_string()).collect()
 }
 impl ProjectReviewMode {
+ /// Whether the project only tracks its agents' work (NIT-739): its changes land unchecked.
+ pub fn tracking(&self)->bool {self.mode==Mode::Tracking}
  /// Every value the mode decides: the preset's, or Custom's own over the built-in defaults.
  pub fn options(&self)->Options {if self.mode==Mode::Custom {self.overrides.clone().or(builtin())}else{preset(self.mode)}}
  /// `options`, with whether the repo has build lanes when the mode leaves that to it.
@@ -249,14 +268,26 @@ pub(crate) fn set_for_test(db:&mut Db,project:&str,mode:Mode,o:Options)->Project
 /// Settings shows Fast, and saving any mode makes it explicit. A project that already has a mode
 /// keeps it. Only the paths a person creates projects through call this; `create_project` alone
 /// leaves the mode unset, which reads as Custom with Nitely's defaults.
-pub fn start_on_fast(conn:&Connection,project:&str)->Result<()> {
- conn.execute("INSERT OR IGNORE INTO project_review_mode(project,mode,overrides,revision,explicit,updated_by) SELECT key,'fast','{}',0,0,'new project' FROM project WHERE key=?1 COLLATE NOCASE",[project])?;
+pub fn start_on_fast(conn:&Connection,project:&str)->Result<()> {start_on(conn,project,Mode::Fast)}
+/// `start_on_fast`, on the mode the person picked when they added the project: Fast for
+/// Development, or Tracking (NIT-739). Not yet saved, like Fast: nothing queued depends on it yet.
+pub fn start_on(conn:&Connection,project:&str,mode:Mode)->Result<()> {
+ if !matches!(mode,Mode::Fast|Mode::Tracking) {bail!("a new project starts on Fast (Development) or Tracking");}
+ let name=serde_json::to_value(mode)?.as_str().context("mode name")?.to_owned();
+ conn.execute("INSERT OR IGNORE INTO project_review_mode(project,mode,overrides,revision,explicit,updated_by) SELECT key,?2,'{}',0,0,'new project' FROM project WHERE key=?1 COLLATE NOCASE",params![project,name])?;
  Ok(())
 }
 pub fn for_issue(db:&Db,key:&str)->Result<Option<ProjectReviewMode>> {
  db.issue(key)?.context("mode issue disappeared")?.project.as_deref().map(|p|db.project_review_mode(p)).transpose()
 }
 pub fn authority_for_issue(db:&Db,key:&str)->Result<Option<String>> {for_issue(db,key)?.map(|s|s.authority()).transpose().map(Option::flatten)}
+/// Whether the issue's project is a Tracking project (NIT-739).
+pub fn tracking_issue(db:&Db,key:&str)->Result<bool> {Ok(for_issue(db,key)?.is_some_and(|s|s.tracking()))}
+/// Whether the repository's project is a Tracking project, read-only and false when it cannot be
+/// read: what the agent instructions served at session start go by.
+pub fn tracking_project(project:&str)->bool {
+ crate::Db::open_read_only(&crate::paths::db_path()).and_then(|db|db.project_review_mode(project)).is_ok_and(|m|m.tracking())
+}
 pub fn tests_off(db:&Db,key:&str)->Result<bool> {Ok(for_issue(db,key)?.is_some_and(|s|s.options().test_depth==Some(TestDepth::Off)))}
 pub fn review_off(db:&Db,key:&str)->Result<bool> {Ok(for_issue(db,key)?.is_some_and(|s|s.options().pre_review==Some(PreReview::Off)))}
 /// Writes the mode's decisions over the playbook's policy keys.
@@ -271,6 +302,14 @@ fn apply_options(o:&Options,pb:&mut Playbook) {
 pub fn apply_project(db:&Db,project:&str,pb:&mut Playbook)->Result<()> {
  let settings=db.project_review_mode(project)?;pb.mode_authority=settings.authority()?;pb.mode_project=Some(settings.project.clone());
  apply_options(&settings.options(),pb);
+ // In Tracking a change lands as soon as it is handed in: Nitely lands it in the same submit, or
+ // as soon as the person approves one their own rules send them (NIT-739).
+ // The review's own questions (flags, a cross-vendor reviewer) have nobody to answer them there, so
+ // they ask nothing; the person's human and blocked paths stay (NIT-739).
+ if settings.tracking() {
+  if pb.land.by==crate::playbook::LandBy::Author {pb.land.by=crate::playbook::LandBy::Auto;}
+  pb.review.flags.clear();pb.review.require_cross_vendor=false;
+ }
  Ok(())
 }
 /// The retired playbook policy keys this playbook still sets (NIT-499): the review mode decides
@@ -353,6 +392,8 @@ pub fn looser_since(db:&Db,key:&str,past:&Option<String>)->Result<Option<String>
 
 #[derive(Debug,Clone,Serialize)]
 pub struct EffectiveRepository {pub repo:String,pub options:Options,pub warnings:Vec<String>,
+ /// The project is a Tracking project: nothing checks its changes (NIT-739).
+ pub tracking:bool,
  /// Nothing runs the full suite on main: only Custom can choose this, and the app shows it in red.
  pub backstop_off:bool,
  /// With review off, why each change will wait for the person: the playbook's review flags, which
@@ -383,10 +424,12 @@ pub fn effective_repositories(db:&Db,config:&crate::Config,project:&str)->Result
    if committed.as_ref().map_or(true,|p|p.verification.basic.is_empty()) {warnings.push("Basic commands are not configured in committed integration policy; automatic verification falls back to Full.".into());}
   }
   if options.test_depth==Some(TestDepth::Risk) {warnings.push("Risk-based verification falls back to Full for missing mappings, protected changes or an unhealthy enabled backstop.".into());}
-  if options.full_backstop.as_ref().is_some_and(|b|!b.enabled) {warnings.push("The full suite on main is off: nothing checks main after reduced checks land.".into());}
-  let backstop_off=options.full_backstop.as_ref().is_some_and(|b|!b.enabled);
-  let flags_wait=flags_wait(&options,&pb);
-  Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings,backstop_off,flags_wait})
+  // Tracking checks nothing by design: no warning, and nothing shown in red (NIT-739).
+  let backstop_off=!settings.tracking() && options.full_backstop.as_ref().is_some_and(|b|!b.enabled);
+  if backstop_off {warnings.push("The full suite on main is off: nothing checks main after reduced checks land.".into());}
+  // In Tracking nobody answers review flags, and nothing waits on them either (NIT-739).
+  let flags_wait=if settings.tracking() {None} else {flags_wait(&options,&pb)};
+  Ok(EffectiveRepository{repo:repo.name.clone(),options,warnings,tracking:settings.tracking(),backstop_off,flags_wait})
  }).collect()
 }
 

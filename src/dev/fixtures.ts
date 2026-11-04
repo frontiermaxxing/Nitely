@@ -10,7 +10,7 @@
 import * as phoneFixture from "./phone";
 import * as rulesFixture from "./rules";
 import { reviewMode, saveReviewMode, periodicReviews, retryPeriodic, effectiveModes, landsPipeline, landsDryRun } from "./reviewModes";
-import type { ModeOptions, ReviewMode } from "../reviewModes";
+import { INHERITED_OPTIONS, type ModeOptions, type ReviewMode } from "../reviewModes";
 import { performanceFixture, configurePerformance, clearPerformance, paceFixture } from "./performance";
 import { leaderboardBoardFixture, leaderboardDeleteFixture, leaderboardSendFixture, leaderboardFixture, leaderboardJoinFixture, leaderboardReportFixture, leaderboardStatusFixture } from "./leaderboard";
 import type {
@@ -1902,6 +1902,7 @@ function connectPlan(args: Record<string, unknown>): ConnectPlan {
     project_exists: world.projects.some((p) => p.key === key),
     integration_branch: "main",
     first_commit_needed: madeRepos.has(path) && !committedRepos.has(path),
+    tracking: false,
     playbook: {
       source: "generated",
       path: `%APPDATA%\\nitely\\playbooks\\${key.toLowerCase()}.toml`,
@@ -1919,7 +1920,9 @@ function connectPlan(args: Record<string, unknown>): ConnectPlan {
 function connectApply(args: Record<string, unknown>): Applied {
   const plan = connectPlan(args);
   if (!world.projects.some((p) => p.key === plan.project_key)) world.projects.push({ key: plan.project_key, name: plan.project_name, open_issues: 0 });
-  const done = [`created project ${plan.project_key} (${plan.project_name}) on the Fast review mode`, `watching ${plan.root} for project ${plan.project_key}`];
+  const tracking = args.tracking === true && !plan.project_exists;
+  if (tracking) saveReviewMode(plan.project_key, "tracking", INHERITED_OPTIONS, 0);
+  const done = [`created project ${plan.project_key} (${plan.project_name}) ${tracking ? "as a Tracking project: changes land with no tests and no review" : "on the Fast review mode"}`, `watching ${plan.root} for project ${plan.project_key}`];
   if (!plan.project_exists) done.push(`filed ${plan.project_key}-1: an agent sweeps the repo, seeds the board and drafts the review rules`);
   return { project: plan.project_key, repo: plan.root, done, failed: [] };
 }

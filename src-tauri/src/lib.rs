@@ -631,10 +631,12 @@ async fn first_commit(path: String, gitignore: Option<Vec<String>>, include: Vec
 /// Adds the repo. The plan is recomputed here rather than taken from the page, so what is written
 /// is what Nitely decides now.
 #[tauri::command]
-async fn connect_apply(path: String, key: Option<String>, name: Option<String>) -> Result<nitely_core::connect::Applied, String> {
+async fn connect_apply(path: String, key: Option<String>, name: Option<String>, tracking: Option<bool>) -> Result<nitely_core::connect::Applied, String> {
     let mut config = Config::load().map_err(err)?;
     let mut db = db()?;
-    let plan = nitely_core::connect::plan(&db, &config, &path, key.as_deref(), name.as_deref()).map_err(err)?;
+    let mut plan = nitely_core::connect::plan(&db, &config, &path, key.as_deref(), name.as_deref()).map_err(err)?;
+    // Development (Fast) unless the person chose Tracking for the new project (NIT-739).
+    plan.tracking = tracking.unwrap_or(false);
     nitely_core::connect::apply(&mut db, &mut config, &plan, &ME).map_err(err)
 }
 
