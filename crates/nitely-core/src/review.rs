@@ -302,6 +302,11 @@ A P0 or P1 must name a concrete failure: the inputs or state that lead to a wron
 file and line that cause it. A risk with no such failure (\"what if\", a missing guard nothing reaches) is P2 at most, however \
 serious it sounds.";
 
+/// Each blocking finding says whether it is one case of a broader class (NIT-735), from the first
+/// round: a defect reached by several paths shows as one class across rounds, not as a new finding
+/// for each path, and the shared-cause question once rounds stop converging starts from it.
+const CLASS_RULE: &str = "End the line of each P0 or P1 with ` Class: <the broader class it is one case of>` when other inputs or paths would reach the same defect (for example `any two conversations with the same subject`), naming what they share, or ` Class: none` when it stands alone.";
+
 /// What a re-review may hold the change for (NIT-704): a P0 anywhere, or a P1 whose cause, or what
 /// made it reachable, is a line changed since the reviewed commit, cited as file:line. The parser
 /// files anything else as a P2 (`changed_since`), so rounds converge on what each one changed.
@@ -597,7 +602,7 @@ anything. Start each finding with the key of the change it is about.\n{changes}\
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
         }
-        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] title: file, symbol: what goes wrong and when\n{SEVERITIES}\n{BASE_RULES}\n\n"));
+        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] title: file, symbol: what goes wrong and when\n{SEVERITIES}\n{CLASS_RULE}\n{BASE_RULES}\n\n"));
         p.push_str(&format!("Then end your reply with exactly these {} lines:\nVERDICT: <findings or clean>\n", 1 + self.flags.len()));
         for f in &self.flags {
             p.push_str(&format!("{}: <yes or no>\n", f.name));
@@ -786,7 +791,7 @@ it was reviewed, to see what changed since. {rule}\n",
         if !self.focus.trim().is_empty() {
             p.push_str(&format!("\n{}\n", self.focus.trim()));
         }
-        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] CHANGE <k>: title: file, symbol: what goes wrong and when\n{SEVERITIES}\n{BASE_RULES} In a batch, `- [BASE] CHANGE <k>: ...`.\n\n"));
+        p.push_str(&format!("\nReport each defect on its own line as:\n- [P0] CHANGE <k>: title: file, symbol: what goes wrong and when\n{SEVERITIES}\n{CLASS_RULE}\n{BASE_RULES} In a batch, `- [BASE] CHANGE <k>: ...`.\n\n"));
         p.push_str("Then end your reply with these lines for each change, change 1's first:\nVERDICT <k>: <findings or clean>\n");
         for f in &self.flags {
             p.push_str(&format!("{} <k>: <yes or no>\n", f.name));
@@ -2090,6 +2095,7 @@ PREVIOUS 2: open crates/nitely-cli/src/lanes.rs:139 `out.push_str(&\"\\\\\".repe
         assert!(p.contains("`git diff c0 hNIT-1`") && p.contains("1.1. [P2] Edge: shared.rs:2, the empty line"), "{p}");
         assert!(p.contains("- [P2] Slow: shared.rs (accepted: fine for now)") && p.contains("## CHANGE 2: NIT-2"), "{p}");
         assert!(p.contains(SEVERITIES) && rules.prompt("main", None).contains(SEVERITIES));
+        assert!(p.contains(CLASS_RULE) && rules.prompt("main", None).contains(CLASS_RULE));
         assert!(p.contains("`PREVIOUS <k>.<n>: fixed`") && p.contains("VERDICT <k>: <findings or clean>\nMONEY_OR_RELEASE <k>: <yes or no>"), "{p}");
 
         let reply = "Two small changes.\n\

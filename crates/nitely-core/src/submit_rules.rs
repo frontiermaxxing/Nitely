@@ -1,12 +1,12 @@
 //! What submit decides, as plain functions over plain data (NIT-525): where a submitted change
 //! goes and what its agent is told, what still blocks it once the person's accepted findings are
-//! set aside, what a fresh review after stalled rounds settles, whether an earlier review's pass
+//! set aside, whether an earlier review's pass
 //! covers it, whether the agent's solution text describes what was gated, and whether a submit
 //! job's process is gone. submit.rs and submit_job.rs gather the facts with git, the reviewer and
 //! the database and do what these say; their tests need none of them.
 
 use crate::project_modes::StalledReviews;
-use crate::review::{Finding, Review};
+use crate::review::Finding;
 
 /// What a submit came to, for where its issue goes next.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
@@ -250,30 +250,6 @@ pub fn accepted_only(findings: &[Finding], accepted: &[String]) -> bool {
     blocking(findings, accepted).is_empty()
 }
 
-/// After the rounds stalled (`why`), a fresh review that has not seen them looked: it keeps the
-/// earlier review's interactions with other changes (no reviewer's opinion: only a landing ends
-/// one), asks for changes when a P0 or P1 remains, and settles what goes to the person. None: it
-/// passes, so nothing stalls; else why it still stalls, with how many findings the fresh review still finds open.
-pub fn settle_fresh(earlier: &Review, fresh: &mut Review, accepted: &[String], why: &str) -> Option<String> {
-    for f in earlier.findings.iter().filter(|f| crate::review_batch::is_interaction(&f.text)) {
-        if !fresh.findings.iter().any(|x| x.text == f.text) {
-            fresh.findings.push(f.clone());
-        }
-    }
-    if fresh.findings.iter().any(|f| f.priority <= 1) {
-        fresh.verdict = "changes".into();
-    }
-    let still = blocking(&fresh.findings, accepted);
-    if still.is_empty() {
-        return None;
-    }
-    // The rounds' reason without its count (or, from an older round, its pasted findings), then
-    // how many the fresh review still finds open: the findings are on the review (NIT-633).
-    let reason = why.split(". Open:").next().unwrap_or(why).split("; ").next().unwrap_or(why);
-    let open: Vec<crate::review::Finding> = fresh.findings.iter().filter(|f| f.priority <= 1 && !accepted.contains(&f.text)).cloned().collect();
-    Some(format!("{reason}; a fresh review without the earlier rounds still finds {}", crate::submit::open_count(&open)))
-}
-
 /// The issue's last review by a reviewer, as reuse sees it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LastReview<'a> {
@@ -441,43 +417,13 @@ mod tests {
         serde_json::from_value(serde_json::json!({ "priority": priority, "text": text })).unwrap()
     }
 
-    fn review(findings: Vec<Finding>) -> Review {
-        serde_json::from_value(serde_json::json!({
-            "reviewer": "codex", "verdict": "pass", "findings": findings, "flagged": [], "summary": "", "seconds": 0
-        }))
-        .unwrap()
-    }
-
-    /// What `the_fresh_review_is_told_what_the_person_accepted_so_a_reworded_repeat_does_not_reach_them`,
-    /// `a_finding_only_the_rounds_carry_is_checked_fresh_before_it_goes_to_a_person` and
-    /// `a_finding_the_person_accepted_does_not_block_the_land` settle with real reviewer runs.
+    /// What `a_finding_the_person_accepted_does_not_block_the_land` settles with real reviewer runs.
     #[test]
-    fn accepted_findings_block_nothing_and_a_fresh_review_settles_stalled_rounds() {
+    fn accepted_findings_block_nothing() {
         let accepted = vec!["Drops the last row".to_string()];
         assert!(accepted_only(&[finding(1, "Drops the last row"), finding(2, "Naming")], &accepted));
         assert!(!accepted_only(&[finding(1, "Drops the last row"), finding(0, "Leaks the token")], &accepted));
         assert_eq!(blocking(&[finding(0, "Leaks the token"), finding(3, "Style")], &[]), ["[P0] Leaks the token"]);
-
-        let why = "Three rounds without converging. Open: [P1] Drops the last row";
-        // The fresh review finds nothing: it passes.
-        let mut fresh = review(vec![]);
-        assert_eq!(settle_fresh(&review(vec![finding(1, "Drops the last row")]), &mut fresh, &[], why), None);
-        assert_eq!(fresh.verdict, "pass");
-        // It finds only what the person accepted: it asks for changes, and nothing stalls.
-        let mut fresh = review(vec![finding(1, "Drops the last row")]);
-        assert_eq!(settle_fresh(&review(vec![]), &mut fresh, &accepted, why), None);
-        assert_eq!(fresh.verdict, "changes");
-        // It still finds something: that goes to the person, after the rounds' reason.
-        let mut fresh = review(vec![finding(1, "Leaks the token")]);
-        assert_eq!(
-            settle_fresh(&review(vec![]), &mut fresh, &accepted, why).as_deref(),
-            Some("Three rounds without converging; a fresh review without the earlier rounds still finds 1 open finding (1 P1)")
-        );
-        // An interaction with another change is kept, whatever the fresh review says.
-        let interaction = review(vec![finding(1, "Interacts with APP-2, reviewed in the same batch: both edit the same table")]);
-        let mut fresh = review(vec![]);
-        assert!(settle_fresh(&interaction, &mut fresh, &[], why).is_some());
-        assert_eq!(fresh.findings.len(), 1);
     }
 
     /// The reuse rule `a_patch_that_passed_is_not_reviewed_again_and_a_rewritten_one_starts_from_the_pass`

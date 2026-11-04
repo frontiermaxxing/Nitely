@@ -141,10 +141,14 @@ only they can do. And the rules themselves: the playbook changes through
   hears it as a notice on its next nitely call or from `get_triage`. A reply that says the question
   is on the closed list becomes an ask in the Inbox, with what triage found, and the agent is told
   the ask's id. `ask` stays for the closed list, and its description says so.
-- **A stalled review is checked fresh first.** When submit finds the rounds not converging, it runs
-  the review once more without the earlier rounds. If that review finds no P0 or P1, the carried
-  findings were stale: the fresh review is recorded (note `fresh, without the earlier rounds`) and
-  the change goes on. If it still finds some, those are what the person is asked to decide.
+- **A stalled review asks for a shared cause.** Every reviewer names, for each P0 or P1, the
+  broader class it is one case of (or none). When submit finds the rounds not converging, an agent
+  of the same reviewer that has not worked on the change gets every round's blocking findings side
+  by side, grouped by file and symbol, and the diff, and answers whether they share one cause the
+  fixes so far have not addressed: either none, or the cause with two cases no round reported, the
+  fix that removes it and a test that covers the class. The worker is told the answer with the
+  stall, once per run of stalled rounds (NIT-735). It replaced a fresh review without the earlier
+  rounds, which saw one round at a time and so could not see the pattern either.
 - **A land conflict already goes back to its worker:** an agent's own land returns the conflict to
   it; an automatic land and the land queue move the issue to In Progress with a note saying what
   it conflicts with; Crew hands the issue to a worker (NIT-222).
