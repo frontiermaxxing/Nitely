@@ -813,6 +813,65 @@ impl Db {
     }
 }
 
+/// What a stopped gate says (NIT-732), at the head of its result.
+pub const GATE_STOPPED: &str = "Stopped: the review that ran with it asked for changes, so its result would be thrown away";
+
+/// A submit's own gate, which its review may stop once the review asks for changes (NIT-732):
+/// taken out of the queue while it waits, or its command stopped while it runs, so the lane goes
+/// to other work. Only the gate run inside `watch`, on that thread, is stopped; nothing else
+/// waits on a submit's gate.
+#[derive(Clone, Default)]
+pub struct GateStop(std::sync::Arc<(std::sync::atomic::AtomicI64, std::sync::atomic::AtomicBool)>);
+
+thread_local! {
+    static WATCHED: std::cell::RefCell<Option<GateStop>> = const { std::cell::RefCell::new(None) };
+}
+
+impl GateStop {
+    /// Runs `f` (the gate) with this the gate it may stop.
+    pub fn watch<T>(&self, f: impl FnOnce() -> T) -> T {
+        WATCHED.with(|w| *w.borrow_mut() = Some(self.clone()));
+        let out = f();
+        WATCHED.with(|w| *w.borrow_mut() = None);
+        out
+    }
+
+    /// Stops the gate: one still queued leaves the queue now, one running ends at its next look.
+    pub fn stop(&self, db: &Db) -> Result<()> {
+        use std::sync::atomic::Ordering::SeqCst;
+        self.0 .1.store(true, SeqCst);
+        let id = self.0 .0.load(SeqCst);
+        if id != 0 {
+            take_out(db, id)?;
+        }
+        Ok(())
+    }
+
+    pub fn stopped(&self) -> bool {
+        self.0 .1.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+/// The gate stop of this thread's gate, when it has been stopped.
+fn stopped_here() -> bool {
+    WATCHED.with(|w| w.borrow().as_ref().is_some_and(GateStop::stopped))
+}
+
+/// Run `id`, queued, joins this thread's gate stop: taken out at once when it was stopped already.
+fn watched_run(db: &Db, id: i64) -> Result<()> {
+    let Some(stop) = WATCHED.with(|w| w.borrow().clone()) else { return Ok(()) };
+    stop.0 .0.store(id, std::sync::atomic::Ordering::SeqCst);
+    if stop.stopped() {
+        take_out(db, id)?;
+    }
+    Ok(())
+}
+
+fn take_out(db: &Db, id: i64) -> Result<()> {
+    db.conn.execute("UPDATE lane_run SET state = 'abandoned', ended_at = ?2, error = ?3 WHERE id = ?1 AND state = 'queued'", params![id, now(), GATE_STOPPED])?;
+    Ok(())
+}
+
 /// Takes a queued run out of the queue (`nitely lanes cancel`): for a request whose requester will
 /// not come for it, so the ones behind it go on. A running one is ended by stopping what asked for
 /// it, which the refusal names.
@@ -1036,6 +1095,7 @@ fn run_with(db: &Db, repo_root: &Path, pb: &Playbook, req: &Request, actor: &Act
         ],
     )?;
     let id = db.conn.last_insert_rowid();
+    watched_run(db, id)?;
     // A made snapshot exists only as an object: a ref keeps git's gc from taking it while it waits.
     if req.snapshot.made {
         git(repo_root, &["update-ref", &format!("refs/nitely/runs/{id}"), &req.snapshot.commit]).ok();
@@ -1329,9 +1389,14 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
             let mut failures: Vec<String> = Vec::new();
             loop {
                 let from = std::fs::metadata(log).map(|m| m.len()).unwrap_or(0);
-                let ended = run_logged(&command, lane, log, limit, share, Some(temp))?;
+                let ended = if stopped_here() { Ended { code: None, timed_out: false, peak: None } } else { run_logged(&command, lane, log, limit, share, Some(temp))? };
                 let (code, timed_out) = (ended.code, ended.timed_out);
                 peak = peak.max(ended.peak);
+                if stopped_here() {
+                    let seconds = started.elapsed().as_secs();
+                    results.push(playbook::CommandResult { step: Some(template.clone()), command: command.clone(), ok: false, seconds, output: GATE_STOPPED.to_string(), skipped: false, timed_out: false });
+                    return Ok(Ended { code: None, timed_out: false, peak });
+                }
                 let text = log_text_since(log, from);
                 let output = playbook::tail(&text);
                 let seconds = started.elapsed().as_secs();
@@ -1371,6 +1436,8 @@ fn gate_on(db: &Db, repo_root: &Path, pb: &Playbook, worktree: &Path, issue: Opt
     };
     if yolo_skipped {
         db.conn.execute("UPDATE lane_run SET state = 'abandoned', exit_code = NULL, error = ?2 WHERE id = ?1", params![run.id, crate::project_yolo::NOTE])?;
+    } else if stopped_here() {
+        db.conn.execute("UPDATE lane_run SET state = 'abandoned', exit_code = NULL, error = ?2 WHERE id = ?1", params![run.id, GATE_STOPPED])?;
     }
     if let Some(why) = &run.error {
         // The setup's own output too, so the caller sees why it failed.
@@ -3734,6 +3801,16 @@ fn run_logged(command: &str, dir: &Path, log: &Path, limit: Duration, share: Sha
             break (status.code(), false, over_memory());
         }
         let oom = over_memory();
+        if stopped_here() {
+            if let Some(g) = &guard {
+                g.stop();
+            }
+            stop_tree(child.id());
+            child.kill().ok();
+            child.wait().ok();
+            writeln!(file, "{GATE_STOPPED}").ok();
+            break (None, false, false);
+        }
         if oom || started.elapsed() > limit {
             if let Some(g) = &guard {
                 g.stop();
