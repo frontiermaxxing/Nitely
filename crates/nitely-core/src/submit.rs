@@ -302,6 +302,11 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
                         if let Some(r) = &out.review {
                             file_minor_findings(db, &issue.key, r, actor)?;
                         }
+                        // Its findings are the worker's, whatever state a resubmit started from.
+                        let now = db.issue(&issue.key)?.map(|i| (i.state, i.origin)).unwrap_or_default();
+                        if now.0 != "In Progress" && now.1 == "nitely" {
+                            out.state = db.move_issue(&issue.key, "In Progress", None, None, actor)?.state;
+                        }
                     }
                 }
                 Ok(None) => {}
@@ -2328,12 +2333,15 @@ exit 0
         sh(&f.repo, &["add", "."]);
         sh(&f.repo, &["commit", "-qm", "a slow gate in a lane"]);
         let (issue, wt) = f.committed("Together", "together.txt");
+        // A resubmit: the issue is with the reviewer when its review asks for changes.
+        f.db.move_issue(&issue.key, "In Review", None, None, &Actor::Human).unwrap();
         let started = std::time::Instant::now();
         let s = f.submit(&wt, true).unwrap();
         assert!(started.elapsed().as_secs() < 25, "the gate ran to its end: {:?}", started.elapsed());
         assert!(!s.gate.passed && s.gate.results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED)), "{s:?}");
         assert!(s.review.as_ref().is_some_and(|r| r.verdict == "changes"), "{s:?}");
         assert_eq!(s.state, "In Progress");
+        assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "In Progress", "the findings go back to the worker");
         assert_eq!(f.db.reviews(&issue.key).unwrap()[0].verdict, "changes");
         let (state, error): (String, String) = f.db.conn.query_row("SELECT state, error FROM lane_run ORDER BY id DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!((state.as_str(), error.as_str()), ("abandoned", crate::lanes::GATE_STOPPED));
