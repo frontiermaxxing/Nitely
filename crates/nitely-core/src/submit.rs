@@ -145,6 +145,9 @@ pub fn refuse_outside_repo(issue: &IssueRecord, has_commits: bool) -> Result<()>
     Ok(())
 }
 
+/// What a Tracking project's submit says on its issue (NIT-739).
+pub const TRACKING_NOTE: &str = "Tracking project: no gate and no review ran";
+
 pub fn submit(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, actor: &Actor) -> Result<Submitted> {
     submit_as(db, config, opts, false, actor)
 }
@@ -184,6 +187,9 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         refuse_outside_repo(&issue, own && ahead.trim() != "0")?;
     }
     crate::project_modes::apply_issue(db, &key, &mut pb)?;
+    // A Tracking project checks nothing (NIT-739): no classification, gate, review or pull request.
+    // What is handed in lands now; the person's approval and blocked paths still apply.
+    let tracking = crate::project_modes::tracking_issue(db, &key)?;
     let _telemetry = crate::performance_attribution::Scope::new(db, crate::performance_attribution::Context { project: issue.project.clone(), issue: Some(key.clone()), ..Default::default() });
     if rebase_in_progress(&worktree) {
         bail!("a rebase is in progress in {}", worktree.display());
@@ -221,31 +227,33 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         .collect();
     pb.approval.check_blocked(&files)?;
     crate::private_terms::check(issue.project.as_deref(), &worktree, &since)?;
-    let mut verification = crate::verification::assess_and_record(db, &worktree, &base, &checked_head, &issue,actor)?;
+    let mut verification = if tracking { None } else { Some(crate::verification::assess_and_record(db, &worktree, &base, &checked_head, &issue,actor)?) };
     // The review starts as the gate is queued, on the commit it gates (NIT-699), so a round costs
     // the longer of the two and not their sum.
     // A review that asks for changes stops the gate it runs with, still queued or running: its
     // result would be thrown away, and the lane goes to other work (NIT-732).
     let stop = crate::lanes::GateStop::default();
-    let mut early = start_early_review(db, &root, &issue, &worktree, &branch, &since, &checked_head, &files, quick || opts.skip_review, &stop, actor)?;
+    let mut early = start_early_review(db, &root, &issue, &worktree, &branch, &since, &checked_head, &files, quick || opts.skip_review || tracking, &stop, actor)?;
     let early_started = early.is_some();
     let gate = match stop.watch(|| playbook::run_automatic_gate(db, &root, &worktree, &[&issue.key], actor, crate::lanes::Kind::Gate)) {
         Err(_) if stop.stopped() => stopped_gate(&checked_head),
         gate => gate?,
     };
-    if gate.skipped.is_some() {
-        verification.enforcement="Project mode: automatic tests did not run; classification is advice only.".into();
-        verification.commands.clear();
-    } else if !verification.shadow && gate.plan.is_none() {
-        verification.enforcement="Full configured gate used: reduced checks were unavailable or the post-merge baseline was missing, overdue or unhealthy.".into();
-        verification.commands.clear();
+    if let Some(verification) = verification.as_mut() {
+        if gate.skipped.is_some() {
+            verification.enforcement="Project mode: automatic tests did not run; classification is advice only.".into();
+            verification.commands.clear();
+        } else if !verification.shadow && gate.plan.is_none() {
+            verification.enforcement="Full configured gate used: reduced checks were unavailable or the post-merge baseline was missing, overdue or unhealthy.".into();
+            verification.commands.clear();
+        }
+        crate::verification::record(db,&issue,verification,actor)?;
     }
-    crate::verification::record(db,&issue,&verification,actor)?;
     if let Some(note)=crate::verification::checks_note(&gate) {db.add_note(&issue.key,&note,"verification_checks",actor)?;}
     let submitted_patch = patch_id_range(&worktree, &since, &gate.commit)?;
     let gate_ran_on_it = git(&worktree, &["rev-parse", "--verify", &format!("{}^{{commit}}", gate.commit)])?.trim() == handed_in;
     let mut out = Submitted {
-        verification: Some(verification),
+        verification,
         issue: issue.key.clone(),
         branch: branch.clone(),
         base: base.clone(),
@@ -322,7 +330,10 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     pb.approval.check_blocked(&files)?;
     out.reasons = pb.human_reasons(&files)?;
     // A blocking item review is never skipped, YOLO or not (NIT-597 review, round 2).
-    if quick {
+    // Tracking: a quick change is any other change there, with no review after landing either.
+    if tracking && crate::project_yolo::enabled_for_issue(db, &issue.key)? {
+        out.yolo = true;
+    } else if quick {
         if crate::quick::limits_for_issue(db, &issue.key)?.is_none() {
             bail!("the quick path is off under the project's review mode; submit it for review");
         }
@@ -455,8 +466,8 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     if let Some(closes) = crate::mirror::closes_line(db, &issue.key, &root) {
         body = format!("{closes}\n\n{body}");
     }
-    // A quick change has no pull request: land pushes the integration branch.
-    if !local_only && !out.quick {
+    // A quick change has no pull request: land pushes the integration branch. Nor does a Tracking one.
+    if !local_only && !out.quick && !tracking {
         match push(&pb, &worktree, &branch) {
             Ok(()) => out.pushed = true,
             Err(e) => out.pr_error = Some(format!("push failed: {e:#}")),
@@ -473,6 +484,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         (Some(url), _) => format!("Pull request: {url}"),
         (None, Some(e)) => format!("No pull request: {e}"),
         _ if no_origin => "Not pushed: the repo has no origin remote, so the change stays in it.".into(),
+        _ if tracking && !local_only => "No pull request: a Tracking project lands on the integration branch directly.".into(),
         _ => "Not pushed (local only).".into(),
     };
     let by = |r: &Review| match (r.batched_with(), &r.reused) {
@@ -489,6 +501,8 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         (None, _) if out.review_batched => "Gate passed; its review waits for its land queue batch, which reviews what waits together, once, before the batch's gate".into(),
         (None, "human") if out.quick => format!("{}; waits for a human under the remaining approval rules", crate::quick::NOTE),
         (None, _) if out.quick => format!("{}; ready to land", crate::quick::NOTE),
+        (None, "human") if tracking => format!("{}; waits for a human under the remaining approval rules", TRACKING_NOTE),
+        (None, _) if tracking => TRACKING_NOTE.to_string(),
         (None, "human") if out.yolo => format!("{}; waits for a human under the remaining approval rules", crate::project_yolo::NOTE),
         (None, _) if out.yolo => format!("{}; unverified and ready to land", crate::project_yolo::NOTE),
         (None, "human") if out.review_disabled => format!("{}; waits for a human under the remaining approval rules", crate::review::DISABLED_NOTE),
@@ -508,7 +522,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     // The full description is on the pull request and in the app's review section.
     db.add_note(&issue.key, &format!("{outcome}. {pr_line}"), "submit", actor)?;
 
-    let push_failed = !local_only && !out.quick && !out.pushed;
+    let push_failed = !local_only && !out.quick && !tracking && !out.pushed;
     let by_nitely = pb.land.by.by_nitely();
     // An open P0 covers a part that must not land without the person, whatever the mode says.
     let open_p0 = match &out.review {
