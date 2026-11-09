@@ -1089,7 +1089,9 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
     // Submodules that land with the repo: their work must be what the branch points at, then each
     // is rebased onto its own integration branch first (docs/playbooks.md).
     crate::submodules::check_pointers(pb, &worktree)?;
-    let moving = crate::submodules::rebase(root, pb, &worktree, &base)?;
+    // An item into a goal branch moves no pointer of its own (one that does lands here alone,
+    // NIT-746): a pointer it differs by came from main, a rollback too, and must stay as main has it.
+    let moving = if goal.is_some() { Vec::new() } else { crate::submodules::rebase(root, pb, &worktree, &base)? };
     if checkpoint && git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Merging {base} into the checkpoint {branch}"))?;
         if git(&worktree, &["merge", "--no-ff", "--no-edit", "-m", &format!("Merge {base} into {branch}"), &base]).is_err() {

@@ -1146,6 +1146,8 @@ pub(crate) fn bisect(db: &mut Db, root: &Path, pb: &Playbook, key: &str, failed:
     let mut unsettled: Option<String> = None;
     let gate_at = |db: &mut Db, i: usize, why: &str, gates: &mut i64| -> Result<GateResult> {
         git(&wt, &["checkout", "--quiet", "--force", "--detach", &items[i - 1].to])?;
+        // Each revision with the submodules it points at: main's merges may have moved them.
+        submodules_at_head(root, pb, &wt)?;
         db.log_event(actor, Some(key), None, "status", &format!("{why}: the full gate at {} ({i} of {k} items)", items[i - 1].issue))?;
         let g = playbook::run_gate_as(db, root, &wt, Some(key), actor, crate::lanes::Kind::Land)?;
         *gates += 1;
@@ -1922,10 +1924,17 @@ test_patterns = [\"src/**/*.test.ts\"]
     fn a_goal_item_that_moves_no_submodule_pointer_lands_on_the_goal_branch() {
         let mut f = submodule_fixture("nitely-goal-sub-item");
         f.item("A", "a.txt");
-        // Main moves the pointer by itself meanwhile: the goal branch still holds the old one.
+        // Main moves the pointer by itself meanwhile, twice, then rolls it back one step while the
+        // engine's main stays ahead: the goal branch still holds the old one.
         let held = f.pointer("goal-1");
-        bump_engine(&f.repo, "other.c");
-        assert_ne!(f.pointer("main"), held);
+        bump_engine(&f.repo, "one.c");
+        let rolled_back_to = f.pointer("main");
+        bump_engine(&f.repo, "two.c");
+        sh(&f.repo.join("engine"), &["checkout", "-q", "--detach", &rolled_back_to]);
+        sh(&f.repo, &["add", "engine"]);
+        sh(&f.repo, &["commit", "-q", "-m", "roll the engine back"]);
+        assert_eq!(f.pointer("main"), rolled_back_to);
+        assert_ne!(rolled_back_to, held);
         let (main_before, engine_before) = (f.head("main"), sh(&f.repo.join("engine"), &["rev-parse", "main"]));
 
         let b = f.issue("B", Some(f.goal));
@@ -1943,7 +1952,7 @@ test_patterns = [\"src/**/*.test.ts\"]
         assert!(f.has("goal-1", "a.txt") && f.has("goal-1", "b.txt") && !f.has("main", "b.txt"));
         assert_eq!(f.head("main"), main_before, "main is untouched by an item");
         assert_eq!(sh(&f.repo.join("engine"), &["rev-parse", "main"]), engine_before, "and so is the engine's");
-        assert_eq!(f.pointer("goal-1"), f.pointer("main"), "main came into the goal branch with its pointer");
+        assert_eq!(f.pointer("goal-1"), rolled_back_to, "main came into the goal branch with its pointer, rollback and all");
         std::fs::remove_dir_all(&f.base).ok();
     }
 
