@@ -17,6 +17,10 @@ The landing model behind the presets is in [verification-settings.md](verificati
 | Release | The full suite | Each change, blocking | Straight to main | Each change alone | After every land |
 | Custom | Your choice, else Nitely's default | Your choice, else Nitely's default | Your choice | Your choice | Your choice |
 
+In a repo with managed `[[submodules]]`, a goal item that moves a submodule pointer skips the goal
+branch: it lands on main alone, both repos together, with the review of a change with no goal. The
+issue says so. Every other goal item goes through the goal branch as above.
+
 Every preset keeps the full suite on main, with auto-revert, and audits 10% of reduced checks
 (Release reduces nothing). A protected, flagged or unmapped change runs the full gate under any
 mode.
