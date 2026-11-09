@@ -66,8 +66,13 @@ pub struct Options {
  pub goal_branches:Option<bool>, pub item_review:Option<ItemReview>, pub checkpoint:Option<Checkpoint>,
  pub goal_plans:Option<GoalPlans>,
  pub stalled_reviews:Option<StalledReviews>,
+ /// How many review rounds in a row may ask for changes before they count as stalled (NIT-751).
+ pub review_rounds:Option<u8>,
  pub quick_limits:Option<QuickLimits>,
 }
+/// The review rounds a preset allows before they stall, and the range Custom may choose from.
+pub const REVIEW_ROUNDS:u8=5;
+pub const REVIEW_ROUNDS_RANGE:std::ops::RangeInclusive<u8>=2..=20;
 #[derive(Debug, Clone, Serialize)]
 pub struct Preset {pub mode:Mode,pub options:Options}
 #[derive(Debug, Clone, Serialize)]
@@ -101,6 +106,7 @@ pub fn preset(mode:Mode)->Options {
   // Release approves every plan; only Custom starts plans nobody asked for.
   goal_plans:Some(if release {GoalPlans::Approve}else{GoalPlans::Asked}),
   stalled_reviews:Some(if release {StalledReviews::Ask}else{StalledReviews::Fix}),
+  review_rounds:Some(REVIEW_ROUNDS),
   // Release has no small changes: everything goes the usual way.
   quick_limits:(!release).then(QuickLimits::default),
  }
@@ -113,7 +119,7 @@ fn tracking()->Options {
   test_depth:Some(TestDepth::Off),pre_review:Some(PreReview::Off),land_batch:Some(false),shared_lanes:Some(false),
   full_backstop:Some(Backstop{enabled:false,landings:5,delay_seconds:1800}),audit_percent:Some(0),
   periodic:Some(Periodic::default()),goal_branches:Some(false),item_review:Some(ItemReview::Off),checkpoint:None,
-  goal_plans:Some(GoalPlans::Asked),stalled_reviews:Some(StalledReviews::Fix),
+  goal_plans:Some(GoalPlans::Asked),stalled_reviews:Some(StalledReviews::Fix),review_rounds:Some(REVIEW_ROUNDS),
   quick_limits:Some(QuickLimits{lines:u32::MAX,files:u32::MAX}),
  }
 }
@@ -127,7 +133,7 @@ pub fn builtin()->Options {
   test_depth:Some(TestDepth::Full),pre_review:Some(PreReview::Individual),land_batch:Some(false),shared_lanes:None,
   full_backstop:Some(Backstop{enabled:false,landings:5,delay_seconds:1800}),audit_percent:Some(10),
   periodic:Some(Periodic::default()),goal_branches:Some(false),item_review:Some(ItemReview::Off),checkpoint:None,
-  goal_plans:Some(GoalPlans::Approve),stalled_reviews:Some(StalledReviews::Ask),quick_limits:None,
+  goal_plans:Some(GoalPlans::Approve),stalled_reviews:Some(StalledReviews::Ask),review_rounds:Some(REVIEW_ROUNDS),quick_limits:None,
  }
 }
 /// What moving from a retired mode to its preset changed.
@@ -173,7 +179,7 @@ impl ProjectReviewMode {
   let mut checked=serde_json::to_value(self.options())?;
   // The quick limits neither: a small change takes its own path and is reviewed after landing, so
   // they decide nothing about how the usual path checks a change (NIT-622).
-  if let Some(o)=checked.as_object_mut() {o.remove("goal_plans");o.remove("stalled_reviews");o.remove("quick_limits");}
+  if let Some(o)=checked.as_object_mut() {o.remove("goal_plans");o.remove("stalled_reviews");o.remove("review_rounds");o.remove("quick_limits");}
   Ok(Some(format!("{:x}",Sha256::digest(serde_json::to_vec(&(self.mode,self.revision,checked))?))))
  }
 }
@@ -183,7 +189,7 @@ impl Options {
   Options {test_depth:self.test_depth.or(d.test_depth),pre_review:self.pre_review.or(d.pre_review),land_batch:self.land_batch.or(d.land_batch),
    shared_lanes:self.shared_lanes.or(d.shared_lanes),full_backstop:self.full_backstop.or(d.full_backstop),audit_percent:self.audit_percent.or(d.audit_percent),
    periodic:self.periodic.or(d.periodic),goal_branches:self.goal_branches.or(d.goal_branches),item_review:self.item_review.or(d.item_review),
-   checkpoint:self.checkpoint.or(d.checkpoint),goal_plans:self.goal_plans.or(d.goal_plans),stalled_reviews:self.stalled_reviews.or(d.stalled_reviews),
+   checkpoint:self.checkpoint.or(d.checkpoint),goal_plans:self.goal_plans.or(d.goal_plans),stalled_reviews:self.stalled_reviews.or(d.stalled_reviews),review_rounds:self.review_rounds.or(d.review_rounds),
    quick_limits:self.quick_limits.or(d.quick_limits)}
  }
  /// Whether work checked under these options did at least what `now` asks before landing, so it
@@ -246,6 +252,7 @@ pub fn covers_issue(db:&Db,key:&str,past:&Option<String>)->Result<bool> {
 }
 fn validate(o:&Options)->Result<()> {
  if o.audit_percent.is_some_and(|n|n!=0 && !(10..=100).contains(&n)) {bail!("audit percent must be zero (off), or between 10 and 100");}
+ if o.review_rounds.is_some_and(|n|!REVIEW_ROUNDS_RANGE.contains(&n)) {bail!("review rounds before they stall must be between {} and {}",REVIEW_ROUNDS_RANGE.start(),REVIEW_ROUNDS_RANGE.end());}
  if let Some(b)=&o.full_backstop {if !(1..=1000).contains(&b.landings)||!(1..=86400).contains(&b.delay_seconds) {bail!("Full backstop needs 1–1000 landings and 1–86400 seconds");}}
  if let Some(p)=&o.periodic {
   if !(1..=1000).contains(&p.every_landings)||!(0..=604800).contains(&p.max_delay_seconds) {bail!("periodic review needs 1–1000 landings and 1–604800 seconds");}
@@ -474,6 +481,9 @@ mod tests {
   let a=mode(Mode::Custom,Options {goal_plans:Some(GoalPlans::Approve),..Default::default()}).authority().unwrap();
   let b=mode(Mode::Custom,Options {goal_plans:Some(GoalPlans::All),..Default::default()}).authority().unwrap();
   assert_eq!(a,b);
+  // Nor how many review rounds may ask for changes before they stall (NIT-751).
+  let c=mode(Mode::Custom,Options {goal_plans:Some(GoalPlans::Approve),review_rounds:Some(9),..Default::default()}).authority().unwrap();
+  assert_eq!(a,c);
   assert_eq!([Mode::Fast,Mode::Careful,Mode::Release].map(|m| preset(m).goal_plans),[Some(GoalPlans::Asked),Some(GoalPlans::Asked),Some(GoalPlans::Approve)]);
   assert_eq!(builtin().goal_plans,Some(GoalPlans::Approve),"a project with no mode approves each plan");
   let c=mode(Mode::Custom,Options {goal_plans:Some(GoalPlans::Approve),stalled_reviews:Some(StalledReviews::Fix),..Default::default()}).authority().unwrap();

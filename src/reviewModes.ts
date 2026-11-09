@@ -23,7 +23,12 @@ export interface ModeOptions {
   goal_plans: "approve" | "asked" | "all" | null;
   /** What review rounds that stop converging come to (NIT-568): the agent splits the change, or each open finding is put to you. Neither pauses the agent. */
   stalled_reviews: "fix" | "ask" | null;
+  /** How many review rounds in a row may ask for changes before they stall (NIT-751); presets use 5. */
+  review_rounds: number | null;
 }
+/** The review rounds a preset allows before they stall, and the range Custom may choose from. */
+export const REVIEW_ROUNDS = 5;
+export const REVIEW_ROUNDS_RANGE = [2, 20] as const;
 /** When a goal branch lands into main: a coherent slice, else after `items` item lands, else daily. */
 export interface CheckpointOptions { items: number; daily: boolean }
 export interface ModePreset { mode: ReviewMode; options: ModeOptions }
@@ -38,7 +43,7 @@ export interface ProjectReviewMode {
   migrated_from: string | null;
   migration_changes: string[];
 }
-export const INHERITED_OPTIONS: ModeOptions = { test_depth: null, pre_review: null, land_batch: null, shared_lanes: null, full_backstop: null, audit_percent: null, periodic: null, goal_branches: null, item_review: null, checkpoint: null, goal_plans: null, stalled_reviews: null };
+export const INHERITED_OPTIONS: ModeOptions = { test_depth: null, pre_review: null, land_batch: null, shared_lanes: null, full_backstop: null, audit_percent: null, periodic: null, goal_branches: null, item_review: null, checkpoint: null, goal_plans: null, stalled_reviews: null, review_rounds: null };
 export interface ModeDraft { mode: ReviewMode; overrides: ModeOptions }
 export const MODE_LABEL: Record<ReviewMode, string> = { fast: "Fast", careful: "Careful", release: "Release", custom: "Custom", tracking: "Tracking" };
 /** The Development modes, in the order Settings offers them. */
@@ -86,6 +91,9 @@ export function modeValidation(options: ModeOptions): string | null {
     return "A checkpoint needs between 1 and 100 items.";
   if (options.audit_percent !== null && (!Number.isSafeInteger(options.audit_percent) || (options.audit_percent !== 0 && (options.audit_percent < 10 || options.audit_percent > 100))))
     return "Audit sampling must be off (0%) or between 10% and 100%.";
+  const r = options.review_rounds;
+  if (r !== null && (!Number.isSafeInteger(r) || r < REVIEW_ROUNDS_RANGE[0] || r > REVIEW_ROUNDS_RANGE[1]))
+    return `Review rounds before they stall must be between ${REVIEW_ROUNDS_RANGE[0]} and ${REVIEW_ROUNDS_RANGE[1]}.`;
   return null;
 }
 export interface PeriodicFinding { priority: number; text: string; issue_key: string | null; action: string }

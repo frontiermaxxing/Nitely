@@ -50,6 +50,15 @@ Turning shared lanes off uses a memory-admitted machine slot in the task checkou
 use their own exact detached checkout. Turning review off leaves reviewer-only approval conditions
 unanswered; those can still require a human.
 
+**Review rounds that stall.** A change's review rounds count as stalled when a P0/P1 finding is
+still open after two rounds that tried to fix it, when a new P0/P1 finding names the same `Class:`
+as a P0/P1 finding of an earlier round (fixing one case at a time is not converging; `Class: none`
+never matches), or after a number of rounds in a row that ask for changes: 5 in every preset,
+anything from 2 to 20 under Custom (Settings, "Rounds before they stall"). What then happens is
+`stalled_reviews`: the agent splits the change, or you decide each open finding
+([approvals.md](approvals.md)). Neither the limit nor what happens decides how a change is checked,
+so changing them never sends queued work back. The Rules strip shows both under review.
+
 Periodic reviews are non-blocking and off in every preset (the checkpoint review covers main).
 Custom can turn them on: each reviews a fixed range from its last reviewed commit to a captured main
 commit, and errors keep the range for bounded retries. Findings reopen an unambiguously responsible
