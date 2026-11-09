@@ -196,7 +196,9 @@ impl Options {
   }
   at_least(self.test_depth,now.test_depth,|d|d as u8)
    && at_least(self.pre_review,now.pre_review,|r|match r {PreReview::Off=>0,PreReview::Batched=>1,PreReview::Individual=>2})
-   && at_least(self.item_review,now.item_review,|r|r as u8)
+   // A blocking review of each change, with no goal branch to route items around it, reviewed goal
+   // items as every other change: at least any item review (NIT-745).
+   && (at_least(self.item_review,now.item_review,|r|r as u8) || (self.pre_review==Some(PreReview::Individual) && self.goal_branches==Some(false)))
    // Audits sample reduced checks; work checked in full has nothing to sample.
    && (self.test_depth==Some(TestDepth::Full) || at_least(self.audit_percent,now.audit_percent,|n|n))
  }
@@ -219,9 +221,22 @@ pub(crate) fn covers_authority(conn:&Connection,project:&str,past:&Option<String
  let now=read(conn,project)?;
  let current=now.authority()?;
  if &current==past {return Ok(true);}
+ if past.is_none() && current.is_some() {
+  // Checked before the project's first save, under the mode it had then, which that save recorded
+  // as its `before` (NIT-745). A project is unsaved only until its first save.
+  return Ok(unsaved_options(conn,&now.project)?.is_some_and(|o|o.covers(&now.options())));
+ }
  let (Some(past),Some(_))=(past,current) else {return Ok(false)};
  let options:Option<String>=conn.query_row("SELECT options FROM project_review_mode_authority WHERE authority=?1 AND project=?2",params![past,now.project],|r|r.get(0)).optional()?;
  Ok(options.map(|o|serde_json::from_str::<Options>(&o)).transpose()?.is_some_and(|o|o.covers(&now.options())))
+}
+/// What the project's mode decided before its first save, from that save's event.
+fn unsaved_options(conn:&Connection,project:&str)->Result<Option<Options>> {
+ let before:Option<String>=conn.query_row("SELECT json_extract(payload,'$.before') FROM event WHERE type='project_review_mode_changed' AND json_extract(payload,'$.project')=?1 COLLATE NOCASE AND json_extract(payload,'$.before.explicit')=0 ORDER BY id DESC LIMIT 1",[project],|r|r.get(0)).optional()?;
+ let Some(before)=before else {return Ok(None)};
+ #[derive(Deserialize)] struct Before {mode:Mode,#[serde(default)] overrides:Options}
+ let b:Before=serde_json::from_str(&before)?;
+ Ok(Some(if b.mode==Mode::Custom {b.overrides.or(builtin())}else{preset(b.mode)}))
 }
 pub fn covers_issue(db:&Db,key:&str,past:&Option<String>)->Result<bool> {
  match db.issue(key)?.context("mode issue disappeared")?.project {
@@ -546,7 +561,31 @@ mod tests {
   let stricter=check_gate_authority(&db,&[&issue.key],&gate(fast.authority().unwrap())).unwrap_err().to_string();
   assert!(stricter.contains("Release, which asks for more"),"past its gate, it is sent back with the reason: {stricter}");
   assert!(check_playbook_authority(&db,&[&issue.key],&pb2(&fast)).unwrap_err().is::<ChangedWhileQueued>(),"a gate still queued is planned again, not failed");
-  assert!(check_gate_authority(&db,&[&issue.key],&gate(None)).is_err(),"an unknown policy is never assumed to cover");
+  drop(db);std::fs::remove_file(file).ok();
+ }
+ /// Work checked before a project's first save keeps its place when that save asks no more (NIT-745).
+ #[test]
+ fn work_checked_before_the_first_save_lands_under_a_mode_that_asks_no_more() {
+  let file=crate::paths::unique_temp("mode-first-save",".sqlite");let mut db=Db::open(&file).unwrap();
+  let gate=GateResult{mode_authority:None,passed:true,plan:None,skipped:None,commit:"abc".into(),results:vec![],warnings:vec![],flaked:vec![],lane_run:None};
+  let queued=|db:&mut Db,project:&str|db.create_issue(&crate::NewIssue{project:project.into(),title:format!("Queued change in {project}"),body:"Gated and approved before the project saved a mode".into(),evidence:"none".into(),source:"codex".into(),kind:"feature".into(),..Default::default()},&Actor::Human).unwrap();
+  // Never saved: Nitely's defaults, a full gate and a blocking review of each change.
+  db.create_project("APP","Example").unwrap();
+  let app=queued(&mut db,"APP");
+  assert_eq!(db.project_review_mode("APP").unwrap().authority().unwrap(),gate.mode_authority);
+  let careful=db.set_project_review_mode("APP",Mode::Careful,Options::default(),0,&Actor::Human).unwrap();
+  check_gate_authority(&db,&[&app.key],&gate).expect("the defaults checked more than Careful asks");
+  let mut pb=Playbook::default();pb.mode_project=Some("APP".into());
+  check_playbook_authority(&db,&[&app.key],&pb).expect("a gate still queued goes on");
+  assert!(looser_since(&db,&app.key,&None).unwrap().is_some_and(|n|n.contains("goes on under Careful")));
+  db.set_project_review_mode("APP",Mode::Release,Options::default(),careful.revision,&Actor::Human).unwrap();
+  check_gate_authority(&db,&[&app.key],&gate).expect("a later save still compares with the mode it was checked under");
+  // Started on Fast and never saved: Fast checked less than Release asks.
+  db.create_project("WEB","Website").unwrap();start_on_fast(&db.conn,"WEB").unwrap();
+  let web=queued(&mut db,"WEB");
+  db.set_project_review_mode("WEB",Mode::Release,Options::default(),0,&Actor::Human).unwrap();
+  let refused=check_gate_authority(&db,&[&web.key],&gate).unwrap_err().to_string();
+  assert!(refused.contains("Release, which asks for more"),"{refused}");
   drop(db);std::fs::remove_file(file).ok();
  }
  #[test]
