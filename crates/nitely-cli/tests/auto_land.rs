@@ -35,11 +35,21 @@ fn an_app_older_than_the_installed_build_hands_its_land_rounds_to_it() {
 
     // An app built from an earlier commit hands every round over, and says so once.
     let older = Build { commit: "0".repeat(40), committed_at: build.committed_at - 86_400 };
-    let mut lander = AutoLander::new(Some(older));
+    let mut lander = AutoLander::new(Some(older.clone()));
+    lander.can_hand_over = true;
     for _ in 0..2 {
         assert_eq!(lander.choose(&db, Some(&installed), &start).unwrap(), Ran::Installed(installed.clone()));
     }
     assert_eq!(handovers(&home), 1);
+
+    // Where only the app can check approvals (macOS), it keeps landing itself and says once that
+    // it needs a restart.
+    let mut app_only = AutoLander::new(Some(older));
+    app_only.can_hand_over = false;
+    for _ in 0..2 {
+        assert_eq!(app_only.choose(&db, Some(&installed), &start).unwrap(), Ran::InProcess);
+    }
+    assert_eq!(handovers(&home), 2);
 
     // The round runs in the installed build and gives back what was already noted, so a lasting
     // error still goes on its issue once across rounds.

@@ -106,8 +106,13 @@ pub struct AutoLander {
     /// The installed build last read, by its path and file stamp, so it is asked again only once
     /// an install replaced it.
     seen: Option<Seen>,
-    /// The installed build rounds were last handed to; said once per build.
+    /// The installed build rounds were last handed to (or, where they cannot be, found newer); said
+    /// once per build.
     handed_to: Option<String>,
+    /// Whether another process can land an approved change: not on macOS, where only the app reads
+    /// the approval key from its keychain (`approval::agents_can_verify`), so there the app lands
+    /// itself and says it needs a restart.
+    pub can_hand_over: bool,
     pub reported: HashMap<String, String>,
 }
 
@@ -120,7 +125,7 @@ pub enum Ran {
 
 impl AutoLander {
     pub fn new(app: Option<Build>) -> Self {
-        AutoLander { app, seen: None, handed_to: None, reported: HashMap::new() }
+        AutoLander { app, seen: None, handed_to: None, can_hand_over: crate::approval::agents_can_verify(), reported: HashMap::new() }
     }
 
     /// The installed build at `exe`, read again only when its file changed.
@@ -137,7 +142,8 @@ impl AutoLander {
     }
 
     /// Where this round should run: the installed build at `installed` when it is newer than the
-    /// app, else here. The first round handed to a build says so on the board.
+    /// app and another process can check approvals, else here. The first round to find a newer
+    /// build says so on the board.
     pub fn choose(&mut self, db: &Db, installed: Option<&Path>, start: impl Fn(&Path) -> Command) -> Result<Ran> {
         let Some(exe) = installed else { return Ok(Ran::InProcess) };
         let build = self.installed(exe, start);
@@ -149,17 +155,25 @@ impl AutoLander {
         }
         let (app, build) = (self.app.as_ref().expect("newer than a known build"), build.expect("newer"));
         if self.handed_to.as_deref() != Some(build.commit.as_str()) {
-            let line = format!(
-                "The app is older than the installed nitely ({} against {}): approved changes now land with the installed build, at {}. Restart the app to run the new build itself",
-                app.short(),
-                build.short(),
-                exe.display()
-            );
+            let line = if self.can_hand_over {
+                format!(
+                    "The app is older than the installed nitely ({} against {}): approved changes now land with the installed build, at {}. Restart the app to run the new build itself",
+                    app.short(),
+                    build.short(),
+                    exe.display()
+                )
+            } else {
+                format!(
+                    "The app is older than the installed nitely ({} against {}), and here only the app can check approvals, so it still lands approved changes with its own code: restart the app to land with the new build",
+                    app.short(),
+                    build.short()
+                )
+            };
             eprintln!("{line}");
             db.log_event(&Actor::Agent(crate::land::AUTO_LANDER.into()), None, None, "status", &line)?;
             self.handed_to = Some(build.commit.clone());
         }
-        Ok(Ran::Installed(exe.to_path_buf()))
+        Ok(if self.can_hand_over { Ran::Installed(exe.to_path_buf()) } else { Ran::InProcess })
     }
 
     /// One round of landing approved changes, in the newest build at hand. A newer installed build
