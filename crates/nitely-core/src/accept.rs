@@ -98,23 +98,114 @@ impl Db {
         Ok((issue, found, review.reviewer))
     }
 
-    /// Review rounds on `key` stopped converging (`why`): the person decides each P0/P1 finding of
-    /// its latest review not yet accepted, accept it as it is or send it back, as a request to
-    /// accept it (the Inbox's Review finding). The issue stays with its agent, who goes on fixing
-    /// (NIT-568). Returns its state.
+    /// Review rounds on `key` stopped converging (`why`): the person decides its latest review's
+    /// open P0/P1 findings, accept each as it is or send it back. They get one question for it
+    /// (NIT-736), never one per finding per round: it asks about one finding, lists the others open
+    /// now, and a later stalled round updates it in place (round count, open findings) instead of
+    /// filing another. Once they decide it, the same question goes on to the next finding. The
+    /// issue stays with its agent, who goes on fixing (NIT-568). Returns its state.
     pub fn ask_to_decide_findings(&mut self, key: &str, why: &str, actor: &Actor) -> Result<String> {
         let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
         let review = self.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{} has no review", issue.key))?;
-        let open: Vec<Ask> = self.all_open_asks()?.into_iter().filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key))).collect();
-        let question = format!("The review rounds are not converging ({why}). Accept this finding as it is if it is a trade-off you decided; send it back and it stays a defect to fix.");
-        for f in self.unaccepted_blockers(&issue.key, &review)? {
-            // One request per finding; one already open for it stands.
-            if open.iter().any(|a| a.finding.as_ref().is_some_and(|x| x.text == f.text)) {
-                continue;
+        // Read and written in one immediate transaction, so two paths that find the rounds stalled
+        // at the same moment (a submit and an item review, say) file one question between them.
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
+        let asked = self.stalled_question_of(&issue.key)?;
+        let left = self.stalled_left(&issue.key, &review.findings, asked.as_ref().and_then(|a| a.finding.as_ref()).map(|f| f.text.as_str()))?;
+        match (asked, left.split_first()) {
+            (Some(a), Some((lead, others))) => self.set_stalled_question(a.id, why, lead, others)?,
+            (None, Some((lead, others))) => {
+                let ask = self.create_ask(&stalled_question(why, others), &[], Some(&issue.key), None, actor)?;
+                self.set_stalled_question(ask.id, why, lead, others)?;
             }
-            self.request_acceptance(&issue.key, &f.text, &question, None, actor)?;
+            // Every open finding is decided or already asked about on its own: nothing to add.
+            (_, None) => {}
         }
+        tx.commit()?;
         Ok(self.issue(&issue.key)?.with_context(|| format!("no issue {key}"))?.state)
+    }
+
+    /// Puts `question`, a choice a scoped review found only the person can make once the rounds
+    /// stalled (`scope_decision_question`), to them: one open per issue. An open one is updated in
+    /// place, so a later round that words the decision anew asks nothing new; any older open one (an
+    /// earlier build filed one per wording) closes, pointing at it. Read and written in one
+    /// immediate transaction, so two paths that stall at once file one between them.
+    pub fn ask_scope_decision(&mut self, key: &str, question: &str, actor: &Actor) -> Result<Ask> {
+        let issue = self.issue(key)?.with_context(|| format!("no issue {key}"))?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, rusqlite::TransactionBehavior::Immediate)?;
+        let mut open: Vec<Ask> = self
+            .all_open_asks()?
+            .into_iter()
+            .filter(|a| a.issue_key.as_deref().is_some_and(|k| k.eq_ignore_ascii_case(&issue.key)) && a.finding.is_none() && a.question.starts_with(SCOPE_DECISION_START))
+            .collect();
+        open.sort_by_key(|a| std::cmp::Reverse(a.id));
+        let id = match open.first() {
+            Some(newest) => {
+                self.conn.execute("UPDATE ask SET question = ?2 WHERE id = ?1", params![newest.id, question.trim()])?;
+                for older in &open[1..] {
+                    self.conn.execute("UPDATE ask SET closed = ?2 WHERE id = ?1", params![older.id, format!("closed: ask #{} asks for the same scope decision", newest.id)])?;
+                }
+                newest.id
+            }
+            None => self.create_ask(question, &[], Some(&issue.key), None, actor)?.id,
+        };
+        tx.commit()?;
+        self.ask(id)?.context("ask vanished")
+    }
+
+    /// `key`'s open question about its stalled review rounds, the newest; any older one (an earlier
+    /// build filed one per finding) closes, pointing at it.
+    fn stalled_question_of(&self, key: &str) -> Result<Option<Ask>> {
+        let mut stalled: Vec<Ask> = self.open_finding_requests(key)?.into_iter().filter(is_stalled_question).collect();
+        stalled.sort_by_key(|a| std::cmp::Reverse(a.id));
+        let mut it = stalled.into_iter();
+        let newest = it.next();
+        for older in it {
+            let newer = newest.as_ref().map(|n| n.id).unwrap_or_default();
+            self.conn.execute("UPDATE ask SET closed = ?2 WHERE id = ?1", params![older.id, format!("closed: ask #{newer} asks about the same stalled review rounds")])?;
+        }
+        Ok(newest)
+    }
+
+    /// The P0/P1 findings of `findings` the stalled question can ask about, in the order it asks:
+    /// not accepted for the latest review's patch, not already asked about in a request of their
+    /// own, and not one the person already sent back. `keep`, the finding it asks about now, stays
+    /// first while it is open, so the person does not see it change under them; then by priority.
+    fn stalled_left(&self, key: &str, findings: &[Finding], keep: Option<&str>) -> Result<Vec<Finding>> {
+        let accepted: Vec<String> = match self.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()) {
+            Some(r) => self.accepted_for(key, &r.patch_id)?.into_iter().map(|a| a.finding).collect(),
+            None => vec![],
+        };
+        let own: Vec<String> = self.open_finding_requests(key)?.into_iter().filter(|a| !is_stalled_question(a)).filter_map(|a| a.finding.map(|f| f.text)).collect();
+        let mut stmt = self.conn.prepare("SELECT finding FROM ask WHERE issue_key = ?1 COLLATE NOCASE AND finding IS NOT NULL AND answer IS NOT NULL")?;
+        let decided: Vec<String> = stmt
+            .query_map([key], |r| r.get::<_, String>(0))?
+            .collect::<rusqlite::Result<Vec<_>>>()?
+            .into_iter()
+            .filter_map(|j| serde_json::from_str::<AskedFinding>(&j).ok().map(|f| f.text))
+            .collect();
+        let mut left: Vec<Finding> = findings.iter().filter(|f| f.priority <= 1 && !accepted.contains(&f.text) && !own.contains(&f.text) && !decided.contains(&f.text)).cloned().collect();
+        left.sort_by_key(|f| (keep != Some(f.text.as_str()), f.priority));
+        Ok(left)
+    }
+
+    /// Points stalled question `id` at `lead`, with the others open now and why it was asked.
+    fn set_stalled_question(&self, id: i64, why: &str, lead: &Finding, others: &[Finding]) -> Result<()> {
+        let asked = AskedFinding { priority: lead.priority, text: lead.text.clone() };
+        self.conn.execute("UPDATE ask SET question = ?2, finding = ?3 WHERE id = ?1", params![id, stalled_question(why, others), serde_json::to_string(&asked)?])?;
+        Ok(())
+    }
+
+    /// Once the person decided the stalled question (`decided`), it goes on to the next open
+    /// finding, if one is left: one question at a time, each finding still its own decision.
+    fn next_stalled_question(&mut self, key: &str, decided: &Ask) -> Result<()> {
+        if !is_stalled_question(decided) {
+            return Ok(());
+        }
+        let why = stalled_why(&decided.question).unwrap_or("rounds did not converge").to_string();
+        let actor = if decided.asked_by == "human" { Actor::Human } else { Actor::Agent(decided.asked_by.clone()) };
+        self.ask_to_decide_findings(key, &why, &actor)?;
+        Ok(())
     }
 
     /// When the person last decided a request to accept a finding of `key` (0 when never): their
@@ -173,6 +264,7 @@ impl Db {
         let why = one_line(why)?;
         let ask = self.answer_ask(ask_id, &format!("Not accepted: {why}. Fix it."), &Actor::Human)?;
         self.close_decided_alike(&key, ask_id, &finding.text)?;
+        self.next_stalled_question(&key, &ask)?;
         let issue = self.issue(&key)?.with_context(|| format!("no issue {key}"))?;
         if issue.owner == "human" {
             self.set_owner(&key, "agent", &Actor::Human)?;
@@ -297,6 +389,15 @@ impl Db {
             match first.iter().find(|(w, _)| *w == words(a)) {
                 Some((_, newer)) => closing.push((a.id, format!("closed: ask #{newer} asks for the same finding"))),
                 None if findings.iter().any(|x| x.text == words(a)) => first.push((words(a), a.id)),
+                // The stalled question stays one question while the rounds go on (NIT-736): when
+                // the round no longer raises its finding but others are still open, it asks about
+                // the next one instead of closing, and a new one being filed.
+                None if is_stalled_question(a) && !self.stalled_left(key, findings, None)?.is_empty() => {
+                    let left = self.stalled_left(key, findings, None)?;
+                    let why = stalled_why(&a.question).unwrap_or("rounds did not converge").to_string();
+                    self.set_stalled_question(a.id, &why, &left[0], &left[1..])?;
+                    first.push((left[0].text.clone(), a.id));
+                }
                 None => {
                     first.push((words(a), a.id));
                     closing.push((a.id, FIXED.to_string()));
@@ -348,6 +449,7 @@ impl Db {
     fn after_acceptance(&mut self, _ask: Ask, key: &str, finding: &AskedFinding, reason: &str, from: &str) -> Result<Decided> {
         let answered = self.answer_ask(_ask.id, &format!("Accepted: {reason}. Stop working on this finding: land no longer waits on it."), &Actor::Human)?;
         self.close_decided_alike(key, _ask.id, &finding.text)?;
+        self.next_stalled_question(key, &answered)?;
         let review = self.reviews(key)?.into_iter().find(|r| !r.reviewer.is_empty()).context("no review")?;
         // The finding the person just accepted is decided by this call, whatever key signed it: under
         // the test harness its throwaway key, which `accepted_for` never trusts. So a harness run
@@ -390,6 +492,49 @@ impl Db {
 
 /// Why a question about a finding closed without an answer: a later review no longer raises it.
 pub const FIXED: &str = "closed: fixed, no decision needed (the latest review no longer raises it)";
+
+/// How the one question about an issue's stalled review rounds starts (NIT-736), then `why`; the
+/// earlier builds' questions, one per finding, started the same way.
+pub const STALLED_QUESTION_START: &str = "The review rounds are not converging (";
+
+/// How a scoped review's stalled-round question to the person starts (NIT-722), then the key.
+pub const SCOPE_DECISION_START: &str = "Review scope decision for ";
+
+/// The question a stalled round puts to the person when its scoped review names a choice only they
+/// can make: the choice, the reviewed interpretation, and why the rounds stalled (round count and
+/// open findings), which a later stalled round brings up to date.
+pub fn scope_decision_question(key: &str, decision: &str, interpretation: &str, why: &str) -> String {
+    let end = |s: &str| s.trim().trim_end_matches('.').to_string();
+    format!(
+        "{SCOPE_DECISION_START}{key}: {}. Reviewed interpretation: {}. This answer clarifies requirements; it does not accept a risk. Asked because the review rounds are not converging ({why}); a later stalled round updates this question rather than asking again.",
+        end(decision),
+        end(interpretation)
+    )
+}
+
+/// What follows `why` in the stalled question, before the other findings open now.
+const STALLED_QUESTION_ASKS: &str = "). Accept this finding as it is if it is a trade-off you decided; send it back and it stays a defect to fix.";
+
+/// The stalled question: why the rounds stalled (the round count, how many are open) and the
+/// other findings open now, which it asks about next.
+fn stalled_question(why: &str, others: &[Finding]) -> String {
+    let mut q = format!("{STALLED_QUESTION_START}{why}{STALLED_QUESTION_ASKS}");
+    if !others.is_empty() {
+        let list: Vec<String> = others.iter().map(|f| format!("[P{}] {}", f.priority, f.text)).collect();
+        q.push_str(&format!(" Also open, asked next: {}. A later stalled round updates this question rather than asking again.", list.join("; ")));
+    }
+    q
+}
+
+/// The `why` a stalled question was asked with.
+fn stalled_why(question: &str) -> Option<&str> {
+    let rest = question.strip_prefix(STALLED_QUESTION_START)?;
+    rest.find(STALLED_QUESTION_ASKS).map(|end| &rest[..end])
+}
+
+fn is_stalled_question(a: &Ask) -> bool {
+    a.finding.is_some() && a.question.starts_with(STALLED_QUESTION_START)
+}
 
 /// The event kind for a change that waits for the person's approval after they accepted a finding.
 pub const AWAITS_APPROVAL: &str = "awaits_approval";

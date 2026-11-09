@@ -2215,23 +2215,38 @@ when_changed = ["billing"]
     }
 
     #[test]
-    fn a_stalled_review_asks_about_each_finding_and_waits_for_all_of_them() {
+    fn a_stalled_review_asks_about_each_finding_in_one_question_and_waits_for_all_of_them() {
         // Rounds that do not converge (NIT-220): the person decides each open finding, while the
-        // issue stays with its agent (NIT-568); it goes on once every one is decided.
+        // issue stays with its agent (NIT-568), in one question that takes them in turn (NIT-736);
+        // it goes on once every one is decided.
         let mut f = fixture();
         let (a, _) = f.reviewed("Rows", "rows.txt", "x");
         asked_for(&f, &a, &[(1, "Drops a row: rows.txt, f: the last row"), (0, "Leaks a key: keys.txt, g: logs it")], 1);
         let before = f.db.issue(&a).unwrap().unwrap().state;
-        assert_eq!(f.db.ask_to_decide_findings(&a, "1 P0/P1 finding still open after two rounds", &f.actor).unwrap(), before);
-        // Asked again (another stalled round), the requests already open stand.
-        f.db.ask_to_decide_findings(&a, "again", &f.actor).unwrap();
-        let requests: Vec<crate::issues::Ask> = f.db.open_asks().unwrap().into_iter().filter(|x| x.issue_key.as_deref() == Some(a.as_str())).collect();
-        assert_eq!(requests.len(), 2, "{requests:?}");
+        assert_eq!(f.db.ask_to_decide_findings(&a, "2 review rounds in a row asked for changes", &f.actor).unwrap(), before);
+        // Asked again (another stalled round), it is the same question, brought up to date.
+        f.db.ask_to_decide_findings(&a, "3 review rounds in a row asked for changes", &f.actor).unwrap();
+        let open = |f: &Fixture| -> Vec<crate::issues::Ask> { f.db.open_asks().unwrap().into_iter().filter(|x| x.issue_key.as_deref() == Some(a.as_str())).collect() };
+        let requests = open(&f);
+        assert_eq!(requests.len(), 1, "{requests:?}");
+        // The P0 first, the other listed as asked next.
+        assert_eq!(requests[0].finding.as_ref().map(|x| x.text.as_str()), Some("Leaks a key: keys.txt, g: logs it"));
+        assert!(requests[0].question.contains("(3 review rounds") && requests[0].question.contains("[P1] Drops a row"), "{}", requests[0].question);
         assert_eq!(f.db.issue(&a).unwrap().unwrap().owner, "agent");
+        // A round that says both in new words keeps that one question, pointed at what is open now,
+        // rather than closing it as fixed and a new one being filed.
+        asked_for(&f, &a, &[(1, "Loses the last row: rows.txt, f"), (0, "Writes the key to the log: keys.txt, g")], 2);
+        let latest = f.db.reviews(&a).unwrap().remove(0);
+        assert_eq!(f.db.close_superseded_requests(&a, &latest.findings).unwrap(), 0);
+        let asked = requests[0].id;
+        let requests = open(&f);
+        assert_eq!(requests.iter().map(|x| (x.id, x.finding.as_ref().map(|y| y.text.as_str()))).collect::<Vec<_>>(), [(asked, Some("Writes the key to the log: keys.txt, g"))]);
         crate::approval::trust_in_tests(Some(crate::approval::public_of(&SECRET)));
-        let first = f.db.accept_finding(requests[0].id, "no outside users yet", &SECRET).unwrap();
+        let first = f.db.accept_finding(requests[0].id, "the key is a test key", &SECRET).unwrap();
         assert_eq!(first.state, "In Progress", "the other finding is still to fix or decide");
-        let second = f.db.accept_finding(requests[1].id, "the key is a test key", &SECRET).unwrap();
+        let next = open(&f);
+        assert_eq!(next.iter().map(|x| x.finding.as_ref().map(|y| y.text.as_str())).collect::<Vec<_>>(), [Some("Loses the last row: rows.txt, f")]);
+        let second = f.db.accept_finding(next[0].id, "no outside users yet", &SECRET).unwrap();
         let goes_on = if crate::approval::agents_can_verify() { "In Review" } else { "Needs You" };
         assert_eq!(second.state, goes_on);
         assert!(f.db.findings_decided_at(&a).unwrap() > 0);

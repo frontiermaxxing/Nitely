@@ -566,7 +566,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     if let Some(why) = &stalled {
         match route {
             crate::project_modes::StalledReviews::Ask => {
-                if let Some(r)=out.review.as_ref().filter(|r|r.scope.is_some()) { scoped_stall(db,&issue,r,actor)?; } else { db.ask_to_decide_findings(&issue.key, why, actor)?; }
+                if let Some(r)=out.review.as_ref().filter(|r|r.scope.is_some()) { scoped_stall(db,&issue,r,why,actor)?; } else { db.ask_to_decide_findings(&issue.key, why, actor)?; }
             }
             crate::project_modes::StalledReviews::Fix => {
                 // The findings go to a follow-up filed now, so the notice can name it (NIT-634 review).
@@ -942,7 +942,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
             if let Some(why) = &stalled {
                 match route {
                     crate::project_modes::StalledReviews::Ask => {
-                        if review.scope.is_some() { scoped_stall(db,issue,&review,actor)?; } else { db.ask_to_decide_findings(&issue.key, why, actor)?; }
+                        if review.scope.is_some() { scoped_stall(db,issue,&review,why,actor)?; } else { db.ask_to_decide_findings(&issue.key, why, actor)?; }
                     }
                     crate::project_modes::StalledReviews::Fix => {
                         let f = file_follow_up(db, issue, &review, &accepted, actor,false)?;
@@ -1235,14 +1235,14 @@ fn after_failed_gate(gate: &GateResult) -> String {
 }
 
 /// A fresh scoped reviewer sends a genuine choice to the person; a repair remains with
-/// the worker. Neither route accepts a finding or releases the original branch.
-fn scoped_stall(db:&mut Db,issue:&IssueRecord,review:&Review,actor:&Actor)->Result<()> {
+/// the worker. Neither route accepts a finding or releases the original branch. The choice goes to
+/// the person once per issue (NIT-736): a later stalled round, whose reviewer words the decision
+/// anew, updates the question still open, with why the rounds stalled, instead of asking again.
+fn scoped_stall(db:&mut Db,issue:&IssueRecord,review:&Review,why:&str,actor:&Actor)->Result<()> {
     let scope=review.scope.as_ref().context("missing scoped review")?;
     if !scope.decision.trim().is_empty() {
-        let question=format!("Review scope decision for {}: {}\\nReviewed interpretation: {}. This answer clarifies requirements; it does not accept a risk.",issue.key,scope.decision,scope.interpretation);
-        if !db.all_open_asks()?.iter().any(|a|a.issue_key.as_deref()==Some(issue.key.as_str()) && a.question==question) {
-            db.create_ask(&question,&[],Some(&issue.key),None,actor)?;
-        }
+        let question=crate::accept::scope_decision_question(&issue.key,&scope.decision,&scope.interpretation,why);
+        db.ask_scope_decision(&issue.key,&question,actor)?;
     } else {
         let patch=db.reviews(&issue.key)?.into_iter().find(|r|!r.reviewer.is_empty()).context("missing blocking review")?.patch_id;
         let accepted=db.accepted_for(&issue.key,&patch)?.into_iter().map(|a|a.finding).collect::<Vec<_>>();
@@ -1993,6 +1993,10 @@ mod tests {
     }
 
     const REVIEW_SH: &str = r#"prompt=$(cat)
+# Two blockers in new words every round, as a reviewer that never says one the same way twice.
+reword() { n=$(( $(cat ../reword-n 2>/dev/null || echo 0) + 1 )); echo $n > ../reword-n
+  echo "- [P1] Drops row $n: reword.txt:1, the x is never read"; echo "- [P1] Skips header $n: reword.txt:1, the first line"
+  echo "SCOPE: the export keeps every row (round $n)"; echo "DECISION: keep the header row or drop it, as worded in round $n"; echo "VERDICT: findings"; }
 case "$prompt" in *"SHARED CAUSE: none"*)
   printf '%s
 ' "$prompt" | grep -q "round 1, \[P1\], open now: Stuck" || { echo "SHARED CAUSE: none"; exit 0; }
@@ -2030,6 +2034,7 @@ esac
 money=no; case "$files" in *billing*) money=yes;; esac
 case "$prompt" in
   *"PREVIOUS <n>"*) case "$files" in
+       *reword*) echo "PREVIOUS 1: fixed"; echo "PREVIOUS 2: fixed"; reword;;
        *unstuck*) echo "PREVIOUS 1: fixed"; echo "VERDICT: clean";;
        *stuck*) echo "PREVIOUS 1: open stuck.txt:1 \`let stuck = 1;\` is still never read"; echo "VERDICT: clean";;
        *stale*) echo "PREVIOUS 1: open stale.txt:1 \`let stale = 1;\` is still never read"; echo "VERDICT: clean";;
@@ -2037,6 +2042,7 @@ case "$prompt" in
        *) echo "PREVIOUS 1: open edge.txt:1 \`let edge = 2;\` still skips the empty line"; echo "VERDICT: clean";;
      esac;;
   *) case "$files" in
+       *reword*) reword;;
        *together*) touch ../review-ran; echo "- [P1] Together: together.txt, the x is never read"; echo "VERDICT: findings";;
        *mixed*) echo "- [P1] Mixed: mixed.txt, the x is never read"; echo "- [P2] Mixed edge: mixed.txt, the empty line"; echo "VERDICT: findings";;
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
@@ -2470,6 +2476,37 @@ exit 0
         f.db.decline_finding(explicit.id, "fix it properly", "").unwrap();
         assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress");
         assert_eq!(asked(&f), 1, "a round that does not stall asks nothing");
+    }
+
+    /// NIT-736: rounds that go on stalling while the author keeps fixing, with a reviewer that words
+    /// its two blockers and the choice it leaves to the person anew each round, put one question in
+    /// the person's Inbox. Each stalled round brings that question up to date (its round count, the
+    /// findings open now, the choice as last worded) instead of filing another.
+    #[test]
+    fn rounds_that_keep_stalling_keep_one_question_that_follows_the_latest_round() {
+        use crate::project_modes::{Mode, Options, StalledReviews};
+        let mut f = fixture();
+        let rev = f.db.project_review_mode("NIT").unwrap().revision;
+        let options = Options { stalled_reviews: Some(StalledReviews::Ask), review_rounds: Some(2), ..Default::default() };
+        f.db.set_project_review_mode("NIT", Mode::Custom, options, rev, &Actor::Human).unwrap();
+        let (issue, wt) = f.started("Reword");
+        let open = |f: &Fixture| -> Vec<crate::issues::Ask> { f.db.open_asks().unwrap().into_iter().filter(|a| a.issue_key.as_deref() == Some(issue.key.as_str())).collect() };
+        for round in 1..=6 {
+            std::fs::write(wt.join("reword.txt"), format!("fix {round}")).unwrap();
+            sh(&wt, &["add", "."]);
+            sh(&wt, &["commit", "-q", "-m", &format!("fix {round}")]);
+            assert_eq!(f.submit(&wt, true).unwrap().state, "In Progress", "round {round}");
+            let asks = open(&f);
+            if round == 1 {
+                assert!(asks.is_empty(), "one round is not a stall: {asks:?}");
+                continue;
+            }
+            assert_eq!(asks.len(), 1, "round {round}: {asks:?}");
+            let q = &asks[0].question;
+            assert!(q.contains(&format!("as worded in round {round}.")) && q.contains(&format!("({round} review rounds in a row asked for changes; 2 open findings (2 P1))")), "round {round}: {q}");
+        }
+        let filed: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM ask WHERE issue_key = ?1", [&issue.key], |r| r.get(0)).unwrap();
+        assert_eq!(filed, 1, "five stalled rounds filed one question");
     }
 
     /// NIT-568: the question about a finding holds the land, never the agent, and a fix closes it.

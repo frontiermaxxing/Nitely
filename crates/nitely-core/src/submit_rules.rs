@@ -69,7 +69,7 @@ pub fn next_state(o: &Outcome) -> (&'static str, &'static str) {
 pub const SPLIT: &str = "The review rounds are not converging, so split the change: keep what the reviews agree on, take out what the open P0/P1 findings are about, and file those findings as a follow-up issue in the same goal (file_issue, with the findings as its body). Then commit and submit the smaller change. The person is told, and nothing waits on them.";
 
 /// What an agent is told when its review rounds stalled under `stalled_reviews = "ask"`.
-pub const ASKED_KEEP_FIXING: &str = "The review rounds are not converging, so Nitely asked the human to decide each open P0/P1 finding in the Inbox: accept it as it is, or send it back. Keep fixing meanwhile: a finding a later review no longer raises closes its question by itself, and land waits only until each one is fixed or accepted. If you have reasoning for a finding (a trade-off they decided, say), add it in a `note` on the issue: they read it beside the finding.";
+pub const ASKED_KEEP_FIXING: &str = "The review rounds are not converging, so Nitely asked the human to decide the open P0/P1 findings in the Inbox, in one question that takes them one at a time: accept each as it is, or send it back. Keep fixing meanwhile: a later stalled round updates that question rather than asking again, a finding a later review no longer raises leaves it by itself, and land waits only until each one is fixed or accepted. If you have reasoning for a finding (a trade-off they decided, say), add it in a `note` on the issue: they read it beside the finding.";
 
 /// What the person reads when an issue's review rounds stalled under `stalled_reviews = "fix"`:
 /// a notice, which nothing waits on.
