@@ -278,7 +278,7 @@ pub fn widen(root: &Path, pb: &Playbook, worktree: &Path, paths: &[String]) -> R
 }
 
 /// The commit `path` points at in `commit`, when it is a submodule there.
-fn pointer(dir: &Path, commit: &str, path: &str) -> Result<Option<String>> {
+pub(crate) fn pointer(dir: &Path, commit: &str, path: &str) -> Result<Option<String>> {
     let line = git(dir, &["ls-tree", commit, "--", path])?;
     Ok(line.split_whitespace().nth(2).filter(|_| line.starts_with("160000")).map(str::to_string))
 }

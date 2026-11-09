@@ -205,6 +205,14 @@ affected-tests map, protected, human and blocked paths, review focus and the rev
   the land queue's lock, merging main in rather than rebasing. When the full gate fails, the land
   bisects over the items' commits on the goal branch, reverts the one at fault there, sends it back
   to Todo and opens the next checkpoint without it.
+- **Repos with managed submodules (NIT-746).** The goal branch lives in the root repo only; no
+  submodule has one. An item that moves no `[[submodules]]` pointer goes through the goal branch
+  like any other, its submodule checked out where the goal branch points it. An item that moves a
+  pointer (from the start, or after `widen` took it into the submodule) is taken off the goal
+  branch by `submit` and `land`: its own commits are rebased onto main, the issue says so, and it
+  lands alone through the lockstep land of both repos, with the review and gate of a change with no
+  goal. The goal branch never moves a pointer itself, so main flows in with main's pointer and no
+  gitlink conflict, and a checkpoint never moves a submodule's integration branch.
 - **The goal row** shows the branch: items since the last checkpoint, green or red with its fix,
   and the next checkpoint. Its tooltip counts items landed, checkpoints, full runs and reviews, the
   before-and-after measure.
