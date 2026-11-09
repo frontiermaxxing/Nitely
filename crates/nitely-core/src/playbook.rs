@@ -1569,6 +1569,16 @@ pub fn start_task_light(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: 
 }
 
 fn start_task_with(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor, playbook: Playbook) -> Result<Started> {
+    let started = start_task_inner(db, repo_root, issue, vendor, actor, playbook)?;
+    // A day's batch of minor findings drops the ones whose code changed since, as it is started
+    // from the integration branch as it is now (NIT-718).
+    if started.created {
+        crate::minor_batch::drop_stale(db, issue, Path::new(&started.worktree), actor)?;
+    }
+    Ok(started)
+}
+
+fn start_task_inner(db: &Db, repo_root: &Path, issue: &IssueRecord, vendor: &str, actor: &Actor, playbook: Playbook) -> Result<Started> {
     let _telemetry = crate::performance_attribution::Scope::new(db,crate::performance_attribution::Context {project:issue.project.clone(),issue:Some(issue.key.clone()),..Default::default()});
     if issue.is_humans() && *actor != Actor::Human {
         bail!("{} is the human's own work (owner: human), so agents do not start it; `ask` the human if an agent should take it", issue.key);

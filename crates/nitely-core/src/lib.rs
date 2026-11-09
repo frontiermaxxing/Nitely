@@ -46,6 +46,7 @@ pub mod links;
 pub mod machine;
 pub mod memory_trim;
 pub mod linear_import;
+pub mod minor_batch;
 pub mod mirror;
 pub mod overlap;
 pub mod issues;

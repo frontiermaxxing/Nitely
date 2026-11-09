@@ -37,6 +37,7 @@ nitely_core = 60
 "land::tests::a_change_that_spans_a_submodule_lands_both_branches_together" = "a change spanning a submodule: a refused fast-forward puts both back, then both land"
 "submit::tests::submits_with_a_review_and_routes_flags_to_a_human" = "submit with a real reviewer, a flag routed to a person, a push"
 "submit::tests::basic_submission_and_land_run_only_basic_checks_and_enqueue_an_audit" = "reduced checks, land and the audit they enqueue"
+"submit::tests::p2_findings_go_to_the_days_batch_and_a_stale_one_is_dropped_when_it_is_started" = "the minor-findings chain: two changes' P2s in the day's batch, the old per-change backlog folded in, stale findings dropped at start, a second batch once the first is worked (NIT-718)"
 "submit::tests::a_confirmed_p1_stays_with_a_worker_without_a_risk_waiver" = "review rounds that stall: the follow-up, the shared-cause question asked once per run (NIT-735), a decline starting the count over"
 "submit::tests::rounds_that_keep_stalling_keep_one_question_that_follows_the_latest_round" = "five stalled submit rounds, reworded each time, put one question in the Inbox that follows the latest round (NIT-736)"
 "submit_job::tests::a_submit_hands_in_at_once_and_the_job_brings_the_result_back" = "async submit: enqueue, supersede, run, deliver"

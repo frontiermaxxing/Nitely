@@ -1095,12 +1095,29 @@ struct CurrentCode {
     root: std::path::PathBuf,
     /// Tracked files, relative and with `/`, for citations that give only a file name.
     files: Vec<String>,
+    /// The commit the code is read at, when not the files on disk (NIT-718).
+    rev: Option<String>,
 }
 
 impl CurrentCode {
     fn new(root: &Path) -> CurrentCode {
         let files = crate::playbook::git(root, &["ls-files"]).map(|o| o.lines().map(str::to_string).collect()).unwrap_or_default();
-        CurrentCode { root: root.to_path_buf(), files }
+        CurrentCode { root: root.to_path_buf(), files, rev: None }
+    }
+
+    /// The code of commit `rev` in the repo at `root`, read from git rather than the disk, so a
+    /// sparse worktree's missing directories still count.
+    fn at(root: &Path, rev: &str) -> CurrentCode {
+        let files = crate::playbook::git(root, &["ls-tree", "-r", "--name-only", "--full-tree", rev]).map(|o| o.lines().map(str::to_string).collect()).unwrap_or_default();
+        CurrentCode { root: root.to_path_buf(), files, rev: Some(rev.to_string()) }
+    }
+
+    /// The tracked file `f`, as the code is read.
+    fn read(&self, f: &str) -> Option<String> {
+        match &self.rev {
+            Some(rev) => crate::playbook::git(&self.root, &["show", &format!("{rev}:{f}")]).ok(),
+            None => std::fs::read_to_string(self.root.join(f)).ok(),
+        }
     }
 
     /// Whether `text` cites a file on the branch (at a line it has), and, when it quotes code in
@@ -1110,7 +1127,7 @@ impl CurrentCode {
         let present: Vec<String> = cited
             .iter()
             .filter_map(|(f, line)| {
-                let body = std::fs::read_to_string(self.root.join(f)).ok()?;
+                let body = self.read(f)?;
                 line.is_none_or(|n| n >= 1 && n <= body.lines().count()).then_some(body)
             })
             .collect();
@@ -1135,7 +1152,7 @@ impl CurrentCode {
         // `n - 1` cannot match by chance the way it could anywhere in a file.
         let quotes: Vec<String> = quoted(said).into_iter().filter(|q| !lone_path(q) && !squash(q).is_empty()).collect();
         let at_line = citations(said).into_iter().filter_map(|(p, line)| Some((self.resolve(&p)?, line?))).any(|(f, line)| {
-            let Ok(body) = std::fs::read_to_string(self.root.join(&f)) else { return false };
+            let Some(body) = self.read(&f) else { return false };
             let lines: Vec<&str> = body.lines().collect();
             if line == 0 || line > lines.len() {
                 return false;
@@ -1187,6 +1204,15 @@ impl CurrentCode {
             _ => None,
         }
     }
+}
+
+/// Whether finding `text` still points at code at commit `rev` of the repo at `root`: it cites a
+/// file the commit has (at a line it has) and the code it quotes is still there, as a carried
+/// finding is checked (`confirms`). A minor finding filed earlier whose code has changed since no
+/// longer holds, and the day's batch drops it (NIT-718). One that cites no file cannot be checked,
+/// and holds.
+pub(crate) fn cited_code_holds_at(root: &Path, rev: &str, text: &str) -> bool {
+    citations(text).is_empty() || CurrentCode::at(root, rev).confirms(text)
 }
 
 /// Whether a finding names a file: a citation, or, where the branch can be read, the word after its
@@ -1668,7 +1694,7 @@ mod tests {
         }
         let root = Path::new(&program_files).parent().unwrap().to_path_buf();
         let name = |p: &str| Path::new(p).file_name().unwrap().to_string_lossy().into_owned();
-        let code = CurrentCode { root: root.clone(), files: vec![format!("{}/Common Files", name(&program_files))] };
+        let code = CurrentCode { root: root.clone(), files: vec![format!("{}/Common Files", name(&program_files))], rev: None };
         let tracked = Some(code.files[0].clone());
         assert_eq!(code.resolve(&format!("{}/Common Files", name(&short))), tracked, "relative, short folder");
         assert_eq!(code.resolve(&format!(r"{short}\Common Files")), tracked, "absolute, short folder");

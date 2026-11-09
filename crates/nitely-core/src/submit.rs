@@ -1299,33 +1299,11 @@ pub(crate) fn file_minor_findings(db: &mut Db, key: &str, review: &Review, actor
     Ok(filed)
 }
 
+/// The change's P2s go to its project's batch for the day (NIT-718), not a follow-up of its own.
 fn file_minor(db: &mut Db, key: &str, review: &Review, actor: &Actor) -> Result<Option<String>> {
-    let minor = crate::submit_rules::minor(&review.findings);
-    let Some(issue) = db.issue(key)?.filter(|_| !minor.is_empty()) else { return Ok(None) };
-    let evidence = crate::submit_rules::minor_follow_up_evidence(key);
-    let follow_up = match db.list_issues(issue.project.as_deref(), false)?.into_iter().find(|i| i.evidence == evidence) {
-        Some(existing) => {
-            let Some(body) = crate::submit_rules::follow_up_with(&existing.body, &minor) else { return Ok(Some(existing.key)) };
-            db.edit_issue(&existing.key, None, Some(&body), actor)?;
-            existing.key
-        }
-        None => {
-            let new = crate::issues::NewIssue {
-                project: issue.project.clone().unwrap_or_default(),
-                title: format!("Minor review findings of {key}: {}", issue.title),
-                body: crate::submit_rules::minor_follow_up_body(key, &minor),
-                kind: "bug".into(),
-                source: issue.source.clone().unwrap_or_else(|| "nitely".into()),
-                evidence,
-                priority: 3,
-                allow_similar: true,
-                ..Default::default()
-            };
-            db.create_issue(&new, actor)?.key
-        }
-    };
-    db.add_note(key, &format!("The review's P2 findings do not hold this change; they are in [{follow_up}]({}).", crate::links::issue_url(&follow_up)), "note", actor)?;
-    Ok(Some(follow_up))
+    let Some(batch) = crate::minor_batch::file(db, key, review, actor)? else { return Ok(None) };
+    db.add_note(key, &format!("The review's P2 findings do not hold this change; they are in the day's batch of minor findings, [{batch}]({}).", crate::links::issue_url(&batch)), "note", actor)?;
+    Ok(Some(batch))
 }
 
 /// How much of an issue's body the reviewer is given: all of any ordinary issue (NIT-696).
@@ -2144,26 +2122,58 @@ reason = "money logic"
     }
 
 
-    /// A P2 holds nothing (NIT-695): the change passes, and its P2 findings, from this round and
-    /// any later one, go to one follow-up outside the goal.
+    /// A P2 holds nothing (NIT-695), and the day's P2s, from every change and round, go to one batch
+    /// for the project outside any goal (NIT-718). The agent that starts the batch gets it without
+    /// the findings whose code changed since; once started, the day's later findings open a second.
     #[test]
-    fn p2_findings_pass_and_go_to_one_follow_up_across_rounds() {
+    fn p2_findings_go_to_the_days_batch_and_a_stale_one_is_dropped_when_it_is_started() {
         let mut f = fixture();
-        let (issue, wt) = f.committed("Count the rows", "edge.txt");
+        let evidence = crate::minor_batch::evidence("NIT", &crate::minor_batch::today());
+        let batches = |f: &Fixture| f.db.list_issues(Some("NIT"), false).unwrap().into_iter().filter(|i| i.evidence == evidence).collect::<Vec<_>>();
+        // A follow-up an earlier build filed for one change's P2s, still waiting.
+        let older = NewIssue { evidence: crate::submit_rules::minor_follow_up_evidence("NIT-90"), body: crate::submit_rules::minor_follow_up_body("NIT-90", &["[P2] Old nit: old.txt, a typo".into()]), ..new("Minor review findings of NIT-90") };
+        let older = f.db.create_issue(&older, &f.actor).unwrap();
+        let (rows, wt) = f.committed("Count the rows", "edge.txt");
         let s = f.submit(&wt, true).unwrap();
         assert_eq!(s.review.as_ref().unwrap().verdict, "pass", "{s:?}");
-        let evidence = crate::submit_rules::minor_follow_up_evidence(&issue.key);
-        let follow_ups = |f: &Fixture| f.db.list_issues(Some("NIT"), false).unwrap().into_iter().filter(|i| i.evidence == evidence).collect::<Vec<_>>();
-        let first = follow_ups(&f);
+        let first = batches(&f);
         assert_eq!(first.len(), 1);
-        assert!(first[0].body.contains("- [P2] Edge case: edge.txt, the empty line") && first[0].goal.is_none() && first[0].priority == 3, "{:?}", first[0]);
-        // A later round that still finds it files nothing new.
+        let edge = crate::minor_batch::line(&rows.key, "[P2] Edge case: edge.txt, the empty line");
+        assert!(first[0].body.contains(&edge) && first[0].goal.is_none() && first[0].priority == 3, "{:?}", first[0]);
+        // The project's first batch takes the earlier follow-up in: its finding under its change,
+        // and it closes pointing there.
+        assert!(first[0].body.contains(&crate::minor_batch::line("NIT-90", "[P2] Old nit: old.txt, a typo")), "{}", first[0].body);
+        assert_eq!(f.db.issue(&older.key).unwrap().unwrap().state, "Duplicate");
+        // A later round that still finds it adds nothing.
         std::fs::write(wt.join("more.txt"), "y").unwrap();
         sh(&wt, &["add", "."]);
         sh(&wt, &["commit", "-q", "-m", "more"]);
         f.submit(&wt, true).unwrap();
-        let again = follow_ups(&f);
-        assert_eq!((again.len(), again[0].key.as_str(), again[0].body.matches("Edge case").count()), (1, first[0].key.as_str(), 1));
+        // Another change's P2 goes to the same batch, under its own key.
+        let (mixed, wt) = f.committed("Mix the rows", "mixed.txt");
+        f.submit(&wt, true).unwrap();
+        let one = batches(&f);
+        assert_eq!((one.len(), one[0].key.as_str(), one[0].body.matches(&edge).count()), (1, first[0].key.as_str(), 1));
+        let stale = crate::minor_batch::line(&mixed.key, "[P2] Mixed edge: mixed.txt, the empty line");
+        assert!(one[0].body.contains(&stale), "{}", one[0].body);
+        // The first change landed (its file is on main), the second never did: starting the batch
+        // keeps the first's finding and drops the second's.
+        std::fs::write(f.repo.join("edge.txt"), "x").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "the rows change landed"]);
+        let batch = one[0].clone();
+        f.db.move_issue(&batch.key, "In Progress", None, None, &f.actor).unwrap();
+        playbook::start_task(&f.db, &f.repo, &batch, "claude", &f.actor).unwrap();
+        let worked = f.db.issue(&batch.key).unwrap().unwrap();
+        assert!(worked.body.contains(&edge) && !worked.body.contains(&stale), "{}", worked.body);
+        // The folded one cites a file main never had either.
+        assert!(f.db.timeline(&batch.key).unwrap().iter().any(|e| e.summary.as_deref().is_some_and(|s| s.starts_with("Dropped 2 finding(s)") && s.contains("Mixed edge") && s.contains("Old nit"))));
+        // Once an agent works the batch, the day's next P2 starts a second one.
+        let (_, wt) = f.committed("Count again", "edge-two.txt");
+        f.submit(&wt, true).unwrap();
+        let two = batches(&f);
+        assert_eq!(two.len(), 2, "{two:?}");
+        assert!(two.iter().any(|b| b.key != batch.key && b.state == "Todo"));
     }
 
     /// A review's P2s go to a follow-up its plan reads (the author named it): that write of the
@@ -2172,7 +2182,7 @@ reason = "money logic"
     fn a_review_filing_its_p2s_into_a_follow_up_it_reads_keeps_its_plan_current() {
         let mut f = fixture();
         let (issue, wt) = f.committed("Count the rows", "edge.txt");
-        let tracked = NewIssue { evidence: crate::submit_rules::minor_follow_up_evidence(&issue.key), body: "Earlier findings, all fixed.".into(), ..new("Minor findings") };
+        let tracked = NewIssue { evidence: crate::minor_batch::evidence("NIT", &crate::minor_batch::today()), body: "Earlier findings, all fixed.".into(), ..new("Minor findings") };
         let follow_up = f.db.create_issue(&tracked, &f.actor).unwrap();
         brief_reviewer(&f.db, &issue.key, &format!("The P2s are tracked in {}.", follow_up.key), &f.actor).unwrap();
         f.submit(&wt, true).unwrap();
@@ -2194,9 +2204,9 @@ reason = "money logic"
         let (issue, wt) = f.committed("Mix the rows", "mixed.txt");
         let s = f.submit(&wt, true).unwrap();
         assert!(!s.gate.passed && s.review.as_ref().is_some_and(|r| r.verdict == "changes"), "{s:?}");
-        let evidence = crate::submit_rules::minor_follow_up_evidence(&issue.key);
+        let evidence = crate::minor_batch::evidence("NIT", &crate::minor_batch::today());
         let filed = f.db.list_issues(Some("NIT"), false).unwrap().into_iter().find(|i| i.evidence == evidence).expect("the P2 is filed");
-        assert!(filed.body.contains("- [P2] Mixed edge: mixed.txt, the empty line") && !filed.body.contains("[P1]"), "{}", filed.body);
+        assert!(filed.body.contains(&crate::minor_batch::line(&issue.key, "[P2] Mixed edge: mixed.txt, the empty line")) && !filed.body.contains("[P1]"), "{}", filed.body);
     }
 
     #[test]

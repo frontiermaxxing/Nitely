@@ -1768,7 +1768,7 @@ impl Db {
         self.issue(&key)?.with_context(|| format!("no issue {key}"))
     }
 
-    pub fn edit_issue(&mut self, key: &str, title: Option<&str>, body: Option<&str>, actor: &Actor) -> Result<IssueRecord> {
+    pub fn edit_issue(&self, key: &str, title: Option<&str>, body: Option<&str>, actor: &Actor) -> Result<IssueRecord> {
         let title = title.map(str::trim);
         let body = body.map(str::trim);
         if title.is_some_and(str::is_empty) {
@@ -1779,7 +1779,7 @@ impl Db {
         }
         // The text it had is read under the write lock: two edits at once each keep the text the
         // other replaced, and none is lost.
-        let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let tx = rusqlite::Transaction::new_unchecked(&self.conn, TransactionBehavior::Immediate)?;
         let (key, origin, old_title, old_body): (String, String, String, String) = tx
             .query_row("SELECT key, origin, title, COALESCE(body, '') FROM issue WHERE key = ?1 COLLATE NOCASE", [key.trim()], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
@@ -2653,7 +2653,7 @@ mod tests {
         assert_eq!(db.timeline("NIT-1").unwrap().len(), events, "unchanged: no event");
 
         // Two writers on the same database: each edit keeps the text the one before it replaced.
-        let mut other = Db::open(&dir.join("t.db")).unwrap();
+        let other = Db::open(&dir.join("t.db")).unwrap();
         other.edit_issue("NIT-1", Some("Slice 2: export"), None, &agent).unwrap();
         db.edit_issue("NIT-1", Some("Slice 2: export as CSV"), None, &agent).unwrap();
         let titles: Vec<String> = db.timeline("NIT-1").unwrap().iter().rev().take(2).filter_map(|t| t.summary.clone()).collect();
