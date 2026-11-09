@@ -48,7 +48,7 @@ pub struct Check {
     /// runs instead when the reporter's output cannot prove a nonzero set of tests ran.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fallback: Option<String>,
-    /// The reporter format the filtered run's output is read in, for the tests that executed.
+    /// The format the suite's output is read in for the tests that executed, filtered or whole.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reporter: Option<Reporter>,
 }
@@ -95,6 +95,23 @@ impl Executed {
 /// suite's hook that threw). `# SKIP` and `# TODO` lines are not runs. None when the text holds no
 /// TAP at all.
 pub fn parse_tap(text: &str) -> Option<Executed> {
+    // A cut output that starts with the full list of what ran (playbook's tail): that list, and the
+    // runner's counts from wherever they are.
+    let block = text.split_once(&format!("{RAN_IN_FULL}\n")).and_then(|(_, rest)| rest.split_once(RAN_IN_FULL_END));
+    if let Some((list, rest)) = block {
+        let mut executed = parse_tap_lines(list).unwrap_or_default();
+        let counts = parse_tap_lines(rest).unwrap_or_default();
+        (executed.reported_pass, executed.reported_fail) = (counts.reported_pass, counts.reported_fail);
+        return Some(executed);
+    }
+    parse_tap_lines(text)
+}
+
+/// Opens and closes the list of every test a cut TAP output ran, which the gate's tail writes.
+pub const RAN_IN_FULL: &str = "# Every test that ran (the output below is cut):";
+pub const RAN_IN_FULL_END: &str = "# End of the tests that ran";
+
+fn parse_tap_lines(text: &str) -> Option<Executed> {
     let mut found = false;
     let mut executed = Executed::default();
     // The `# Subtest:` names open, by depth; a test line at a depth closes what is open there.
@@ -268,11 +285,13 @@ impl JsSuite {
             }
             _ => None,
         };
-        let (command, fallback, reporter) = match filtered {
-            Some((command, reporter)) => (command, Some(self.command.clone()), Some(reporter)),
-            None => (self.command.clone(), None, None),
+        // The whole command is read in the declared format too: a runner whose TAP has no
+        // `# pass N` (Vitest) is judged by the tests it names, not by node's summary.
+        let (command, fallback) = match filtered {
+            Some((command, _)) => (command, Some(self.command.clone())),
+            None => (self.command.clone(), None),
         };
-        Check { component: component.into(), suite: Some(suite.into()), whole_suite: fallback.is_none(), command, required_tests: tests, discovery: None, fallback, reporter }
+        Check { component: component.into(), suite: Some(suite.into()), whole_suite: fallback.is_none(), command, required_tests: tests, discovery: None, fallback, reporter: self.reporter }
     }
 
     /// The listed test files and every candidate source file a pattern matches.
@@ -1796,7 +1815,7 @@ test_ids = ["adds"]
         let base = edit(&repo, "src/other.test.ts", "export const result = 2;");
         edit(&repo, "src/math.test.ts", "import {sum} from './helper.js'; export const result = sum + 1;");
         let check = &selected(&repo, &base).checks[1];
-        assert_eq!((check.command.as_str(), check.whole_suite, check.fallback.is_none()), ("npm test", true, true), "every test selected: the whole suite");
+        assert_eq!((check.command.as_str(), check.whole_suite, check.fallback.is_none(), check.reporter), ("npm test", true, true, Some(Reporter::Tap)), "every test selected: the whole suite, read as TAP");
         std::fs::remove_dir_all(repo).unwrap();
     }
 

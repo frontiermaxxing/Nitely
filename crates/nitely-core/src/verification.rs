@@ -606,7 +606,7 @@ pub(crate) fn fallback_plan(plan:&Plan,results:&[crate::playbook::CommandResult]
         if proved {continue;}
         why.push(format!("`{}` showed no tests that ran, so its whole suite `{whole}` ran instead",check.command));
         let c=&mut fallback.affected.as_mut().expect("selection").checks[i];
-        c.command=whole.clone();c.fallback=None;c.reporter=None;c.whole_suite=true;
+        c.command=whole.clone();c.fallback=None;c.whole_suite=true;
         if fallback.commands.contains(whole) {fallback.commands.retain(|k|k!=&check.command);}
         else {for k in fallback.commands.iter_mut().filter(|k|**k==check.command) {*k=whole.clone();}}
     }
@@ -633,7 +633,8 @@ pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandRes
                 .with_context(||format!("`{}` printed no {reporter:?} output to read",check.command))?;
             if proof.count()==0 {bail!("`{}` ran zero tests",check.command);}
             if proof.failures()>0 {bail!("`{}` reported {} failing tests: {}",check.command,proof.failures(),proof.failed.join(", "));}
-            executed.push(ExecutedCheck{command:check.command.clone(),required_tests:check.required_tests.clone(),executed:proof});
+            // Only a filtered run's IDs are the evidence of which tests ran; a whole suite ran them all.
+            if check.fallback.is_some() {executed.push(ExecutedCheck{command:check.command.clone(),required_tests:check.required_tests.clone(),executed:proof});}
         } else if let Some(discovery)=&check.discovery {
             crate::affected_tests::verify_cargo_discovery(check,output(&discovery.command)?,output(&discovery.ignored_command)?)?;
             let run=output(&check.command)?;
@@ -652,11 +653,12 @@ pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandRes
 
 /// Puts what the filtered runs executed on the verification (NIT-750): on the plan recorded for
 /// this revision, when there is one, and on the issue's timeline.
-pub(crate) fn record_executed(db:&Db,issue_key:Option<&str>,plan:&Plan,executed:Vec<ExecutedCheck>,actor:&Actor)->Result<()> {
-    if executed.is_empty() {return Ok(());}
-    let Some(key)=issue_key else {return Ok(());};
+/// The plan with what ran on it is returned, for the gate to carry (a goal item's land records it).
+pub(crate) fn record_executed(db:&Db,issue_key:Option<&str>,plan:&Plan,executed:Vec<ExecutedCheck>,actor:&Actor)->Result<Option<Plan>> {
+    if executed.is_empty() {return Ok(None);}
     let mut recorded=plan.clone();
     recorded.executed=executed;
+    let Some(key)=issue_key else {return Ok(Some(recorded));};
     db.conn.execute("UPDATE verification_plan SET plan=?1 WHERE issue_key=?2 AND head=?3 AND policy_commit=?4 AND classifier=?5",
         rusqlite::params![serde_json::to_string(&recorded)?,key,recorded.head,recorded.policy_commit,recorded.classifier])?;
     let lines:Vec<String>=recorded.executed.iter().map(|e| {
@@ -669,7 +671,7 @@ pub(crate) fn record_executed(db:&Db,issue_key:Option<&str>,plan:&Plan,executed:
     db.log_event(actor,Some(key),None,"selected_tests_ran",&format!("Only the selected test files ran, and these tests were seen to run:
 {}",lines.join("
 ")))?;
-    Ok(())
+    Ok(Some(recorded))
 }
 pub(crate) fn audit_candidate(repo:&Path,issue:&IssueRecord,plan:&Plan,author:&str)->Result<Option<crate::verification_audit::Candidate>> {
     if plan.audit_percent==0 || !matches!(plan.effective.as_str(),"inert"|"contained"|"basic") {return Ok(None);}
@@ -678,6 +680,17 @@ pub(crate) fn audit_candidate(repo:&Path,issue:&IssueRecord,plan:&Plan,author:&s
 }
 
 pub fn record(db: &Db, issue: &IssueRecord, plan: &Plan, actor: &Actor) -> Result<()> {
+    // What a gate on this same revision saw run stays with the plan when it is recorded again
+    // after the gate (submit, a goal item's land), from the plan it started with (NIT-750 review).
+    let mut kept;
+    let plan = if plan.executed.is_empty() {
+        let before: Option<String> = db.conn.query_row("SELECT plan FROM verification_plan WHERE issue_key=?1 AND head=?2 AND policy_commit=?3 AND classifier=?4",
+            rusqlite::params![issue.key, plan.head, plan.policy_commit, plan.classifier], |r| r.get(0)).optional()?;
+        match before.and_then(|b| serde_json::from_str::<Plan>(&b).ok()).filter(|b| !b.executed.is_empty()) {
+            Some(before) => { kept = plan.clone(); kept.executed = before.executed; &kept }
+            None => plan,
+        }
+    } else { plan };
     let inserted = db.conn.execute(
         "INSERT INTO verification_plan(issue_key, head, policy_commit, classifier, plan, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
          ON CONFLICT(issue_key, head, policy_commit, classifier) DO UPDATE SET plan=excluded.plan, recorded_at=excluded.recorded_at WHERE plan != excluded.plan",
@@ -1012,7 +1025,8 @@ display_copy=['src/Page[.]tsx']
         // Runners that print TAP: one test per file given, none at all, and the whole suite's two.
         const FILES: &str = "const f = process.argv.slice(2);\nconsole.log('TAP version 13');\nf.forEach((n, i) => console.log(`# Subtest: ${n}\\nok ${i + 1} - ${n}`));\nconsole.log(`1..${f.length}\\n# pass ${f.length}`);\n";
         const NONE: &str = "console.log('TAP version 13\\n1..0\\n# pass 0');\n";
-        const WHOLE: &str = "console.log('TAP version 13\\nok 1 - math\\nok 2 - other\\n1..2\\n# pass 2');\n";
+        // As Vitest's tap-flat prints it: test lines only, no `# pass N` summary.
+        const WHOLE: &str = "console.log('TAP version 13\\n1..2\\nok 1 - src/math.test.ts > adds\\nok 2 - src/other.test.ts > counts');\n";
         let map=|runner:&str| format!("version = 1\n[[components]]\nid = 'web'\nroots = ['src/', 'tools/']\nchecks = ['git --version']\n[[components.suites]]\nid = 'unit'\n[components.suites.javascript]\ncommand = 'node tools/whole.mjs'\ntest_files = ['src/math.test.ts', 'src/other.test.ts']\nfiles_command = 'node tools/{runner}.mjs {{files}}'\nreporter = 'tap'\n");
         let gate=|runner:&str| {
             let repo=crate::paths::unique_temp("nitely-filtered-js","");
@@ -1036,19 +1050,28 @@ display_copy=['src/Page[.]tsx']
             let gate=crate::goal_branch::item_gate(&db,&repo,&repo,Some(&issue.key),&base,"goal/sums",&Actor::Human).unwrap();
             let ran:Vec<String>=gate.results.iter().filter(|r|!r.skipped).map(|r|r.command.clone()).collect();
             let timeline=db.timeline(&issue.key).unwrap();
+            // Recorded again after the gate from the plan it started with, as a land or submit
+            // does, the plan keeps what ran on this revision.
+            if let Some(plan)=&gate.plan {
+                record(&db,&issue,plan,&Actor::Human).unwrap();
+                record(&db,&issue,&Plan{executed:vec![],..plan.clone()},&Actor::Human).unwrap();
+            }
+            let kept=recent(&db,&issue.key).unwrap().first().map(|p|p.executed.clone()).unwrap_or_default();
             std::fs::remove_dir_all(&repo).ok();
-            (gate,ran,timeline)
+            (gate,ran,timeline,kept)
         };
 
-        let (filtered,ran,timeline)=gate("files");
+        let (filtered,ran,timeline,kept)=gate("files");
         assert!(filtered.passed,"{:?} {:?}",filtered.warnings,filtered.results);
         assert!(ran.contains(&"node tools/files.mjs src/math.test.ts".to_string()),"only the importing test file: {ran:?}");
         assert!(!ran.iter().any(|c|c=="node tools/whole.mjs"),"{ran:?}");
         let proof=timeline.iter().find(|e|e.kind=="selected_tests_ran").and_then(|e|e.summary.clone()).expect("the tests that ran are recorded");
         assert!(proof.contains("1 tests from src/math.test.ts: src/math.test.ts"),"{proof}");
+        assert_eq!(kept.len(),1,"the gate's plan carries what ran, and recording it again keeps it");
+        assert_eq!(kept[0].executed.passed,["src/math.test.ts"]);
 
-        let (whole,ran,timeline)=gate("none");
-        assert!(whole.passed,"the whole suite ran and passed: {:?} {:?}",whole.warnings,whole.results);
+        let (whole,ran,timeline,_)=gate("none");
+        assert!(whole.passed,"the whole suite ran, read as the declared TAP, and passed: {:?} {:?}",whole.warnings,whole.results);
         assert!(ran.iter().any(|c|c=="node tools/whole.mjs"),"{ran:?}");
         assert!(whole.warnings[0].starts_with("Selected tests unproven"),"{:?}",whole.warnings);
         assert!(timeline.iter().any(|e|e.kind=="gate_fallback"));

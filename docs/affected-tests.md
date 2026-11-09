@@ -131,8 +131,9 @@ reporter = "tap"
 
 `{files}` is filled with the selected test files, space-separated, as repo paths. A runner
 that takes file arguments works: `node --test --test-reporter=tap {files}` for node:test, or
-`npx vitest run --reporter=tap-flat {files}` for Vitest. `reporter` names what the command
-prints; TAP is the one Nitely reads today. Nitely's own `npm test` takes files the same way:
+`npx vitest run --reporter=tap-flat {files}` for Vitest. `reporter` names what both commands
+print, the whole `command` too, which is then judged by the tests it names rather than by
+node's `# pass N`; TAP is the one Nitely reads today. Nitely's own `npm test` takes files the same way:
 `node scripts/test.mjs src/askLinks.test.ts scripts/dco.test.mjs` compiles the `.ts` tests and
 runs only those two, with the TAP reporter. Nitely's own map does not declare it yet: its
 `npm-test` suite uses an approved whole-suite mapping (vite and tsconfig resolve imports the
