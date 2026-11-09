@@ -200,6 +200,8 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     }
     // An item of a goal with a goal branch has no pull request of its own: its hop is the land into
     // the goal branch, with item checks and the item review the mode asks for (goal_branch.rs).
+    // One that moves a submodule pointer is taken off it and goes to main alone (NIT-746).
+    crate::goal_branch::leave_for_main(db, &root, &key, &branch, Some(&worktree), true, actor)?;
     if let Some(gb) = crate::goal_branch::route_of_issue(db, &root, &key, Some(&branch))? {
         if quick {
             bail!("{key} is an item of a goal that lands through {}: submit it", gb.branch);

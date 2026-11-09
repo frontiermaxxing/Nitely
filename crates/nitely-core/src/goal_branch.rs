@@ -447,7 +447,7 @@ pub(crate) fn start_point(db: &Db, root: &Path, pb: &Playbook, issue: &IssueReco
         let options = crate::project_modes::for_issue(db, &issue.key)?.map(|m| m.options()).unwrap_or_default();
         let active = db.goal(goal)?.is_some_and(|g| g.state == "active");
         let open = db.goal_branch(goal)?.is_some();
-        let routes = goal_items_route(options.goal_branches, !pb.submodules.is_empty()).is_ok();
+        let routes = goal_items_route(options.goal_branches).is_ok();
         if let Some(items) = engage(routes, options.checkpoint.as_ref().map(|c| c.items), active, open, db.goal_branch_turned_off(goal)?) {
             db.enable_goal_branch(goal, root, None, Some(items), actor)?;
         }
@@ -467,16 +467,108 @@ pub fn item_route(open: bool, mode_routes: bool, started_from_goal: bool) -> boo
 
 /// The goal branch `key`'s change lands into from `root` (`item_route`), or None for main.
 /// `branch` is the item's own branch, once it has one. A project whose mode the person never chose
-/// keeps a goal branch opened by hand.
+/// keeps a goal branch opened by hand. An item that moves a declared submodule's pointer lands on
+/// main alone, through the lockstep land (NIT-746): `leave_for_main` takes it off the goal branch.
 pub fn route_of_issue(db: &Db, root: &Path, key: &str, branch: Option<&str>) -> Result<Option<GoalBranch>> {
+    Ok(goal_route(db, root, key, branch)?.and_then(|r| r.moved.is_empty().then_some(r.gb)))
+}
+
+/// Where an item of a goal with a goal branch would land, and what keeps it off that branch.
+struct GoalRoute {
+    gb: GoalBranch,
+    /// Its branch holds the goal branch's commits.
+    started: bool,
+    /// The declared submodules whose pointer its branch moves: it lands on main alone when any.
+    moved: Vec<String>,
+}
+
+fn goal_route(db: &Db, root: &Path, key: &str, branch: Option<&str>) -> Result<Option<GoalRoute>> {
     let Some(gb) = db.goal_branch_of_issue(key)?.filter(|g| same_repo(g, root)) else { return Ok(None) };
     let pb = Playbook::load(root)?;
     let mode_routes = match crate::project_modes::for_issue(db, key)? {
-        Some(m) if m.explicit => goal_items_route(m.options().goal_branches, !pb.submodules.is_empty()).is_ok(),
+        Some(m) if m.explicit => goal_items_route(m.options().goal_branches).is_ok(),
         _ => true,
     };
     let started = branch.is_some_and(|b| started_from(root, b, &gb.branch, pb.integration_branch()));
-    Ok(item_route(true, mode_routes, started).then_some(gb))
+    if !item_route(true, mode_routes, started) {
+        return Ok(None);
+    }
+    let moved = match branch {
+        Some(b) if !pb.submodules.is_empty() => moved_pointers(root, &pb, b, if started { &gb.branch } else { pb.integration_branch() })?,
+        _ => Vec::new(),
+    };
+    Ok(Some(GoalRoute { gb, started, moved }))
+}
+
+/// The declared submodules whose pointer `branch` moves since it left `from`. The goal branch never
+/// moves one itself (merges of main only take main's), so an item that does lands on main alone.
+fn moved_pointers(root: &Path, pb: &Playbook, branch: &str, from: &str) -> Result<Vec<String>> {
+    let fork = git(root, &["merge-base", from, branch])?.trim().to_string();
+    let mut moved = Vec::new();
+    for s in &pb.submodules {
+        if crate::submodules::pointer(root, branch, s.path())? != crate::submodules::pointer(root, &fork, s.path())? {
+            moved.push(s.path().to_string());
+        }
+    }
+    Ok(moved)
+}
+
+/// For an item that moves a submodule pointer (`goal_route`): takes it off its goal branch, so it
+/// lands on main alone through the lockstep land, and says so on the issue. One that started from
+/// the goal branch is rebased in `worktree` onto main with only its own commits: the goal's other
+/// items must not reach main with it. `say` says it even when nothing needed moving. Returns what
+/// it said, or None for an item that lands as it would otherwise.
+pub(crate) fn leave_for_main(db: &Db, root: &Path, key: &str, branch: &str, worktree: Option<&Path>, say: bool, actor: &Actor) -> Result<Option<String>> {
+    let Some(route) = goal_route(db, root, key, Some(branch))? else { return Ok(None) };
+    if route.moved.is_empty() {
+        return Ok(None);
+    }
+    let pb = Playbook::load(root)?;
+    let main = pb.integration_branch();
+    let pointers = route.moved.join(", ");
+    let mut said = format!("Moves the submodule pointer of {pointers}: lands alone on {main} with its submodules, not through {}", route.gb.branch);
+    if route.started {
+        let Some(wt) = worktree else {
+            bail!("{key} moves the submodule pointer of {pointers}, so it lands on {main} alone, but {branch} has no worktree to take it off {} in; run start_task again", route.gb.branch);
+        };
+        let fork = git(root, &["merge-base", &route.gb.branch, branch])?.trim().to_string();
+        rebase_onto(wt, &pb, main, &fork).with_context(|| format!("taking {branch} off {} onto {main}", route.gb.branch))?;
+        said.push_str(&format!("; its own commits were rebased off {} onto {main}", route.gb.branch));
+    } else if !say {
+        return Ok(None);
+    }
+    let place = worktree.map(|w| w.to_string_lossy().into_owned());
+    db.log_event(actor, Some(key), place.as_deref(), "status", &said)?;
+    Ok(Some(said))
+}
+
+/// `git rebase --onto main fork` in `worktree`. A stop whose only conflicts are declared submodule
+/// pointers keeps the item's own pointer (main's may have moved since the goal branch took it in);
+/// any other conflict aborts the rebase and is said.
+fn rebase_onto(worktree: &Path, pb: &Playbook, main: &str, fork: &str) -> Result<()> {
+    let mut result = git(worktree, &["rebase", "--onto", main, fork]).map(|_| ());
+    // Each stop is one commit; an item has far fewer than this.
+    for _ in 0..1000 {
+        let Err(e) = result else { return Ok(()) };
+        let conflicts: Vec<String> = git(worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
+        if conflicts.is_empty() || !conflicts.iter().all(|c| pb.submodules.iter().any(|s| s.path() == c)) {
+            git(worktree, &["rebase", "--abort"]).ok();
+            if conflicts.is_empty() {
+                return Err(e);
+            }
+            bail!("its commits conflict with {main} in {}; rebase it yourself (`git rebase --onto {main} {}`), then submit again", conflicts.join(", "), short(fork));
+        }
+        for path in &conflicts {
+            let ours = crate::submodules::pointer(worktree, "REBASE_HEAD", path)?.with_context(|| format!("the commit being moved has no pointer for {path}"))?;
+            git(worktree, &["update-index", "--cacheinfo", &format!("160000,{ours},{path}")])?;
+        }
+        result = git(worktree, &["-c", "core.editor=true", "rebase", "--continue"]).map(|_| ());
+        // A commit that only moved the pointer, to where it points now, is empty: drop it.
+        if result.is_err() && git(worktree, &["diff", "--cached", "--quiet"]).is_ok() && git(worktree, &["diff", "--name-only", "--diff-filter=U"])?.trim().is_empty() {
+            result = git(worktree, &["rebase", "--skip"]).map(|_| ());
+        }
+    }
+    result
 }
 
 /// Whether `item` started from `goal_branch`: where they meet holds commits `main` does not.
@@ -485,16 +577,13 @@ fn started_from(root: &Path, item: &str, goal_branch: &str, main: &str) -> bool 
     crate::playbook::git(root, &["rev-list", "--count", &format!("{main}..{}", met.trim())]).is_ok_and(|n| n.trim() != "0")
 }
 
-/// Whether a mode's goal items go through goal branches in a repo, or why they land on main: the
-/// mode must say so (an item gets the item review it asks for on the way in: submit.rs,
-/// `submit_into_goal`, NIT-563); a repo with managed submodules lands its goal items on main for
-/// now (land.rs, item_hop).
-pub fn goal_items_route(goal_branches: Option<bool>, submodules: bool) -> Result<(), &'static str> {
+/// Whether a mode's goal items go through goal branches, or why they land on main: the mode must
+/// say so (an item gets the item review it asks for on the way in: submit.rs, `submit_into_goal`,
+/// NIT-563). In a repo with managed submodules, an item that moves a pointer still lands on main
+/// alone (`leave_for_main`, NIT-746).
+pub fn goal_items_route(goal_branches: Option<bool>) -> Result<(), &'static str> {
     if goal_branches != Some(true) {
         return Err("Each goal item lands on main like any other change");
-    }
-    if submodules {
-        return Err("A repo with managed submodules lands goal items on main for now");
     }
     Ok(())
 }
@@ -1301,14 +1390,13 @@ commands = { fake = ["{sh}", "-c", "cat > /dev/null; case \"$(git diff --name-on
     #[test]
     fn a_mode_with_goal_branches_turns_a_goals_branch_on_unless_it_was_turned_off() {
         use crate::project_modes::{preset, Mode};
-        let route = |m: Mode, submodules: bool| goal_items_route(preset(m).goal_branches, submodules);
+        let route = |m: Mode| goal_items_route(preset(m).goal_branches);
         // Fast and Careful land goal items through goal branches, Careful with its item review on
         // the way in (NIT-563); Release has none.
-        assert_eq!(route(Mode::Fast, false), Ok(()));
-        assert_eq!(route(Mode::Careful, false), Ok(()));
-        assert!(route(Mode::Release, false).is_err());
-        assert!(route(Mode::Fast, true).unwrap_err().contains("managed submodules"));
-        assert_eq!(goal_items_route(None, false).is_err(), true, "no mode set: as before");
+        assert_eq!(route(Mode::Fast), Ok(()));
+        assert_eq!(route(Mode::Careful), Ok(()));
+        assert!(route(Mode::Release).is_err());
+        assert_eq!(goal_items_route(None).is_err(), true, "no mode set: as before");
         // NIT-563: an open branch takes an item the mode routes, or one that started from it.
         assert!(item_route(true, true, false));
         assert!(item_route(true, false, true), "started from the goal branch: never onto main with its commits");
@@ -1753,6 +1841,119 @@ test_patterns = [\"src/**/*.test.ts\"]
         let next = f.db.open_checkpoint(f.goal).unwrap().expect("the next checkpoint holds the rest");
         assert_ne!(next.issue, cp.issue);
         assert_eq!(f.db.goal_items_waiting(f.goal).unwrap().len(), 4);
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A repo whose `engine` folder is a managed submodule with no remote of its own, under Careful.
+    fn submodule_fixture(name: &str) -> Fixture {
+        let mut f = fixture(name, false);
+        let upstream = f.base.join("engine-upstream");
+        crate::test_repo::init(&upstream, &[("core.c", "int core;\n")]);
+        let path = f.repo.join(playbook::PLAYBOOK_PATH);
+        let text = std::fs::read_to_string(&path).unwrap();
+        std::fs::write(&path, text + "[[submodules]]\npath = \"engine\"\ncheckout = \"every_task\"\n").unwrap();
+        sh(&f.repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &upstream.to_string_lossy(), "engine"]);
+        sh(&f.repo, &["add", playbook::PLAYBOOK_PATH]);
+        sh(&f.repo, &["commit", "-q", "-m", "the engine"]);
+        sh(&f.repo.join("engine"), &["remote", "remove", "origin"]);
+        crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Careful, Default::default());
+        f
+    }
+
+    /// Commits `file` in the engine checked out in `dir` and points `dir`'s commit at it.
+    fn bump_engine(dir: &Path, file: &str) {
+        let engine = dir.join("engine");
+        std::fs::write(engine.join(file), "int x;\n").unwrap();
+        sh(&engine, &["add", file]);
+        sh(&engine, &["commit", "-q", "-m", &format!("engine: {file}")]);
+        sh(dir, &["add", "engine"]);
+        sh(dir, &["commit", "-q", "-m", &format!("point the engine at {file}")]);
+    }
+
+    impl Fixture {
+        /// The engine commit `rev` points at.
+        fn pointer(&self, rev: &str) -> String {
+            sh(&self.repo, &["rev-parse", &format!("{rev}:engine")])
+        }
+
+        /// Starts `key` in the goal, commits `file`, and submits it: Careful lands it into the goal
+        /// branch at once.
+        fn item(&mut self, title: &str, file: &str) -> String {
+            let key = self.issue(title, Some(self.goal));
+            let wt = self.work(&key, file, "x\n");
+            let s = self.submit(&wt);
+            assert!(s.land.as_ref().is_some_and(|l| l.landed && l.goal_branch.as_deref() == Some("goal-1")), "{s:?}");
+            key
+        }
+    }
+
+    /// NIT-746: in a repo with a managed submodule, a goal item that moves no pointer goes through
+    /// the goal branch, its submodule checked out where the goal branch points it.
+    #[test]
+    fn a_goal_item_that_moves_no_submodule_pointer_lands_on_the_goal_branch() {
+        let mut f = submodule_fixture("nitely-goal-sub-item");
+        f.item("A", "a.txt");
+        // Main moves the pointer by itself meanwhile: the goal branch still holds the old one.
+        let held = f.pointer("goal-1");
+        bump_engine(&f.repo, "other.c");
+        assert_ne!(f.pointer("main"), held);
+        let (main_before, engine_before) = (f.head("main"), sh(&f.repo.join("engine"), &["rev-parse", "main"]));
+
+        let b = f.issue("B", Some(f.goal));
+        let wt = f.work(&b, "b.txt", "b\n");
+        assert_eq!(sh(&wt.join("engine"), &["rev-parse", "HEAD"]), held, "start_task checks the engine out at the goal branch's pointer");
+        let s = f.submit(&wt);
+        assert!(s.land.as_ref().is_some_and(|l| l.landed && l.goal_branch.as_deref() == Some("goal-1")), "{s:?}");
+        assert!(s.review.is_some(), "with Careful's item review: {s:?}");
+        assert!(f.has("goal-1", "a.txt") && f.has("goal-1", "b.txt") && !f.has("main", "b.txt"));
+        assert_eq!(f.head("main"), main_before, "main is untouched by an item");
+        assert_eq!(sh(&f.repo.join("engine"), &["rev-parse", "main"]), engine_before, "and so is the engine's");
+        assert_eq!(f.pointer("goal-1"), f.pointer("main"), "main came into the goal branch with its pointer");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// NIT-746: a goal item that moves a submodule pointer is taken off the goal branch and lands on
+    /// main alone, both repos moving together, without the goal's other items.
+    #[test]
+    fn a_goal_item_that_moves_a_submodule_pointer_lands_on_main_alone() {
+        let mut f = submodule_fixture("nitely-goal-sub-pointer");
+        f.item("A", "a.txt");
+        let b = f.issue("B", Some(f.goal));
+        let wt = f.work(&b, "b.txt", "b\n");
+        assert!(wt.join("a.txt").exists(), "it starts from the goal branch");
+        bump_engine(&wt, "faster.c");
+        let engine_tip = sh(&wt.join("engine"), &["rev-parse", "HEAD"]);
+
+        let s = f.submit(&wt);
+        assert!(s.land.is_none(), "no item hop: {s:?}");
+        assert!(f.told(&b, "lands alone on main"), "said on the issue");
+        assert!(!wt.join("a.txt").exists(), "only its own commits go on to main");
+        let landed = f.land(&b);
+        assert!(landed.landed && landed.goal_branch.is_none(), "{landed:?}");
+        assert!(f.has("main", "b.txt") && !f.has("main", "a.txt"), "A waits for the checkpoint");
+        let engine_main = sh(&f.repo.join("engine"), &["rev-parse", "main"]);
+        assert_eq!(engine_main, engine_tip, "the engine's main moved with it");
+        assert_eq!(f.pointer("main"), engine_main, "and main points at it");
+        assert_eq!(f.db.issue(&b).unwrap().unwrap().state, "Done");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// NIT-746: a land on main that moves the submodule pointer flows into the goal branch cleanly:
+    /// the goal branch never moves the pointer itself, so the merge only takes main's.
+    #[test]
+    fn a_main_land_that_moves_the_submodule_pointer_merges_into_the_goal_branch_cleanly() {
+        let mut f = submodule_fixture("nitely-goal-sub-merge");
+        f.item("A", "a.txt");
+        let other = f.issue("Engine work", None);
+        let wt = f.work(&other, "c.txt", "c\n");
+        bump_engine(&wt, "faster.c");
+        f.submit(&wt);
+        let landed = f.land(&other);
+        assert!(landed.landed, "{landed:?}");
+        assert!(landed.goals.iter().any(|g| g.contains("goal-1")), "main flowed into the goal branch: {:?}", landed.goals);
+        assert_eq!(f.db.goal_branch(f.goal).unwrap().unwrap().state, "green");
+        assert_eq!(f.pointer("goal-1"), f.pointer("main"));
+        assert!(f.has("goal-1", "a.txt") && f.has("goal-1", "c.txt"));
         std::fs::remove_dir_all(&f.base).ok();
     }
 }

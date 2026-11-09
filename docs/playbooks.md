@@ -94,6 +94,9 @@ never push to): its integration branch then lives only in the repo's own copy of
   push back, so the pushed repo never points at a commit its remote cannot fetch. A submodule the
   change leaves alone is moved in the task's worktree to where the rebased branch points it, so the
   gate builds what lands. A repo with declared submodules lands each change alone, never in a batch.
+- **goal branches** live in the repo only. A goal item that leaves every pointer alone lands into
+  its goal branch; one that moves a pointer lands on the integration branch alone, as above, with
+  only its own commits (docs/verification-settings.md, NIT-746).
 - **gate steps** can run only when the submodule moved (`when_changed = ["^engine$"]`). In a build
   lane the submodule is checked out at the commit the snapshot points at, sparse over its `sparse`
   directories plus those the snapshot changes in it since the base, and `[lanes] keep` entries
