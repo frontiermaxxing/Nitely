@@ -753,9 +753,12 @@ pub(crate) fn item_gate(db: &Db, root: &Path, worktree: &Path, key: Option<&str>
         reasons: vec![format!("An item of a goal lands into {branch} with item checks; the goal's checkpoint runs the full gate and the review before main.")],
         files: vec![],
         enforcement: format!("Item checks into {branch}: compile, lint and the affected tests. Not evidence for main."),
+        executed: vec![],
     };
     let mut gate = playbook::run_planned_gate(db, root, worktree, key, actor, crate::lanes::Kind::Land, &plan)?;
-    gate.plan = Some(plan);
+    // The plan with what its filtered runs were seen to run, which the item's land records (NIT-750).
+    let executed = gate.plan.take().map(|p| p.executed).unwrap_or_default();
+    gate.plan = Some(crate::verification::Plan { executed, ..plan });
     Ok(gate)
 }
 
