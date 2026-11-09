@@ -43,6 +43,101 @@ pub struct Check {
     pub required_tests: Vec<String>,
     pub discovery: Option<CargoDiscovery>,
     pub whole_suite: bool,
+    /// A JavaScript suite run on only its selected files (NIT-750): `command` is the map's
+    /// `files_command` with them filled in, and this is the suite's whole command, which the gate
+    /// runs instead when the reporter's output cannot prove a nonzero set of tests ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<String>,
+    /// The reporter format the filtered run's output is read in, for the tests that executed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reporter: Option<Reporter>,
+}
+
+/// The reporter outputs Nitely reads executed test IDs from (NIT-750). TAP is what node:test and
+/// Vitest (`--reporter=tap` or `tap-flat`) print.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Reporter {
+    Tap,
+}
+
+/// What a filtered run's reporter output proves ran: every passing or failing test it reported,
+/// as IDs (nested names joined by " > "), skipped and todo tests left out.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct Executed {
+    pub passed: Vec<String>,
+    pub failed: Vec<String>,
+    /// The runner's own count of passing tests (TAP's `# pass N`), when it printed one: more than
+    /// `passed` when the output was cut before every line could be kept.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_pass: Option<u64>,
+}
+
+impl Executed {
+    /// How many tests ran, by the larger of the runner's count and the lines read.
+    pub fn count(&self) -> u64 {
+        self.reported_pass.unwrap_or(0).max(self.passed.len() as u64) + self.failed.len() as u64
+    }
+}
+
+/// The tests a TAP stream reports as run: `ok` and `not ok` lines at any depth, each named under
+/// the `# Subtest:` lines open above it. A parent whose subtests reported is not counted again,
+/// and `# SKIP` and `# TODO` lines are not runs. None when the text holds no TAP at all.
+pub fn parse_tap(text: &str) -> Option<Executed> {
+    let mut found = false;
+    let mut executed = Executed::default();
+    // The `# Subtest:` names open, by depth; a test line at a depth closes what is open there.
+    let mut open: Vec<(usize, String)> = vec![];
+    let mut parents: BTreeSet<(usize, String)> = BTreeSet::new();
+    for line in text.lines() {
+        let depth = line.len() - line.trim_start().len();
+        let t = line.trim();
+        if t.starts_with("TAP version") || t.strip_prefix("1..").is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())) {
+            found = true;
+            continue;
+        }
+        if let Some(n) = t.strip_prefix("# pass ").and_then(|n| n.trim().parse::<u64>().ok()) {
+            found = true;
+            executed.reported_pass = Some(n);
+            continue;
+        }
+        if let Some(name) = t.strip_prefix("# Subtest: ") {
+            open.retain(|(d, _)| *d < depth);
+            if let Some((d, parent)) = open.last() {
+                parents.insert((*d, parent.clone()));
+            }
+            open.push((depth, name.trim().to_string()));
+            continue;
+        }
+        let (ok, rest) = match t.strip_prefix("not ok ") {
+            Some(r) => (false, r),
+            None => match t.strip_prefix("ok ") {
+                Some(r) => (true, r),
+                None => continue,
+            },
+        };
+        found = true;
+        let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start();
+        let rest = rest.strip_prefix("- ").unwrap_or(rest);
+        let (name, directive) = match rest.split_once(" # ") {
+            Some((n, d)) => (n.trim(), d.trim().to_ascii_lowercase()),
+            None => (rest.trim(), String::new()),
+        };
+        let skipped = directive.starts_with("skip") || directive.starts_with("todo");
+        let ancestors: Vec<String> = open.iter().filter(|(d, _)| *d < depth).map(|(_, n)| n.clone()).collect();
+        let parent = parents.remove(&(depth, name.to_string()));
+        open.retain(|(d, _)| *d < depth);
+        if skipped || parent {
+            continue;
+        }
+        let id = ancestors.into_iter().chain([name.to_string()]).collect::<Vec<_>>().join(" > ");
+        if ok {
+            executed.passed.push(id)
+        } else {
+            executed.failed.push(id)
+        }
+    }
+    found.then_some(executed)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -120,7 +215,7 @@ enum TargetKind {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct JsSuite {
-    /// A trusted whole-component runner; v1 does not invent a filename-filter interface.
+    /// The trusted whole-suite runner.
     command: String,
     #[serde(default)]
     test_files: Vec<String>,
@@ -128,9 +223,32 @@ struct JsSuite {
     /// a new test inside the component belongs to the suite without editing the map (NIT-505).
     #[serde(default)]
     test_patterns: Vec<String>,
+    /// The suite's runner on a list of its test files (NIT-750): a command with `{files}`, which
+    /// Nitely fills with the selected test files, space-separated. It needs `reporter`, and runs
+    /// only when a change selects some of the suite's tests, not all of them.
+    #[serde(default)]
+    files_command: Option<String>,
+    #[serde(default)]
+    reporter: Option<Reporter>,
 }
 
 impl JsSuite {
+    /// The check that runs `tests` of this suite: only those files, through `files_command`, when
+    /// the map declares one and they are some of its tests, not all; otherwise the whole suite.
+    fn check(&self, component: &str, suite: &str, tests: Vec<String>, files: &Snapshot) -> Check {
+        let filtered = match (&self.files_command, self.reporter) {
+            (Some(template), Some(reporter)) if tests.len() < self.tests(files).len() && tests.iter().all(|t| token(t) && valid_path(t)) => {
+                Some((template.replace("{files}", &tests.join(" ")), reporter))
+            }
+            _ => None,
+        };
+        let (command, fallback, reporter) = match filtered {
+            Some((command, reporter)) => (command, Some(self.command.clone()), Some(reporter)),
+            None => (self.command.clone(), None, None),
+        };
+        Check { component: component.into(), suite: Some(suite.into()), whole_suite: fallback.is_none(), command, required_tests: tests, discovery: None, fallback, reporter }
+    }
+
     /// The listed test files and every candidate source file a pattern matches.
     fn tests(&self, files: &Snapshot) -> Vec<String> {
         let mut tests: BTreeSet<String> = self.test_files.iter().cloned().collect();
@@ -434,7 +552,7 @@ pub fn select_small(repo: &Path, base: &str, head: &str, policy_commit: &str, fi
         }
         small.full = false;
         for command in own {
-            small.checks.push(Check { component: "own-file".into(), suite: None, command, required_tests: vec![], discovery: None, whole_suite: false });
+            small.checks.push(Check { component: "own-file".into(), suite: None, command, required_tests: vec![], discovery: None, whole_suite: false, fallback: None, reporter: None });
         }
         small.reasons.push("A small change: files no test reaches run their own checks, the rest their mapped tests; the full suite runs on main after landing.".into());
         Ok(small)
@@ -528,6 +646,9 @@ fn validate(policy: &Policy, before: &Snapshot, after: &Snapshot) -> Result<()> 
             if let Some(js) = &s.javascript {
                 if js.command.trim().is_empty() || js.tests(after).is_empty() {
                     bail!("empty JavaScript suite");
+                }
+                if js.files_command.as_ref().is_some_and(|c| !c.contains("{files}")) || js.files_command.is_some() != js.reporter.is_some() {
+                    bail!("a JavaScript files_command takes {{files}} and needs a reporter");
                 }
                 for pattern in &js.test_patterns {
                     // The pattern's literal directories must sit inside the component, and it
@@ -785,6 +906,8 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
                 required_tests: vec![],
                 discovery: None,
                 whole_suite: false,
+                fallback: None,
+                reporter: None,
             });
         }
         // Dependency-only selection deliberately runs every suite in the consumer component.
@@ -806,14 +929,7 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
                     .filter(|p| dependency || approved || reached.contains(p))
                     .collect();
                 if !tests.is_empty() {
-                    result.checks.push(Check {
-                        component: c.id.clone(),
-                        suite: Some(s.id.clone()),
-                        command: js.command.clone(),
-                        required_tests: tests,
-                        discovery: None,
-                        whole_suite: true,
-                    });
+                    result.checks.push(js.check(&c.id, &s.id, tests, after));
                     selected += 1;
                 }
             }
@@ -847,7 +963,7 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
     }
     add_always(&policy, after, objects, result)?;
     result.full = false;
-    result.reasons.push("Approved input mappings or static JavaScript reverse imports; JavaScript runs whole suites. Discovery is required before Cargo execution. Risk floors and the existing gate still apply.".into());
+    result.reasons.push("Approved input mappings or static JavaScript reverse imports; a JavaScript suite runs only its selected files where the map declares a files_command, and whole otherwise. Discovery is required before Cargo execution. Risk floors and the existing gate still apply.".into());
     Ok(())
 }
 
@@ -869,7 +985,7 @@ fn add_always(policy: &Policy, after: &Snapshot, objects: &dyn Objects, result: 
             result.checks.push(cargo_check(objects, after, c, s, cargo)?);
         }
         if let Some(js) = &s.javascript {
-            result.checks.push(Check { component: c.id.clone(), suite: Some(s.id.clone()), command: js.command.clone(), required_tests: js.tests(after), discovery: None, whole_suite: true });
+            result.checks.push(js.check(&c.id, &s.id, js.tests(after), after));
         }
     }
     Ok(())
@@ -994,6 +1110,8 @@ fn cargo_check(
         command,
         required_tests: suite.test_ids.clone(),
         whole_suite: suite.filter.is_none(),
+        fallback: None,
+        reporter: None,
     })
 }
 
@@ -1638,6 +1756,44 @@ test_ids = ["adds"]
         std::fs::remove_dir_all(repo).unwrap();
     }
 
+    /// NIT-750: with a `files_command`, a change to one module runs only the test files that import
+    /// it, the whole command kept as the fallback; a change selecting every test runs the suite.
+    #[test]
+    fn a_files_command_runs_only_the_selected_test_files() {
+        let repo = js_repo();
+        let policy = JS_POLICY.replace("command = \"npm test\"", "command = \"npm test\"\nfiles_command = \"node scripts/test.mjs {files}\"\nreporter = \"tap\"");
+        edit(&repo, POLICY_PATH, &policy);
+        let base = edit(&repo, "src/math.ts", "export const sum = 2;");
+        let check = &selected(&repo, &base).checks[1];
+        assert_eq!(check.command, "node scripts/test.mjs src/math.test.ts");
+        assert_eq!((check.fallback.as_deref(), check.reporter, check.whole_suite), (Some("npm test"), Some(Reporter::Tap), false));
+        let base = edit(&repo, "src/other.test.ts", "export const result = 2;");
+        edit(&repo, "src/math.test.ts", "import {sum} from './helper.js'; export const result = sum + 1;");
+        let check = &selected(&repo, &base).checks[1];
+        assert_eq!((check.command.as_str(), check.whole_suite, check.fallback.is_none()), ("npm test", true, true), "every test selected: the whole suite");
+        std::fs::remove_dir_all(repo).unwrap();
+    }
+
+    /// NIT-750: what node:test's TAP reporter says ran: nested tests by their path, a suite not
+    /// counted as a test of its own, skips left out, and its own count read.
+    #[test]
+    fn tap_names_the_tests_that_ran() {
+        let out = "TAP version 13\n# Subtest: adds\nok 1 - adds\n  ---\n  duration_ms: 0.5\n  ...\n# Subtest: group\n    # Subtest: inner\n    not ok 1 - inner\n    # Subtest: later\n    ok 2 - later # SKIP\n    1..2\nok 2 - group\n  ---\n  type: 'suite'\n  ...\n1..2\n# tests 3\n# pass 1\n# fail 1\n";
+        let e = parse_tap(out).unwrap();
+        assert_eq!(e.passed, ["adds"]);
+        assert_eq!(e.failed, ["group > inner"]);
+        assert_eq!((e.reported_pass, e.count()), (Some(1), 2));
+        assert_eq!(parse_tap("TAP version 13\n1..0\n# pass 0\n").unwrap().count(), 0);
+        assert!(parse_tap("Error: Cannot find module 'vitest'").is_none());
+        // Vitest's tap-flat: one line per test, its file and suites in the name, a time directive.
+        let flat = parse_tap("TAP version 13
+1..2
+ok 1 - src/a.test.ts > sums > adds # time=1.20ms
+ok 2 - src/a.test.ts > later # SKIP
+").unwrap();
+        assert_eq!(flat.passed, ["src/a.test.ts > sums > adds"]);
+    }
+
     #[test]
     fn discovery_rejects_empty_missing_and_ignored_tests() {
         let check = Check {
@@ -1650,6 +1806,8 @@ test_ids = ["adds"]
                 ignored_command: "ignored".into(),
             }),
             whole_suite: false,
+            fallback: None,
+            reporter: None,
         };
         let output = "math::tests::adds: test\n\n1 test, 0 benchmarks\n";
         assert_eq!(

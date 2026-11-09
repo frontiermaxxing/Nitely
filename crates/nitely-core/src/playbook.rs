@@ -1291,11 +1291,25 @@ pub(crate) fn tail(s: &str) -> String {
     // run still says every test that failed (NIT-557: what each failure's fix was is kept per test).
     let shown = failed_tests(kept);
     let lost: Vec<String> = failed_tests(s).into_iter().filter(|n| !shown.contains(n)).collect();
+    let ran = ran_earlier(s, kept).unwrap_or_default();
     if lost.is_empty() {
-        return format!("…{kept}");
+        return format!("{ran}…{kept}");
     }
     let names: Vec<String> = lost.iter().map(|n| format!("not ok 0 - {n}")).collect();
-    format!("Failed earlier in the output:\n{}\n…{kept}", names.join("\n"))
+    format!("{ran}Failed earlier in the output:\n{}\n…{kept}", names.join("\n"))
+}
+
+/// The passing tests a TAP run named only in the part `tail` cuts off, as `ok 0 - <id>` lines, so a
+/// filtered run's record of what ran stays whole (NIT-750). Only for a run of at most 200 tests,
+/// the size of a few selected files: a whole suite's thousands are not kept.
+fn ran_earlier(full: &str, kept: &str) -> Option<String> {
+    let all = crate::affected_tests::parse_tap(full)?;
+    if all.passed.is_empty() || all.passed.len() > 200 {
+        return None;
+    }
+    let shown: std::collections::BTreeSet<String> = crate::affected_tests::parse_tap(kept).map(|e| e.passed.into_iter().collect()).unwrap_or_default();
+    let lost: Vec<String> = all.passed.iter().filter(|id| !shown.contains(*id) && !shown.iter().any(|s| id.ends_with(&format!(" > {s}")))).map(|id| format!("ok 0 - {id}")).collect();
+    (!lost.is_empty()).then(|| format!("Ran earlier in the output:\n{}\n", lost.join("\n")))
 }
 
 /// The main checkout of the repo `dir` is in: the watched repo's root when Nitely knows it,
@@ -1814,11 +1828,15 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
         let lane = if plan.is_some() {crate::lanes::gate_fresh_checked(db,repo_root,&playbook,worktree,issue_key,kind,&steps,actor,yolo_keys)?}
             else {crate::lanes::gate(db, repo_root, &playbook, worktree, issue_key, kind, &steps, actor, yolo_keys)?};
         if lane.yolo_skipped { return crate::project_yolo::skipped_gate(db, worktree, yolo_keys, actor); }
+        if let Some(fallback) = plan.and_then(|p| crate::verification::fallback_plan(p, &lane.results)) {
+            return gate_again_whole(db, repo_root, worktree, issue_key, actor, kind, yolo_keys, fallback);
+        }
         let mut warnings = playbook.unknown_warnings();
         warnings.extend(lane.warnings);
         let mut passed=lane.passed;
-        validate_gate_plan(plan,&lane.results,&mut passed,&mut warnings);
+        let executed=validate_gate_plan(plan,&lane.results,&mut passed,&mut warnings);
         if let (true,Some(plan),Some(tree),Some(run))=(passed,plan,&tree,lane.run) {crate::verification::remember_pass(db,repo_root,tree,&plan.commands,run)?;}
+        if let Some(plan)=plan {crate::verification::record_executed(db,issue_key,plan,executed,actor)?;}
         let mut gate = record_gate(db, issue_key, worktree, actor, &lane.commit, lane.results, passed, lane.flaked, warnings)?;
         gate.lane_run = lane.run;
         return Ok(gate);
@@ -1867,10 +1885,25 @@ fn run_gate_inner(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<
             break;
         }
     }
+    if let Some(fallback) = plan.and_then(|p| crate::verification::fallback_plan(p, &results)) {
+        turn.finish(false);
+        return gate_again_whole(db, repo_root, worktree, issue_key, actor, kind, yolo_keys, fallback);
+    }
     let mut warnings=playbook.unknown_warnings();
-    validate_gate_plan(plan,&results,&mut passed,&mut warnings);
+    let executed=validate_gate_plan(plan,&results,&mut passed,&mut warnings);
     turn.finish(passed);
+    if let Some(plan)=plan {crate::verification::record_executed(db,issue_key,plan,executed,actor)?;}
     record_gate(db, issue_key, worktree, actor, &commit, results, passed, flaked, warnings)
+}
+
+/// A filtered JavaScript run that proved no tests ran (NIT-750): the gate runs again with those
+/// suites whole, and says why. The fallback plan has no filtered runs, so this happens once.
+#[allow(clippy::too_many_arguments)]
+fn gate_again_whole(db: &Db, repo_root: &Path, worktree: &Path, issue_key: Option<&str>, actor: &Actor, kind: crate::lanes::Kind, yolo_keys: &[&str], (plan, why): (crate::verification::Plan, String)) -> Result<GateResult> {
+    db.log_event(actor, issue_key, Some(&worktree.to_string_lossy()), "gate_fallback", &why)?;
+    let mut gate = run_gate_inner(db, repo_root, worktree, issue_key, actor, kind, yolo_keys, Some(&plan))?;
+    gate.warnings.insert(0, why);
+    Ok(gate)
 }
 
 /// What a failed gate names: the first step that failed, or, when every step passed, the check
@@ -1885,8 +1918,14 @@ fn failed_step(results: &[CommandResult], warnings: &[String]) -> String {
     }
 }
 
-fn validate_gate_plan(plan:Option<&crate::verification::Plan>,results:&[CommandResult],passed:&mut bool,warnings:&mut Vec<String>) {
-    if *passed {if let Some(plan)=plan {if let Err(e)=crate::verification::validate_selected(plan,results) {*passed=false;warnings.push(format!("Selected test evidence incomplete: {e:#}"));}}}
+/// Fails a passed gate whose selected tests were not seen to run; returns what filtered runs proved.
+fn validate_gate_plan(plan:Option<&crate::verification::Plan>,results:&[CommandResult],passed:&mut bool,warnings:&mut Vec<String>)->Vec<crate::verification::ExecutedCheck> {
+    if !*passed {return vec![];}
+    let Some(plan)=plan else {return vec![];};
+    match crate::verification::validate_selected(plan,results) {
+        Ok(executed)=>executed,
+        Err(e)=>{*passed=false;warnings.push(format!("Selected test evidence incomplete: {e:#}"));vec![]}
+    }
 }
 
 /// Puts a gate's outcome on the issue's timeline (its flakes, then passed or failed) and returns it.

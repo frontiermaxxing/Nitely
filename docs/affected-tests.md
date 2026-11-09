@@ -113,12 +113,51 @@ or claim inferred static coverage. The human-approved mapping must include their
 and cross-component dependencies. Missing mapping knowledge still requires Full.
 
 `required_tests` lists affected **source test files**, not individual runtime test IDs.
-The executable check remains the approved whole-suite command (`whole_suite = true`).
-Nitely's existing `npm test` compiles and runs its entire test inventory; it does not accept
-an affected-file manifest. The selector therefore never invents such an interface. A
-future filtered runner must discover actual test IDs and prove they executed before this
-can become reduced execution evidence. A passing command alone does not prove nonzero
-JavaScript tests ran.
+Without more in the map, the executable check stays the approved whole-suite command
+(`whole_suite = true`): a passing command alone does not prove nonzero JavaScript tests ran,
+so a reduced gate also needs TAP's `# pass N` above zero in its output.
+
+## Running only the selected test files
+
+A suite that declares how to run a list of its files runs only the selected ones (NIT-750):
+
+```toml
+[components.suites.javascript]
+command = "npm test"
+test_patterns = ["src/**/*.test.ts"]
+files_command = "node scripts/test.mjs {files}"
+reporter = "tap"
+```
+
+`{files}` is filled with the selected test files, space-separated, as repo paths. A runner
+that takes file arguments works: `node --test --test-reporter=tap {files}` for node:test, or
+`npx vitest run --reporter=tap-flat {files}` for Vitest. `reporter` names what the command
+prints; TAP is the one Nitely reads today. Nitely's own `npm test` takes files the same way:
+`node scripts/test.mjs src/askLinks.test.ts scripts/dco.test.mjs` compiles the `.ts` tests and
+runs only those two, with the TAP reporter. Nitely's own map does not declare it yet: its
+`npm-test` suite uses an approved whole-suite mapping (vite and tsconfig resolve imports the
+static graph does not claim), which selects every test.
+
+The filtered command runs only when the change selects some of the suite's tests. A change that
+selects all of them, an approved whole-suite mapping (`inputs`, which selects every listed
+test), the map's `always` suites and a file path with characters outside letters, digits and
+`_-/.:` run the whole `command` as before.
+
+The exit code alone is never the proof. Nitely reads the command's TAP output for the tests
+that ran: each `ok` and `not ok` line, nested names joined by ` > `, a suite's own line not
+counted as a test, `# SKIP` and `# TODO` lines left out, and the runner's `# pass N` when it
+prints one. The gate passes only when that shows at least one test ran and none failed. The
+test IDs it read go on the verification: the plan recorded for that revision (`executed`, which
+`get_issue` shows under `verification`) and a `selected_tests_ran` entry on the issue's
+timeline. A run of up to 200 tests keeps every ID even when its output is longer than the
+4,000 characters a gate keeps.
+
+When the output shows no tests, or none Nitely can read (a runner that rejects the file
+arguments, prints another format, or finds nothing), the gate falls back: it runs again with
+that suite's whole `command`, says why in its warnings and in a `gate_fallback` entry on the
+timeline, and judges that run as any whole suite. A filtered run that names failing tests is a
+failed gate, not a fallback. Audits, the land batch's full gate and the backstop on main still
+run the whole suites, so what a filtered run skips is checked after landing.
 
 ## Rule tests run with every change
 
