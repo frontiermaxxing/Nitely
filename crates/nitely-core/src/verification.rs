@@ -632,7 +632,7 @@ pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandRes
             let proof=match reporter {crate::affected_tests::Reporter::Tap=>crate::affected_tests::parse_tap(run)}
                 .with_context(||format!("`{}` printed no {reporter:?} output to read",check.command))?;
             if proof.count()==0 {bail!("`{}` ran zero tests",check.command);}
-            if !proof.failed.is_empty() {bail!("`{}` reported failing tests: {}",check.command,proof.failed.join(", "));}
+            if proof.failures()>0 {bail!("`{}` reported {} failing tests: {}",check.command,proof.failures(),proof.failed.join(", "));}
             executed.push(ExecutedCheck{command:check.command.clone(),required_tests:check.required_tests.clone(),executed:proof});
         } else if let Some(discovery)=&check.discovery {
             crate::affected_tests::verify_cargo_discovery(check,output(&discovery.command)?,output(&discovery.ignored_command)?)?;

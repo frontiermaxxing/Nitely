@@ -144,9 +144,10 @@ test), the map's `always` suites and a file path with characters outside letters
 `_-/.:` run the whole `command` as before.
 
 The exit code alone is never the proof. Nitely reads the command's TAP output for the tests
-that ran: each `ok` and `not ok` line, nested names joined by ` > `, a suite's own line not
-counted as a test, `# SKIP` and `# TODO` lines left out, and the runner's `# pass N` when it
-prints one. The gate passes only when that shows at least one test ran and none failed. The
+that ran: each `ok` and `not ok` line, nested names joined by ` > `, `# SKIP` and `# TODO`
+lines left out, and the runner's `# pass N` and `# fail N` when it prints them. A passing
+suite's own line is not a test, so a file with only an empty `describe` proves nothing; a
+failing suite line (a hook that threw) is a failure even when `# fail` says 0. The gate passes only when that shows at least one test ran and none failed. The
 test IDs it read go on the verification: the plan recorded for that revision (`executed`, which
 `get_issue` shows under `verification`) and a `selected_tests_ran` entry on the issue's
 timeline. A run of up to 200 tests keeps every ID even when its output is longer than the

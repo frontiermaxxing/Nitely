@@ -67,31 +67,50 @@ pub enum Reporter {
 pub struct Executed {
     pub passed: Vec<String>,
     pub failed: Vec<String>,
-    /// The runner's own count of passing tests (TAP's `# pass N`), when it printed one: more than
-    /// `passed` when the output was cut before every line could be kept.
+    /// The runner's own counts of passing and failing tests (TAP's `# pass N` and `# fail N`),
+    /// when it printed them. They count tests, never suites, and stay whole when the output was
+    /// cut before every line could be kept.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reported_pass: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reported_fail: Option<u64>,
 }
 
 impl Executed {
-    /// How many tests ran, by the larger of the runner's count and the lines read.
+    /// How many tests failed: the runner's count, or the failing lines read when it is lower.
+    pub fn failures(&self) -> u64 {
+        self.reported_fail.unwrap_or(0).max(self.failed.len() as u64)
+    }
+
+    /// How many tests ran: the runner's own pass count when it printed one (an empty suite's `ok`
+    /// line is no test), otherwise the passing lines read; and the failures.
     pub fn count(&self) -> u64 {
-        self.reported_pass.unwrap_or(0).max(self.passed.len() as u64) + self.failed.len() as u64
+        self.reported_pass.unwrap_or(self.passed.len() as u64) + self.failures()
     }
 }
 
 /// The tests a TAP stream reports as run: `ok` and `not ok` lines at any depth, each named under
-/// the `# Subtest:` lines open above it. A parent whose subtests reported is not counted again,
-/// and `# SKIP` and `# TODO` lines are not runs. None when the text holds no TAP at all.
+/// the `# Subtest:` lines open above it. A passing parent whose subtests reported, or a passing
+/// line its YAML marks `type: 'suite'`, is not a test; a failing one is a failure all the same (a
+/// suite's hook that threw). `# SKIP` and `# TODO` lines are not runs. None when the text holds no
+/// TAP at all.
 pub fn parse_tap(text: &str) -> Option<Executed> {
     let mut found = false;
     let mut executed = Executed::default();
     // The `# Subtest:` names open, by depth; a test line at a depth closes what is open there.
     let mut open: Vec<(usize, String)> = vec![];
     let mut parents: BTreeSet<(usize, String)> = BTreeSet::new();
+    // Whether the last line read was a passing test, which its YAML block may show is a suite.
+    let mut last_passed = false;
     for line in text.lines() {
         let depth = line.len() - line.trim_start().len();
         let t = line.trim();
+        if t == "type: 'suite'" || t == "type: suite" {
+            if std::mem::take(&mut last_passed) {
+                executed.passed.pop();
+            }
+            continue;
+        }
         if t.starts_with("TAP version") || t.strip_prefix("1..").is_some_and(|n| !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit())) {
             found = true;
             continue;
@@ -99,6 +118,11 @@ pub fn parse_tap(text: &str) -> Option<Executed> {
         if let Some(n) = t.strip_prefix("# pass ").and_then(|n| n.trim().parse::<u64>().ok()) {
             found = true;
             executed.reported_pass = Some(n);
+            continue;
+        }
+        if let Some(n) = t.strip_prefix("# fail ").and_then(|n| n.trim().parse::<u64>().ok()) {
+            found = true;
+            executed.reported_fail = Some(n);
             continue;
         }
         if let Some(name) = t.strip_prefix("# Subtest: ") {
@@ -117,6 +141,7 @@ pub fn parse_tap(text: &str) -> Option<Executed> {
             },
         };
         found = true;
+        last_passed = false;
         let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start();
         let rest = rest.strip_prefix("- ").unwrap_or(rest);
         let (name, directive) = match rest.split_once(" # ") {
@@ -127,12 +152,13 @@ pub fn parse_tap(text: &str) -> Option<Executed> {
         let ancestors: Vec<String> = open.iter().filter(|(d, _)| *d < depth).map(|(_, n)| n.clone()).collect();
         let parent = parents.remove(&(depth, name.to_string()));
         open.retain(|(d, _)| *d < depth);
-        if skipped || parent {
+        if skipped || (parent && ok) {
             continue;
         }
         let id = ancestors.into_iter().chain([name.to_string()]).collect::<Vec<_>>().join(" > ");
         if ok {
-            executed.passed.push(id)
+            executed.passed.push(id);
+            last_passed = true;
         } else {
             executed.failed.push(id)
         }
@@ -1792,6 +1818,12 @@ ok 1 - src/a.test.ts > sums > adds # time=1.20ms
 ok 2 - src/a.test.ts > later # SKIP
 ").unwrap();
         assert_eq!(flat.passed, ["src/a.test.ts > sums > adds"]);
+        // NIT-750 review: an empty describe is a passing suite line, not a test that ran.
+        let empty = parse_tap("TAP version 13\n# Subtest: empty\nok 1 - empty\n  ---\n  type: 'suite'\n  ...\n1..1\n# tests 0\n# suites 1\n# pass 0\n# fail 0\n").unwrap();
+        assert_eq!((empty.passed.len(), empty.count()), (0, 0));
+        // An after() hook that threw fails only its suite, and node's own count says no failure.
+        let hook = parse_tap("TAP version 13\n# Subtest: group\n    # Subtest: inner\n    ok 1 - inner\n      ---\n      type: 'test'\n      ...\n    1..1\nnot ok 1 - group\n  ---\n  type: 'suite'\n  failureType: 'hookFailed'\n  ...\n1..1\n# tests 1\n# pass 1\n# fail 0\n").unwrap();
+        assert_eq!((hook.failures(), hook.passed, hook.failed), (1, vec!["group > inner".to_string()], vec!["group".to_string()]));
     }
 
     #[test]
