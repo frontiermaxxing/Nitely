@@ -59,6 +59,17 @@ pub struct Plan {
     pub reasons: Vec<String>,
     pub files: Vec<FileProof>,
     pub enforcement: String,
+    /// The tests each filtered JavaScript run proved it executed, once its gate passed (NIT-750).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub executed: Vec<ExecutedCheck>,
+}
+
+/// A filtered run's proof: the command, the test files it was given, and what its reporter said ran.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ExecutedCheck {
+    pub command: String,
+    pub required_tests: Vec<String>,
+    pub executed: crate::affected_tests::Executed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -290,6 +301,7 @@ fn assess_with_mode(repo:&Path,base:&str,head:&str,issue:&IssueRecord,settings:O
         declared_at: issue.review_level_at,
         effective: "sensitive".into(), depth: "Full".into(), shadow: true, reasons: vec![], files: vec![],
         enforcement: "Shadow only: the existing full gate, review and approval rules still apply.".into(),
+        executed: vec![],
     };
     let attempted = assess_inner(repo, issue, &mut plan,settings);
     if let Err(error) = attempted { plan.reasons.push(format!("Full fallback: {error:#}")); }
@@ -579,15 +591,51 @@ pub(crate) fn check_gate_authority(db:&Db,root:&Path,worktree:&Path,key:&str,gat
     Ok(())
 }
 
-pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandResult])->Result<()> {
-    if matches!(plan.effective.as_str(),"inert"|"basic") {return Ok(());}
+/// The plan to run instead when a filtered JavaScript run proved nothing (NIT-750): its reporter
+/// output held no tests, or none Nitely could read, whatever its exit code. Each such check runs
+/// its whole suite, as a suite without a `files_command` does, and the reasons say why. None when
+/// every filtered run that ran proved tests ran, or failed with tests named.
+pub(crate) fn fallback_plan(plan:&Plan,results:&[crate::playbook::CommandResult])->Option<(Plan,String)> {
+    let selection=plan.affected.as_ref()?;
+    let mut fallback=plan.clone();
+    let mut why=vec![];
+    for (i,check) in selection.checks.iter().enumerate() {
+        let (Some(whole),Some(reporter))=(&check.fallback,check.reporter) else {continue;};
+        let Some(result)=results.iter().find(|r|r.command==check.command && !r.skipped) else {continue;};
+        let proved=match reporter {crate::affected_tests::Reporter::Tap=>crate::affected_tests::parse_tap(&result.output)}.is_some_and(|e|e.count()>0);
+        if proved {continue;}
+        why.push(format!("`{}` showed no tests that ran, so its whole suite `{whole}` ran instead",check.command));
+        let c=&mut fallback.affected.as_mut().expect("selection").checks[i];
+        c.command=whole.clone();c.fallback=None;c.whole_suite=true;
+        if fallback.commands.contains(whole) {fallback.commands.retain(|k|k!=&check.command);}
+        else {for k in fallback.commands.iter_mut().filter(|k|**k==check.command) {*k=whole.clone();}}
+    }
+    if why.is_empty() {return None;}
+    fallback.reasons.push(format!("Fallback to whole suites: {}",why.join("; ")));
+    Some((fallback,format!("Selected tests unproven: {}",why.join("; "))))
+}
+
+/// Checks the selected tests' evidence in a passed gate's results, and returns what each filtered
+/// JavaScript run proved it executed.
+pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandResult])->Result<Vec<ExecutedCheck>> {
+    let mut executed=vec![];
+    if matches!(plan.effective.as_str(),"inert"|"basic") {return Ok(executed);}
     let selection=plan.affected.as_ref().context("affected selection missing")?;
     for check in &selection.checks {
         let output=|command:&str|->Result<&str> {
             results.iter().find(|r|r.command==command && r.ok && !r.skipped)
                 .map(|r|r.output.as_str()).with_context(||format!("missing executed check: {command}"))
         };
-        if let Some(discovery)=&check.discovery {
+        if let Some(reporter)=check.reporter {
+            // Never the exit code alone: the reporter must name tests that ran, and none failed.
+            let run=output(&check.command)?;
+            let proof=match reporter {crate::affected_tests::Reporter::Tap=>crate::affected_tests::parse_tap(run)}
+                .with_context(||format!("`{}` printed no {reporter:?} output to read",check.command))?;
+            if proof.count()==0 {bail!("`{}` ran zero tests",check.command);}
+            if proof.failures()>0 {bail!("`{}` reported {} failing tests: {}",check.command,proof.failures(),proof.failed.join(", "));}
+            // Only a filtered run's IDs are the evidence of which tests ran; a whole suite ran them all.
+            if check.fallback.is_some() {executed.push(ExecutedCheck{command:check.command.clone(),required_tests:check.required_tests.clone(),executed:proof});}
+        } else if let Some(discovery)=&check.discovery {
             crate::affected_tests::verify_cargo_discovery(check,output(&discovery.command)?,output(&discovery.ignored_command)?)?;
             let run=output(&check.command)?;
             if !run.lines().any(|line|line.starts_with("test result: ok.") && !line.starts_with("test result: ok. 0 passed;")) {
@@ -600,7 +648,30 @@ pub(crate) fn validate_selected(plan:&Plan,results:&[crate::playbook::CommandRes
             }
         }
     }
-    Ok(())
+    Ok(executed)
+}
+
+/// Puts what the filtered runs executed on the verification (NIT-750): on the plan recorded for
+/// this revision, when there is one, and on the issue's timeline.
+/// The plan with what ran on it is returned, for the gate to carry (a goal item's land records it).
+pub(crate) fn record_executed(db:&Db,issue_key:Option<&str>,plan:&Plan,executed:Vec<ExecutedCheck>,actor:&Actor)->Result<Option<Plan>> {
+    if executed.is_empty() {return Ok(None);}
+    let mut recorded=plan.clone();
+    recorded.executed=executed;
+    let Some(key)=issue_key else {return Ok(Some(recorded));};
+    db.conn.execute("UPDATE verification_plan SET plan=?1 WHERE issue_key=?2 AND head=?3 AND policy_commit=?4 AND classifier=?5",
+        rusqlite::params![serde_json::to_string(&recorded)?,key,recorded.head,recorded.policy_commit,recorded.classifier])?;
+    let lines:Vec<String>=recorded.executed.iter().map(|e| {
+        let mut ids=e.executed.passed.clone();
+        let shown=ids.len();
+        ids.truncate(50);
+        let more=if shown>ids.len() {format!(" and {} more",shown-ids.len())} else {String::new()};
+        format!("- `{}`: {} tests from {}: {}{more}",e.command,e.executed.count(),e.required_tests.join(", "),ids.join("; "))
+    }).collect();
+    db.log_event(actor,Some(key),None,"selected_tests_ran",&format!("Only the selected test files ran, and these tests were seen to run:
+{}",lines.join("
+")))?;
+    Ok(Some(recorded))
 }
 pub(crate) fn audit_candidate(repo:&Path,issue:&IssueRecord,plan:&Plan,author:&str)->Result<Option<crate::verification_audit::Candidate>> {
     if plan.audit_percent==0 || !matches!(plan.effective.as_str(),"inert"|"contained"|"basic") {return Ok(None);}
@@ -609,6 +680,17 @@ pub(crate) fn audit_candidate(repo:&Path,issue:&IssueRecord,plan:&Plan,author:&s
 }
 
 pub fn record(db: &Db, issue: &IssueRecord, plan: &Plan, actor: &Actor) -> Result<()> {
+    // What a gate on this same revision saw run stays with the plan when it is recorded again
+    // after the gate (submit, a goal item's land), from the plan it started with (NIT-750 review).
+    let mut kept;
+    let plan = if plan.executed.is_empty() {
+        let before: Option<String> = db.conn.query_row("SELECT plan FROM verification_plan WHERE issue_key=?1 AND head=?2 AND policy_commit=?3 AND classifier=?4",
+            rusqlite::params![issue.key, plan.head, plan.policy_commit, plan.classifier], |r| r.get(0)).optional()?;
+        match before.and_then(|b| serde_json::from_str::<Plan>(&b).ok()).filter(|b| !b.executed.is_empty()) {
+            Some(before) => { kept = plan.clone(); kept.executed = before.executed; &kept }
+            None => plan,
+        }
+    } else { plan };
     let inserted = db.conn.execute(
         "INSERT INTO verification_plan(issue_key, head, policy_commit, classifier, plan, recorded_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
          ON CONFLICT(issue_key, head, policy_commit, classifier) DO UPDATE SET plan=excluded.plan, recorded_at=excluded.recorded_at WHERE plan != excluded.plan",
@@ -933,4 +1015,66 @@ display_copy=['src/Page[.]tsx']
         assert!(check_gate_authority(&db,&repo,&repo,&issue.key,&gate).is_err(),"an earlier Basic pass cannot authorize changed behavior");
     }
 
+    /// NIT-750: a JavaScript change to one module runs only the test file that imports it, through
+    /// the map's `files_command`, and the tests its TAP output names are put on the issue. A runner
+    /// that shows no tests ran, whatever its exit code, runs the whole suite instead.
+    #[test]
+    fn a_filtered_javascript_run_records_its_tests_or_falls_back_to_the_whole_suite() {
+        use crate::test_repo::git as g;
+        if Command::new("node").arg("--version").output().is_err() {return;}
+        // Runners that print TAP: one test per file given, none at all, and the whole suite's two.
+        const FILES: &str = "const f = process.argv.slice(2);\nconsole.log('TAP version 13');\nf.forEach((n, i) => console.log(`# Subtest: ${n}\\nok ${i + 1} - ${n}`));\nconsole.log(`1..${f.length}\\n# pass ${f.length}`);\n";
+        const NONE: &str = "console.log('TAP version 13\\n1..0\\n# pass 0');\n";
+        // As Vitest's tap-flat prints it: test lines only, no `# pass N` summary.
+        const WHOLE: &str = "console.log('TAP version 13\\n1..2\\nok 1 - src/math.test.ts > adds\\nok 2 - src/other.test.ts > counts');\n";
+        let map=|runner:&str| format!("version = 1\n[[components]]\nid = 'web'\nroots = ['src/', 'tools/']\nchecks = ['git --version']\n[[components.suites]]\nid = 'unit'\n[components.suites.javascript]\ncommand = 'node tools/whole.mjs'\ntest_files = ['src/math.test.ts', 'src/other.test.ts']\nfiles_command = 'node tools/{runner}.mjs {{files}}'\nreporter = 'tap'\n");
+        let gate=|runner:&str| {
+            let repo=crate::paths::unique_temp("nitely-filtered-js","");
+            let policy=map(runner);
+            crate::test_repo::init(&repo,&[
+                (PLAYBOOK_PATH,"[verification]\nbasic = ['git --version']\n"),
+                (crate::affected_tests::POLICY_PATH,&policy),
+                ("tools/files.mjs",FILES),("tools/none.mjs",NONE),("tools/whole.mjs",WHOLE),
+                ("src/math.ts","export const sum = 1;"),
+                ("src/helper.ts","export {sum} from './math';"),
+                ("src/math.test.ts","import {sum} from './helper.js'; export const result = sum;"),
+                ("src/other.test.ts","export const result = 1;"),
+            ]);
+            let base=g(&repo,&["rev-parse","HEAD"]).trim().to_string();
+            g(&repo,&["checkout","-q","-b","claude/app-1-sum"]);
+            std::fs::write(repo.join("src/math.ts"),"export const sum = 2;").unwrap();
+            g(&repo,&["commit","-qam","sum"]);
+            let mut db=Db::open(&crate::paths::unique_temp("nitely-filtered-js",".sqlite")).unwrap();
+            db.create_project("APP","Example").unwrap();
+            let issue=db.create_issue(&crate::NewIssue{project:"APP".into(),title:"Change the sum".into(),body:"b".into(),kind:"feature".into(),source:"claude".into(),evidence:"test".into(),..Default::default()},&Actor::Human).unwrap();
+            let gate=crate::goal_branch::item_gate(&db,&repo,&repo,Some(&issue.key),&base,"goal/sums",&Actor::Human).unwrap();
+            let ran:Vec<String>=gate.results.iter().filter(|r|!r.skipped).map(|r|r.command.clone()).collect();
+            let timeline=db.timeline(&issue.key).unwrap();
+            // Recorded again after the gate from the plan it started with, as a land or submit
+            // does, the plan keeps what ran on this revision.
+            if let Some(plan)=&gate.plan {
+                record(&db,&issue,plan,&Actor::Human).unwrap();
+                record(&db,&issue,&Plan{executed:vec![],..plan.clone()},&Actor::Human).unwrap();
+            }
+            let kept=recent(&db,&issue.key).unwrap().first().map(|p|p.executed.clone()).unwrap_or_default();
+            std::fs::remove_dir_all(&repo).ok();
+            (gate,ran,timeline,kept)
+        };
+
+        let (filtered,ran,timeline,kept)=gate("files");
+        assert!(filtered.passed,"{:?} {:?}",filtered.warnings,filtered.results);
+        assert!(ran.contains(&"node tools/files.mjs src/math.test.ts".to_string()),"only the importing test file: {ran:?}");
+        assert!(!ran.iter().any(|c|c=="node tools/whole.mjs"),"{ran:?}");
+        let proof=timeline.iter().find(|e|e.kind=="selected_tests_ran").and_then(|e|e.summary.clone()).expect("the tests that ran are recorded");
+        assert!(proof.contains("1 tests from src/math.test.ts: src/math.test.ts"),"{proof}");
+        assert_eq!(kept.len(),1,"the gate's plan carries what ran, and recording it again keeps it");
+        assert_eq!(kept[0].executed.passed,["src/math.test.ts"]);
+
+        let (whole,ran,timeline,_)=gate("none");
+        assert!(whole.passed,"the whole suite ran, read as the declared TAP, and passed: {:?} {:?}",whole.warnings,whole.results);
+        assert!(ran.iter().any(|c|c=="node tools/whole.mjs"),"{ran:?}");
+        assert!(whole.warnings[0].starts_with("Selected tests unproven"),"{:?}",whole.warnings);
+        assert!(timeline.iter().any(|e|e.kind=="gate_fallback"));
+        assert!(!timeline.iter().any(|e|e.kind=="selected_tests_ran"),"a whole suite is no filtered proof");
+    }
 }
