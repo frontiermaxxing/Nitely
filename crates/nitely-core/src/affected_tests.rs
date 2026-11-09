@@ -142,6 +142,10 @@ fn parse_tap_lines(text: &str) -> Option<Executed> {
             executed.reported_fail = Some(n);
             continue;
         }
+        if t == "}" {
+            open.retain(|(d, _)| *d < depth);
+            continue;
+        }
         if let Some(name) = t.strip_prefix("# Subtest: ") {
             open.retain(|(d, _)| *d < depth);
             if let Some((d, parent)) = open.last() {
@@ -161,14 +165,22 @@ fn parse_tap_lines(text: &str) -> Option<Executed> {
         last_passed = false;
         let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit()).trim_start();
         let rest = rest.strip_prefix("- ").unwrap_or(rest);
+        // Vitest's nested TAP opens a file or suite with `{` on its line and closes it with `}`.
+        let (rest, opens) = match rest.trim_end().strip_suffix('{') {
+            Some(r) => (r.trim_end(), true),
+            None => (rest, false),
+        };
         let (name, directive) = match rest.split_once(" # ") {
             Some((n, d)) => (n.trim(), d.trim().to_ascii_lowercase()),
             None => (rest.trim(), String::new()),
         };
         let skipped = directive.starts_with("skip") || directive.starts_with("todo");
         let ancestors: Vec<String> = open.iter().filter(|(d, _)| *d < depth).map(|(_, n)| n.clone()).collect();
-        let parent = parents.remove(&(depth, name.to_string()));
+        let parent = parents.remove(&(depth, name.to_string())) || opens;
         open.retain(|(d, _)| *d < depth);
+        if opens {
+            open.push((depth, name.to_string()));
+        }
         if skipped || (parent && ok) {
             continue;
         }
@@ -974,6 +986,10 @@ fn decide(policy_files: &Snapshot, before: &Snapshot, after: &Snapshot, objects:
                     .filter(|p| dependency || approved || reached.contains(p))
                     .collect();
                 if !tests.is_empty() {
+                    // A suite the map runs with every change runs whole, never only the files this
+                    // change reaches (`add_always` takes it as already selected).
+                    let always = policy.always.iter().any(|a| a.split_once('/') == Some((c.id.as_str(), s.id.as_str())));
+                    let tests = if always { js.tests(after) } else { tests };
                     result.checks.push(js.check(&c.id, &s.id, tests, after));
                     selected += 1;
                 }
@@ -1816,6 +1832,11 @@ test_ids = ["adds"]
         edit(&repo, "src/math.test.ts", "import {sum} from './helper.js'; export const result = sum + 1;");
         let check = &selected(&repo, &base).checks[1];
         assert_eq!((check.command.as_str(), check.whole_suite, check.fallback.is_none(), check.reporter), ("npm test", true, true, Some(Reporter::Tap)), "every test selected: the whole suite, read as TAP");
+        // A suite the map runs with every change stays whole, however few files a change reaches.
+        edit(&repo, POLICY_PATH, &policy.replacen("version = 1\n", "version = 1\nalways = [\"web/unit\"]\n", 1));
+        let base = edit(&repo, "src/math.ts", "export const sum = 3;");
+        let checks = selected(&repo, &base).checks;
+        assert_eq!(checks.iter().filter(|c| c.suite.as_deref() == Some("unit")).map(|c| (c.command.as_str(), c.whole_suite)).collect::<Vec<_>>(), [("npm test", true)]);
         std::fs::remove_dir_all(repo).unwrap();
     }
 
@@ -1843,6 +1864,12 @@ ok 2 - src/a.test.ts > later # SKIP
         // An after() hook that threw fails only its suite, and node's own count says no failure.
         let hook = parse_tap("TAP version 13\n# Subtest: group\n    # Subtest: inner\n    ok 1 - inner\n      ---\n      type: 'test'\n      ...\n    1..1\nnot ok 1 - group\n  ---\n  type: 'suite'\n  failureType: 'hookFailed'\n  ...\n1..1\n# tests 1\n# pass 1\n# fail 0\n").unwrap();
         assert_eq!((hook.failures(), hook.passed, hook.failed), (1, vec!["group > inner".to_string()], vec!["group".to_string()]));
+        // Vitest's nested TAP: a file and its suites open with `{`; with every test skipped at run
+        // time, nothing ran. One test that ran is named under them.
+        let skipped = parse_tap("TAP version 13\n1..1\nok 1 - src/a.test.ts # time=2.00ms {\n    1..1\n    ok 1 - sums # time=1.00ms {\n        1..1\n        ok 1 - adds # SKIP\n    }\n}\n").unwrap();
+        assert_eq!(skipped.count(), 0, "{skipped:?}");
+        let one = parse_tap("TAP version 13\n1..1\nok 1 - src/a.test.ts # time=2.00ms {\n    1..1\n    ok 1 - sums # time=1.00ms {\n        1..2\n        ok 1 - adds # time=0.20ms\n        ok 2 - later # SKIP\n    }\n}\n").unwrap();
+        assert_eq!(one.passed, ["src/a.test.ts > sums > adds"]);
     }
 
     #[test]

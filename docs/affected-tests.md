@@ -141,15 +141,17 @@ static graph does not claim), which selects every test.
 
 The filtered command runs only when the change selects some of the suite's tests. A change that
 selects all of them, an approved whole-suite mapping (`inputs`, which selects every listed
-test), the map's `always` suites and a file path with characters outside letters, digits and
-`_-/.:` run the whole `command` as before.
+test), a suite the map's `always` names (even when the change reaches it too) and a file path
+with characters outside letters, digits and `_-/.:` run the whole `command` as before.
 
 The exit code alone is never the proof. Nitely reads the command's TAP output for the tests
 that ran: each `ok` and `not ok` line, nested names joined by ` > `, `# SKIP` and `# TODO`
 lines left out, and the runner's `# pass N` and `# fail N` when it prints them. A passing
 suite's own line is not a test, so a file with only an empty `describe` proves nothing; a
-failing suite line (a hook that threw) is a failure even when `# fail` says 0. The gate passes only when that shows at least one test ran and none failed. The
-test IDs it read go on the verification: the plan recorded for that revision (`executed`, which
+failing suite line (a hook that threw) is a failure even when `# fail` says 0. Vitest's nested
+TAP, where a file or suite line ends in `{`, is read the same way. The gate passes only when
+that shows at least one test ran and none failed. The test IDs it read go on the
+verification: the plan recorded for that revision (`executed`, which
 `get_issue` shows under `verification`) and a `selected_tests_ran` entry on the issue's
 timeline. A run of up to 200 tests keeps every ID even when its output is longer than the
 4,000 characters a gate keeps.
