@@ -578,6 +578,12 @@ pub fn land_on_approval(db: &mut Db, config: &crate::Config, key: &str, dir: &st
 /// next round. `reported` keeps the last error noted per issue, so a lasting one (no repo found,
 /// a playbook that does not parse) goes on the issue once, not every round.
 pub fn land_approved(db: &mut Db, config: &crate::Config, reported: &mut HashMap<String, String>) -> Result<Vec<Landed>> {
+    land_approved_until(db, config, reported, &mut || false)
+}
+
+/// `land_approved`, asking `stop` before each land: the app stops a round once a newer nitely is
+/// installed, so the rest lands in that build next round (NIT-752).
+pub fn land_approved_until(db: &mut Db, config: &crate::Config, reported: &mut HashMap<String, String>, stop: &mut dyn FnMut() -> bool) -> Result<Vec<Landed>> {
     let mut landed = Vec::new();
     let approved: Vec<IssueRecord> =
         db.all_issues(false)?.into_iter().filter(|i| i.state == "Approved" && i.origin == "nitely").collect();
@@ -599,6 +605,7 @@ pub fn land_approved(db: &mut Db, config: &crate::Config, reported: &mut HashMap
                     root.display()
                 )),
                 Some(_) => continue,
+                None if stop() => break,
                 None => land_on_approval(db, config, &issue.key, &root.to_string_lossy()),
             },
             Err(e) => Err(e),

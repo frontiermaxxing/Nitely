@@ -59,7 +59,10 @@ pub struct Round {
 /// as JSON.
 pub fn run_round(db: &mut Db, config: &crate::Config, input: &str) -> Result<String> {
     let mut round: Round = if input.trim().is_empty() { Round::default() } else { serde_json::from_str(input).context("reading the round")? };
-    let landed = crate::land::land_approved(db, config, &mut round.reported)?;
+    // Stops before the next land once its own file is replaced: the rest lands in that build.
+    let me = std::env::current_exe().ok().map(|exe| (crate::install::stamp(&exe), exe));
+    let mut replaced = || me.as_ref().is_some_and(|(was, exe)| crate::install::stamp(exe) != *was);
+    let landed = crate::land::land_approved_until(db, config, &mut round.reported, &mut replaced)?;
     round.landed = landed.into_iter().filter(|l| l.landed).map(|l| l.issue).collect();
     Ok(serde_json::to_string(&round)?)
 }
@@ -97,27 +100,40 @@ pub fn round_with(mut cmd: Command, reported: &mut HashMap<String, String>) -> R
     Ok(round.landed)
 }
 
-/// An installed build as last read: its path, its file's stamp, and what it said it is.
-type Seen = (PathBuf, Option<(u64, std::time::SystemTime)>, Option<Build>);
+/// An installed build's file stamp, to tell when an install replaced it.
+type Stamp = Option<(u64, std::time::SystemTime)>;
+
+/// An installed build as last read: its path, its file's stamp, what it said it is, and when.
+type Seen = (PathBuf, Stamp, Option<Build>, std::time::Instant);
+
+/// How long a build that could not say what it is (still being copied in, an old one, or one that
+/// failed to start) goes unasked before the app asks it again.
+const ASK_AGAIN: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The app's lander: lands in-process, or in the installed build once that is newer.
 pub struct AutoLander {
     app: Option<Build>,
     /// The installed build last read, by its path and file stamp, so it is asked again only once
-    /// an install replaced it.
+    /// an install replaced it; one that could not say is asked again after `ASK_AGAIN`.
     seen: Option<Seen>,
-    /// The installed build rounds were last handed to (or, where they cannot be, found newer); said
-    /// once per build.
-    handed_to: Option<String>,
+    /// The installed build last found newer; said once per build.
+    told: Option<String>,
     /// Whether another process can land an approved change: not on macOS, where only the app reads
     /// the approval key from its keychain (`approval::agents_can_verify`), so there the app lands
-    /// itself and says it needs a restart.
+    /// itself and says so.
     pub can_hand_over: bool,
     pub reported: HashMap<String, String>,
 }
 
-/// Where a round ran.
+/// Where a round runs, and what to say on the board first.
 #[derive(Debug, PartialEq)]
+pub struct Choice {
+    pub ran: Ran,
+    pub say: Option<String>,
+}
+
+/// Where a round ran.
+#[derive(Debug, Clone, PartialEq)]
 pub enum Ran {
     InProcess,
     Installed(PathBuf),
@@ -125,73 +141,82 @@ pub enum Ran {
 
 impl AutoLander {
     pub fn new(app: Option<Build>) -> Self {
-        AutoLander { app, seen: None, handed_to: None, can_hand_over: crate::approval::agents_can_verify(), reported: HashMap::new() }
+        AutoLander { app, seen: None, told: None, can_hand_over: crate::approval::agents_can_verify(), reported: HashMap::new() }
     }
 
-    /// The installed build at `exe`, read again only when its file changed.
+    /// The installed build at `exe`, read again when its file changed, or a while after it could
+    /// not say.
     fn installed(&mut self, exe: &Path, start: impl Fn(&Path) -> Command) -> Option<Build> {
         let stamp = crate::install::stamp(exe);
-        if let Some((path, was, build)) = &self.seen {
-            if path == exe && *was == stamp {
+        if let Some((path, was, build, at)) = &self.seen {
+            if path == exe && *was == stamp && (build.is_some() || at.elapsed() < ASK_AGAIN) {
                 return build.clone();
             }
         }
         let build = build_of(start(exe));
-        self.seen = Some((exe.to_path_buf(), stamp, build.clone()));
+        self.seen = Some((exe.to_path_buf(), stamp, build.clone(), std::time::Instant::now()));
         build
     }
 
-    /// Where this round should run: the installed build at `installed` when it is newer than the
-    /// app and another process can check approvals, else here. The first round to find a newer
-    /// build says so on the board.
-    pub fn choose(&mut self, db: &Db, installed: Option<&Path>, start: impl Fn(&Path) -> Command) -> Result<Ran> {
-        let Some(exe) = installed else { return Ok(Ran::InProcess) };
+    /// Where this round runs: the installed build at `installed` when it is newer than the app and
+    /// another process can check approvals, else here. It opens no database, so an app that a newer
+    /// build's migration left behind still hands over. The first round to find a newer build says
+    /// so.
+    pub fn choose(&mut self, installed: Option<&Path>, start: impl Fn(&Path) -> Command) -> Choice {
+        let Some(exe) = installed else { return Choice { ran: Ran::InProcess, say: None } };
         let build = self.installed(exe, start);
         if !installed_is_newer(self.app.as_ref(), build.as_ref()) {
-            if self.handed_to.take().is_some() {
-                db.log_event(&Actor::Agent(crate::land::AUTO_LANDER.into()), None, None, "status", "The app lands approved changes itself again: the installed nitely is no newer than the app")?;
-            }
-            return Ok(Ran::InProcess);
+            let say = self.told.take().map(|_| "The app lands approved changes itself again: the installed nitely is no newer than the app".to_string());
+            return Choice { ran: Ran::InProcess, say };
         }
         let (app, build) = (self.app.as_ref().expect("newer than a known build"), build.expect("newer"));
-        if self.handed_to.as_deref() != Some(build.commit.as_str()) {
-            let line = if self.can_hand_over {
+        let mut say = None;
+        if self.told.as_deref() != Some(build.commit.as_str()) {
+            say = Some(if self.can_hand_over {
                 format!(
-                    "The app is older than the installed nitely ({} against {}): approved changes now land with the installed build, at {}. Restart the app to run the new build itself",
+                    "The app is older than the installed nitely ({} against {}): approved changes now land with the installed build, at {}, until the app itself is updated",
                     app.short(),
                     build.short(),
                     exe.display()
                 )
             } else {
                 format!(
-                    "The app is older than the installed nitely ({} against {}), and here only the app can check approvals, so it still lands approved changes with its own code: restart the app to land with the new build",
+                    "The app is older than the installed nitely ({} against {}), and here only the app can check approvals, so approved changes land with the app's own code until the app itself is updated",
                     app.short(),
                     build.short()
                 )
-            };
-            eprintln!("{line}");
-            db.log_event(&Actor::Agent(crate::land::AUTO_LANDER.into()), None, None, "status", &line)?;
-            self.handed_to = Some(build.commit.clone());
+            });
+            self.told = Some(build.commit.clone());
         }
-        Ok(if self.can_hand_over { Ran::Installed(exe.to_path_buf()) } else { Ran::InProcess })
+        let ran = if self.can_hand_over { Ran::Installed(exe.to_path_buf()) } else { Ran::InProcess };
+        Choice { ran, say }
     }
 
     /// One round of landing approved changes, in the newest build at hand. A newer installed build
     /// that cannot run the round (it failed to start) lands nothing this round: the old code here
-    /// is the one known to be behind, so it does not step in.
+    /// is the one known to be behind, so it does not step in. A round here stops before its next
+    /// land once the installed build changes, so the rest go to the newer one next round.
     pub fn round(&mut self, config: &crate::Config, installed: Option<&Path>) -> Result<Ran> {
-        let mut db = Db::open_default()?;
-        let ran = self.choose(&db, installed, command)?;
-        match &ran {
+        let choice = self.choose(installed, command);
+        if let Some(line) = &choice.say {
+            eprintln!("{line}");
+            // On the board when this build can still open the database; the line above says it anyway.
+            if let Ok(db) = Db::open_default() {
+                db.log_event(&Actor::Agent(crate::land::AUTO_LANDER.into()), None, None, "status", line).ok();
+            }
+        }
+        match &choice.ran {
             Ran::InProcess => {
-                crate::land::land_approved(&mut db, config, &mut self.reported)?;
+                let mut db = Db::open_default()?;
+                let was = installed.map(|exe| (exe.to_path_buf(), crate::install::stamp(exe)));
+                let mut replaced = || was.as_ref().is_some_and(|(exe, stamp)| crate::install::stamp(exe) != *stamp);
+                crate::land::land_approved_until(&mut db, config, &mut self.reported, &mut replaced)?;
             }
             Ran::Installed(exe) => {
-                drop(db);
                 round_with(command(exe), &mut self.reported).with_context(|| format!("landing approved changes with {}", exe.display()))?;
             }
         }
-        Ok(ran)
+        Ok(choice.ran)
     }
 }
 
