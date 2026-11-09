@@ -109,6 +109,15 @@ target_kind = "test"
 target = "async_submit"
 
 [[components.suites]]
+id = "auto_land"
+inputs = ["crates/nitely-cli/"]
+[components.suites.cargo]
+manifest = "crates/nitely-cli/Cargo.toml"
+package = "nitely-cli"
+target_kind = "test"
+target = "auto_land"
+
+[[components.suites]]
 id = "executor"
 inputs = ["crates/nitely-cli/"]
 [components.suites.cargo]
