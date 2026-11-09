@@ -500,13 +500,17 @@ fn goal_route(db: &Db, root: &Path, key: &str, branch: Option<&str>) -> Result<O
     Ok(Some(GoalRoute { gb, started, moved }))
 }
 
-/// The declared submodules whose pointer `branch` moves since it left `from`. The goal branch never
-/// moves one itself (merges of main only take main's), so an item that does lands on main alone.
+/// The declared submodules whose pointer `branch` moves itself since it left `from`. The goal branch
+/// never moves one (merges of main only take main's), so an item that does lands on main alone. A
+/// pointer the branch took from main, by merging it in (a red goal branch's fix does), is main's,
+/// not the item's: where the branch last met main points there too.
 fn moved_pointers(root: &Path, pb: &Playbook, branch: &str, from: &str) -> Result<Vec<String>> {
     let fork = git(root, &["merge-base", from, branch])?.trim().to_string();
+    let met_main = git(root, &["merge-base", pb.integration_branch(), branch])?.trim().to_string();
     let mut moved = Vec::new();
     for s in &pb.submodules {
-        if crate::submodules::pointer(root, branch, s.path())? != crate::submodules::pointer(root, &fork, s.path())? {
+        let ours = crate::submodules::pointer(root, branch, s.path())?;
+        if ours != crate::submodules::pointer(root, &fork, s.path())? && ours != crate::submodules::pointer(root, &met_main, s.path())? {
             moved.push(s.path().to_string());
         }
     }
@@ -532,6 +536,15 @@ pub(crate) fn leave_for_main(db: &Db, root: &Path, key: &str, branch: &str, work
             bail!("{key} moves the submodule pointer of {pointers}, so it lands on {main} alone, but {branch} has no worktree to take it off {} in; run start_task again", route.gb.branch);
         };
         let fork = git(root, &["merge-base", &route.gb.branch, branch])?.trim().to_string();
+        // A rebase would drop a merge and the resolution it holds: that one is the agent's to move.
+        if !git(root, &["rev-list", "--merges", &format!("{fork}..{branch}")])?.trim().is_empty() {
+            bail!(
+                "{key} moves the submodule pointer of {pointers}, so it lands on {main} alone, but {branch} holds merge commits, which taking it off {} would lose; \
+                 put its own changes on {main} without them (`git rebase --onto {main} {}` and resolve what the merges did), then submit again",
+                route.gb.branch,
+                short(&fork)
+            );
+        }
         rebase_onto(wt, &pb, main, &fork).with_context(|| format!("taking {branch} off {} onto {main}", route.gb.branch))?;
         said.push_str(&format!("; its own commits were rebased off {} onto {main}", route.gb.branch));
     } else if !say {
@@ -667,13 +680,21 @@ fn work_tree(root: &Path, pb: &Playbook, goal: i64, at: &str) -> Result<PathBuf>
             crate::unlink::remove_tree(&path).with_context(|| format!("clearing {}", path.display()))?;
         }
         git(root, &["worktree", "add", "--detach", &path.to_string_lossy(), at]).context("making the goal branch's worktree")?;
-        return Ok(path);
+    } else {
+        git(&path, &["merge", "--abort"]).ok();
+        git(&path, &["revert", "--abort"]).ok();
+        git(&path, &["checkout", "--quiet", "--force", "--detach", at]).context("moving the goal branch's worktree")?;
+        git(&path, &["clean", "-ffdq"]).ok();
     }
-    git(&path, &["merge", "--abort"]).ok();
-    git(&path, &["revert", "--abort"]).ok();
-    git(&path, &["checkout", "--quiet", "--force", "--detach", at]).context("moving the goal branch's worktree")?;
-    git(&path, &["clean", "-ffdq"]).ok();
+    submodules_at_head(root, pb, &path)?;
     Ok(path)
+}
+
+/// Checks the declared submodules out in the goal branch's worktree where its HEAD points them, as
+/// a build lane does, so item checks run there read them (NIT-746). Again after a merge of main,
+/// which may move a pointer.
+fn submodules_at_head(root: &Path, pb: &Playbook, wt: &Path) -> Result<()> {
+    crate::submodules::sync_lane(root, pb, wt, "HEAD", &[]).context("checking the submodules out in the goal branch's worktree")
 }
 
 /// The item checks of the change from `base` to the worktree's HEAD: `git diff --check`, the
@@ -901,6 +922,7 @@ pub(crate) fn merge_main(db: &mut Db, root: &Path, pb: &Playbook, gb: &GoalBranc
         turn_red(db, root, gb, &main, &why, &conflicts, actor)?;
         return Ok(Flow::Red(why));
     }
+    submodules_at_head(root, pb, &wt)?;
     let gate = item_gate(db, root, &wt, None, &head, &gb.branch, actor)?;
     if !(gate.passed || gate.skipped.is_some()) {
         let failed = gate.results.iter().find(|r| !r.ok).map(|r| format!(" at `{}`", r.command)).unwrap_or_default();
@@ -1851,6 +1873,13 @@ test_patterns = [\"src/**/*.test.ts\"]
         crate::test_repo::init(&upstream, &[("core.c", "int core;\n")]);
         let path = f.repo.join(playbook::PLAYBOOK_PATH);
         let text = std::fs::read_to_string(&path).unwrap();
+        // The gate reads the engine, as a build of the repo would.
+        let text = if cfg!(windows) {
+            text.replacen("if exist bad.txt", "if not exist engine\\core.c (exit 1) else if exist bad.txt", 1)
+        } else {
+            text.replacen("test ! -f bad.txt", "test -f engine/core.c && test ! -f bad.txt", 1)
+        };
+        assert!(text.contains("core.c"));
         std::fs::write(&path, text + "[[submodules]]\npath = \"engine\"\ncheckout = \"every_task\"\n").unwrap();
         sh(&f.repo, &["-c", "protocol.file.allow=always", "submodule", "add", "-q", &upstream.to_string_lossy(), "engine"]);
         sh(&f.repo, &["add", playbook::PLAYBOOK_PATH]);
@@ -1902,6 +1931,12 @@ test_patterns = [\"src/**/*.test.ts\"]
         let b = f.issue("B", Some(f.goal));
         let wt = f.work(&b, "b.txt", "b\n");
         assert_eq!(sh(&wt.join("engine"), &["rev-parse", "HEAD"]), held, "start_task checks the engine out at the goal branch's pointer");
+        // Merging main in, as a red goal branch's fix does, takes main's pointer without moving it.
+        sh(&wt, &["merge", "-q", "--no-edit", "main"]);
+        sh(&wt.join("engine"), &["merge", "-q", "--ff-only", &f.pointer("main")]);
+        let branch = sh(&wt, &["branch", "--show-current"]);
+        let route = route_of_issue(&f.db, &f.repo, &b, Some(&branch)).unwrap().map(|g| g.branch);
+        assert_eq!(route.as_deref(), Some("goal-1"), "it still goes through the goal branch");
         let s = f.submit(&wt);
         assert!(s.land.as_ref().is_some_and(|l| l.landed && l.goal_branch.as_deref() == Some("goal-1")), "{s:?}");
         assert!(s.review.is_some(), "with Careful's item review: {s:?}");
@@ -1939,7 +1974,8 @@ test_patterns = [\"src/**/*.test.ts\"]
     }
 
     /// NIT-746: a land on main that moves the submodule pointer flows into the goal branch cleanly:
-    /// the goal branch never moves the pointer itself, so the merge only takes main's.
+    /// the goal branch never moves the pointer itself, so the merge only takes main's, and the merge's
+    /// checks read the engine where it now points.
     #[test]
     fn a_main_land_that_moves_the_submodule_pointer_merges_into_the_goal_branch_cleanly() {
         let mut f = submodule_fixture("nitely-goal-sub-merge");
