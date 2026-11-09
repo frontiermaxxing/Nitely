@@ -117,10 +117,13 @@ mod tests {
         assert!(!review_on(Some(PreReview::Off), Some(ItemReview::Blocking), false));
         guard.require_review().unwrap();
         let off = Options { test_depth: Some(TestDepth::Off), pre_review: Some(PreReview::Off), ..Default::default() };
-        db.set_project_review_mode("APP", Mode::Custom, off, 0, &Actor::Human).unwrap();
+        let off = db.set_project_review_mode("APP", Mode::Custom, off, 0, &Actor::Human).unwrap();
         assert!(guard.require_review().unwrap_err().is::<SkipReview>());
+        let planned_off = ReviewGuard { authority: off.authority().unwrap(), ..guard.clone() };
         db.set_project_review_mode("APP", Mode::Release, Options::default(), 1, &Actor::Human).unwrap();
-        assert!(guard.require_review().is_err(), "a queued reviewer cannot retain stale mode authority");
+        assert!(planned_off.require_review().is_err(), "a queued reviewer cannot retain stale mode authority");
+        // Planned before the first save, under Nitely's defaults, which ask what Release asks (NIT-745).
+        guard.require_review().unwrap();
         drop(db);
         std::fs::remove_dir_all(dir).ok();
     }

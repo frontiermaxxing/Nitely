@@ -1255,17 +1255,18 @@ reason = "billing"
     }
 
     #[test]
-    fn queued_mode_change_routes_individually_and_refuses_stale_submission() {
+    fn queued_mode_change_routes_individually() {
         use crate::project_modes::{Mode, Options};
         let mut f = fixture();
         let (a, _) = f.submitted("Queued change", &[("queued.txt", "queued")]);
         enqueue(&f.db, &f.repo, &a, &f.opts(), &f.actor).unwrap();
         crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Custom, Options { land_batch: Some(false), ..Default::default() });
         run_queue(&mut f.db, &f.repo).unwrap();
-        assert_eq!(f.entry(&a).state, "sent_back");
-        assert!(!f.on_main("queued.txt"));
+        // Checked before the project's first save, under checks that save does not raise: it lands
+        // (NIT-745), on its own under the new mode, not in a batch the old policy planned.
+        assert_eq!(f.entry(&a).state, "landed");
+        assert!(f.on_main("queued.txt"));
         assert!(f.runs().is_empty(), "a queued row cannot retain an obsolete batched-land policy");
-        assert!(f.error(&a).contains("mode changed"), "{}", f.error(&a));
     }
 
     #[test]
