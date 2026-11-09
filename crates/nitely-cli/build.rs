@@ -25,6 +25,9 @@ fn main() {
     let commit = std::env::var("NITELY_SOURCE_COMMIT").unwrap_or_else(|_| actual.clone());
     assert!(commit == actual, "the checkout changed during source install; run install again");
     println!("cargo:rustc-env=NITELY_COMMIT={commit}");
+    // The commit's time, so a running app can tell this build is newer than its own (NIT-752).
+    let committed_at = if commit.is_empty() { String::new() } else { git(&["show", "-s", "--format=%ct", &commit]).unwrap_or_default() };
+    println!("cargo:rustc-env=NITELY_COMMIT_TIME={committed_at}");
     // The release channel the release workflow builds for (docs/releasing.md); "dev" otherwise.
     let channel = std::env::var("NITELY_CHANNEL").unwrap_or_else(|_| "dev".into());
     println!("cargo:rustc-env=NITELY_BUILD_CHANNEL={channel}");

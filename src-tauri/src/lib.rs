@@ -1153,10 +1153,15 @@ pub fn run() {
             // for it. Each round lands what is approved and ready; a land that holds the lock, or an
             // app that was closed, only delays it to a later round. Started here, in the one
             // instance that runs, never in a second launch that only hands over a link.
+            // Between rounds it checks the installed nitely: once land installed a build newer than
+            // this app, the rounds run there, not on this app's older code (NIT-752).
             std::thread::spawn(|| {
-                let mut reported = std::collections::HashMap::new();
+                let app = nitely_core::auto_land::Build::stamped(env!("NITELY_COMMIT"), env!("NITELY_COMMIT_TIME"));
+                let mut lander = nitely_core::auto_land::AutoLander::new(app);
                 loop {
-                    let round = Config::load().and_then(|config| nitely_core::land::land_approved(&mut Db::open_default()?, &config, &mut reported));
+                    // Under the harness, its own nitely beside the app, never the person's installed one.
+                    let installed = if harness::on() { harness::nitely() } else { nitely_crew::crew::nitely_on_path() };
+                    let round = Config::load().and_then(|config| lander.round(&config, installed.as_deref()));
                     if let Err(e) = round {
                         eprintln!("land approved: {e:#}");
                     }

@@ -8,6 +8,7 @@ mod tracking_scenario;
 pub mod crew_rules;
 pub mod activity;
 pub mod approval;
+pub mod auto_land;
 pub mod awake;
 mod blobs;
 pub mod batches;
