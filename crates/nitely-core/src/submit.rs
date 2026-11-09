@@ -163,9 +163,9 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     let (_, branch_key) = crate::git::parse_branch(&branch);
     let root = playbook::repo_root(config, opts.dir).with_context(|| format!("{} is not inside a git repo", opts.dir))?;
     let mut pb = Playbook::load(&root)?;
-    let handed_in = opts.solution_commit.map(str::to_string).unwrap_or(git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string());
+    let mut handed_in = opts.solution_commit.map(str::to_string).unwrap_or(git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string());
     let base = pb.integration_branch().to_string();
-    let explained_patch = if opts.solution.is_some() {
+    let mut explained_patch = if opts.solution.is_some() {
         Some(match opts.solution_patch_id {
             Some(patch) => patch.to_string(),
             None => patch_id_range(&worktree, &playbook::diff_base(&worktree, &base), &handed_in)?,
@@ -200,6 +200,18 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     }
     // An item of a goal with a goal branch has no pull request of its own: its hop is the land into
     // the goal branch, with item checks and the item review the mode asks for (goal_branch.rs).
+    // One that moves a submodule pointer is taken off it and goes to main alone (NIT-746).
+    let before = git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string();
+    crate::goal_branch::leave_for_main(db, &root, &key, &branch, Some(&worktree), true, actor)?;
+    let after = git(&worktree, &["rev-parse", "HEAD"])?.trim().to_string();
+    // Taken off the goal branch, the same change sits on new commits: the solution handed in for
+    // it still describes it.
+    if after != before && handed_in == before {
+        handed_in = after;
+        if opts.solution.is_some() {
+            explained_patch = Some(patch_id_range(&worktree, &playbook::diff_base(&worktree, &base), &handed_in)?);
+        }
+    }
     if let Some(gb) = crate::goal_branch::route_of_issue(db, &root, &key, Some(&branch))? {
         if quick {
             bail!("{key} is an item of a goal that lands through {}: submit it", gb.branch);
@@ -773,7 +785,8 @@ fn run_review(
 pub(crate) fn stalled_rounds(db: &Db, key: &str, review: &Review) -> Result<Option<String>> {
     let decided = [db.handed_back_event(key)?, db.findings_decided_event(key)?].into_iter().flatten().max_by_key(|d| (d.ts, d.id));
     let earlier: Vec<ReviewRecord> = db.reviews(key)?.into_iter().filter(|r| decided.is_none_or(|d| d.came_before(r))).collect();
-    Ok(not_converging(&earlier, review))
+    let rounds = crate::project_modes::for_issue(db, key)?.map(|m| m.options()).unwrap_or_else(crate::project_modes::builtin).review_rounds;
+    Ok(not_converging(&earlier, review, rounds.unwrap_or(crate::project_modes::REVIEW_ROUNDS).into()))
 }
 
 /// The shared-cause question, asked once the rounds stalled and not yet asked since they began to:
@@ -1340,16 +1353,23 @@ requires of this chunk at this stage (its provided contract and \"done when\" in
 <symbol>` or `REQUIREMENT <n>: not met: <what is missing>`. Report each one not met as a finding too, in this round, graded \
 like any other: later rounds treat a gap in code this round already saw as a follow-up, not a blocker.\n";
 
-/// How many review rounds in a row may ask for changes before the issue goes to a person.
-pub const MAX_ROUNDS: usize = 5;
+/// The class a reviewer named at the end of a P0/P1 finding (` Class: <class>`, NIT-735), as one
+/// comparable string. None when it names none, or `Class: none`: a finding that stands alone.
+pub(crate) fn finding_class(text: &str) -> Option<String> {
+    let (_, class) = text.rsplit_once("Class:")?;
+    let class = class.trim().trim_end_matches('.').trim().to_lowercase();
+    (!class.is_empty() && class != "none").then_some(class)
+}
 
 /// Why an issue's review rounds have stopped converging, given the reviews before this one
 /// (newest first) and this one, which asks for changes: a P0 or P1 finding still open after two
-/// rounds that tried to fix it (carried a second time), or the `MAX_ROUNDS`th round in a row that
-/// asks for changes. A passing review ends a run: rounds after it (a rebase, a land that stopped)
-/// are not a loop. The text is the one line the person reads: what happened and how many findings
-/// are open, by priority; the findings themselves are on the review and its follow-up (NIT-633).
-pub fn not_converging(earlier: &[ReviewRecord], review: &Review) -> Option<String> {
+/// rounds that tried to fix it (carried a second time), a new P0 or P1 finding of a class an earlier
+/// round's P0 or P1 already named (NIT-751: fixing cases one by one is not converging), or the
+/// `max_rounds`th round in a row that asks for changes (the review mode's `review_rounds`). A
+/// passing review ends a run: rounds after it (a rebase, a land that stopped) are not a loop. The
+/// text is the one line the person reads: what happened and how many findings are open, by
+/// priority; the findings themselves are on the review and its follow-up (NIT-633).
+pub fn not_converging(earlier: &[ReviewRecord], review: &Review, max_rounds: usize) -> Option<String> {
     let earlier: Vec<&ReviewRecord> = earlier.iter().filter(|r| !r.reviewer.is_empty()).collect();
     let round = 1 + earlier.iter().take_while(|r| r.verdict == "changes").count();
     // Carried now and already carried by the round before: two fixes did not close it.
@@ -1359,10 +1379,18 @@ pub fn not_converging(earlier: &[ReviewRecord], review: &Review) -> Option<Strin
         .filter(|f| f.carried && f.priority <= 1)
         .filter(|f| earlier.first().is_some_and(|last| last.findings.iter().any(|p| p.carried && p.priority <= 1 && p.text == f.text)))
         .collect();
-    if twice.is_empty() && round < MAX_ROUNDS {
+    // A new blocking finding whose class a blocking finding of an earlier round in this run named.
+    let run = &earlier[..round - 1];
+    let repeated = review.findings.iter().filter(|f| f.priority <= 1 && !f.carried).find_map(|f| {
+        let class = finding_class(&f.text)?;
+        run.iter().flat_map(|r| r.findings.iter()).any(|p| p.priority <= 1 && p.text != f.text && finding_class(&p.text).as_ref() == Some(&class)).then_some(class)
+    });
+    if twice.is_empty() && repeated.is_none() && round < max_rounds {
         return None;
     }
-    let why = if twice.is_empty() {
+    let why = if let (true, Some(class)) = (twice.is_empty(), &repeated) {
+        format!("a second P0/P1 finding of the same class ({class}) after a round that fixed the first")
+    } else if twice.is_empty() {
         format!("{round} review rounds in a row asked for changes")
     } else {
         format!("{} still open after two rounds that tried to fix {}", plural(twice.len(), "P0/P1 finding"), if twice.len() == 1 { "it" } else { "them" })
@@ -1895,25 +1923,61 @@ mod tests {
         };
         // Round 2 carrying a P1 once is still a round that may converge.
         let first = record(vec![f(1, "Drops the last row: a.rs", false)]);
-        assert_eq!(not_converging(&[first.clone()], &review(vec![f(1, "Drops the last row: a.rs", true)])), None);
+        assert_eq!(not_converging(&[first.clone()], &review(vec![f(1, "Drops the last row: a.rs", true)]), 5), None);
         // Round 3 carrying it a second time goes to a person, and says what is open.
         let second = record(vec![f(1, "Drops the last row: a.rs", true)]);
-        let why = not_converging(&[second.clone(), first.clone()], &review(vec![f(1, "Drops the last row: a.rs", true), f(0, "Leaks the token: b.rs", false)])).unwrap();
+        let why = not_converging(&[second.clone(), first.clone()], &review(vec![f(1, "Drops the last row: a.rs", true), f(0, "Leaks the token: b.rs", false)]), 5).unwrap();
         // One line: what happened and how many are open, never the findings themselves (NIT-633).
         assert_eq!(why, "1 P0/P1 finding still open after two rounds that tried to fix it; 2 open findings (1 P0, 1 P1)");
         // A finding carried at P2 (its code gone) or a new one does not count as carried twice.
-        assert_eq!(not_converging(&[second.clone(), first.clone()], &review(vec![f(2, "Drops the last row: a.rs", true), f(1, "New: c.rs", false)])), None);
+        assert_eq!(not_converging(&[second.clone(), first.clone()], &review(vec![f(2, "Drops the last row: a.rs", true), f(1, "New: c.rs", false)]), 5), None);
         // The fifth round in a row asking for changes goes to a person whatever was carried; a
         // review that did not run (no reviewer) is not a round, and a passing one ends the run.
         let none = ReviewRecord { reviewer: String::new(), ..first.clone() };
         let four = vec![record(vec![]), record(vec![]), none.clone(), record(vec![]), record(vec![])];
         let new = || review(vec![f(1, "Off by one: d.rs", false)]);
-        let why = not_converging(&four, &new()).unwrap();
+        let why = not_converging(&four, &new(), 5).unwrap();
         assert_eq!(why, "5 review rounds in a row asked for changes; 1 open finding (1 P1)");
-        assert_eq!(not_converging(&four[1..], &new()), None, "the fourth");
+        assert_eq!(not_converging(&four[1..], &new(), 5), None, "the fourth");
         let passed = ReviewRecord { verdict: "pass".into(), ..record(vec![]) };
         let after_a_pass = vec![record(vec![]), record(vec![]), passed, record(vec![]), record(vec![]), record(vec![])];
-        assert_eq!(not_converging(&after_a_pass, &new()), None, "three in a row since the pass");
+        assert_eq!(not_converging(&after_a_pass, &new(), 5), None, "three in a row since the pass");
+    }
+
+    /// The mode's round limit and a repeated finding class stall the rounds (NIT-751), read through
+    /// `stalled_rounds` as submit reads them: the project's review mode and the issue's past reviews.
+    #[test]
+    fn a_custom_round_limit_and_a_second_finding_of_one_class_stall_the_rounds() {
+        use crate::project_modes::{Mode, Options};
+        use crate::review::Finding;
+        let file = crate::paths::unique_temp("stalled-rounds", ".sqlite");
+        let mut db = Db::open(&file).unwrap();
+        db.create_project("APP", "Example").unwrap();
+        let issue = db.create_issue(&crate::NewIssue { project: "APP".into(), title: "Merge duplicate rows".into(), body: "Rows with one id become one".into(), evidence: "none".into(), source: "codex".into(), kind: "bug".into(), ..Default::default() }, &Actor::Human).unwrap();
+        let f = |text: &str| Finding { priority: 1, text: text.into(), carried: false, raised_as: None, now: None };
+        let round = |db: &Db, text: &str| {
+            db.conn.execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts) VALUES (?1, 'p', 'c', 'codex', 'changes', 'agent', ?2, unixepoch())", rusqlite::params![issue.key, serde_json::to_string(&vec![f(text)]).unwrap()]).unwrap();
+        };
+        let now = |text: &str| Review { reviewer: "codex".into(), verdict: "changes".into(), findings: vec![f(text)], flagged: vec![], summary: String::new(), seconds: 1, previous: vec![], note: String::new(), batch: None, tokens: None, reused: None, outside: vec![], scope: None };
+        let set = |db: &mut Db, mode: Mode, o: Options| { let rev = db.project_review_mode("APP").unwrap().revision; db.set_project_review_mode("APP", mode, o, rev, &Actor::Human).unwrap(); };
+
+        // Custom stops after two rounds asking for changes; a limit outside 2 to 20 is refused.
+        let low = db.set_project_review_mode("APP", Mode::Custom, Options { review_rounds: Some(1), ..Default::default() }, 0, &Actor::Human);
+        assert!(low.unwrap_err().to_string().contains("between 2 and 20"));
+        set(&mut db, Mode::Custom, Options { review_rounds: Some(2), ..Default::default() });
+        round(&db, "Drops the last row: merge.rs Class: none");
+        let why = stalled_rounds(&db, &issue.key, &now("Keeps a stale index: merge.rs Class: none")).unwrap().unwrap();
+        assert_eq!(why, "2 review rounds in a row asked for changes; 1 open finding (1 P1)");
+
+        // Fast allows five, but a second blocking finding of a class an earlier round named stalls.
+        set(&mut db, Mode::Fast, Options::default());
+        assert_eq!(stalled_rounds(&db, &issue.key, &now("Keeps a stale index: merge.rs Class: none")).unwrap(), None, "Class: none never matches");
+        round(&db, "Merges two rows with one id but loses the newer: merge.rs Class: any two rows with the same id");
+        let why = stalled_rounds(&db, &issue.key, &now("Counts both rows with one id in the total: report.rs Class: Any two rows with the same id.")).unwrap().unwrap();
+        assert!(why.starts_with("a second P0/P1 finding of the same class (any two rows with the same id)"), "{why}");
+        assert_eq!(stalled_rounds(&db, &issue.key, &now("Rounds the total down: report.rs Class: totals of a page")).unwrap(), None, "another class goes on");
+        drop(db);
+        std::fs::remove_file(file).ok();
     }
 
     /// A repo whose playbook gates with `exit 0`, pushed to a bare remote. Only the fake `claude`

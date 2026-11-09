@@ -127,8 +127,9 @@ issue (In Progress), which was already fixing; one nobody holds goes to Todo. It
 stand, each its own decision.
 
 **When review rounds stop converging** (a P0/P1 finding still open after two rounds that tried to
-fix it, or five rounds in a row asking for changes; `not_converging` in submit.rs), the review
-mode's `stalled_reviews` decides, and neither pauses the agent (NIT-568):
+fix it, a new P0/P1 finding of a class an earlier round's P0/P1 named, or the review mode's
+`review_rounds`, five unless Custom sets it, in a row asking for changes; `not_converging` in
+submit.rs; see [review-modes.md](review-modes.md)), the review mode's `stalled_reviews` decides, and neither pauses the agent (NIT-568):
 
 - `fix` (Fast and Careful): the agent is told to split the change: land what the reviews agree on,
   and file the open findings as a follow-up issue in the same goal. The person reads it as a notice

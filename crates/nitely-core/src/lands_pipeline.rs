@@ -97,10 +97,19 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
     };
 
     let review_src = source(mode, chosen.pre_review.is_some());
+    // When review rounds count as stalled, and what then happens (NIT-751).
+    let stalls = format!(
+        ". Rounds stall after {} that ask for changes, or a second blocking finding of one class: {}",
+        o.review_rounds.unwrap_or(crate::project_modes::REVIEW_ROUNDS),
+        match o.stalled_reviews.unwrap_or(crate::project_modes::StalledReviews::Ask) {
+            crate::project_modes::StalledReviews::Fix => "the agent splits the change and tells you",
+            crate::project_modes::StalledReviews::Ask => "you decide each open finding",
+        }
+    );
     let review = match o.pre_review.unwrap_or(PreReview::Individual) {
         PreReview::Off => Fact { value: "Off".into(), why: "Changes with no goal land unreviewed".into(), tone: Tone::Off, source: review_src },
-        PreReview::Batched => Fact { value: "One per batch".into(), why: "One blocking review per batch of changes with no goal".into(), tone: Tone::Agent, source: review_src },
-        PreReview::Individual => Fact { value: "Each change".into(), why: "A blocking review for each change with no goal".into(), tone: Tone::Agent, source: review_src },
+        PreReview::Batched => Fact { value: "One per batch".into(), why: format!("One blocking review per batch of changes with no goal{stalls}"), tone: Tone::Agent, source: review_src },
+        PreReview::Individual => Fact { value: "Each change".into(), why: format!("A blocking review for each change with no goal{stalls}"), tone: Tone::Agent, source: review_src },
     };
 
     let goal_src = source(mode, chosen.goal_branches.is_some() || chosen.goal_plans.is_some());
@@ -110,7 +119,7 @@ pub fn pipeline(repo: &str, settings: &ProjectReviewMode, pb: &Playbook, has_map
         GoalPlans::Asked => "plans you asked for start by themselves",
         GoalPlans::All => "every plan starts by itself",
     };
-    let routes = crate::goal_branch::goal_items_route(o.goal_branches, !pb.submodules.is_empty());
+    let routes = crate::goal_branch::goal_items_route(o.goal_branches);
     let goals = if let Err(why) = routes {
         Fact { value: "Straight to main".into(), why: format!("{why}. {}", capital(plans)), tone: Tone::Agent, source: goal_src }
     } else {

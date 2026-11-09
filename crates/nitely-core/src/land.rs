@@ -114,8 +114,13 @@ pub fn land(db: &mut Db, config: &crate::Config, opts: &LandOptions, actor: &Act
     // This land is the issue's land now: a `land --after` job still waiting for it ends (NIT-513).
     // A job's own land runs with its row `landing`, so it is not one of them.
     crate::land_job::end_waiting(db, &issue.key, "landed directly instead")?;
-    // An item of a goal with a goal branch lands into that branch, with item checks (goal_branch.rs).
-    let branch = branch_of(&root, &issue.key).ok().map(|(b, _)| b);
+    // An item of a goal with a goal branch lands into that branch, with item checks (goal_branch.rs);
+    // one that moves a submodule pointer is taken off it and lands here alone (NIT-746).
+    let found = branch_of(&root, &issue.key).ok();
+    if let Some((b, wt)) = &found {
+        crate::goal_branch::leave_for_main(db, &root, &issue.key, b, wt.as_deref(), false, actor)?;
+    }
+    let branch = found.map(|(b, _)| b);
     if let Some(gb) = crate::goal_branch::route_of_issue(db, &root, &issue.key, branch.as_deref())? {
         return land_into_goal(db, &root, &issue, opts, actor, gb);
     }
@@ -304,9 +309,6 @@ fn land_into_goal(db: &mut Db, root: &Path, issue: &IssueRecord, opts: &LandOpti
 /// on a red branch, only the item that brings that main in), then `run` into it.
 #[allow(clippy::too_many_arguments)]
 fn item_hop(db: &mut Db, root: &Path, pb: &Playbook, issue: &IssueRecord, opts: &LandOptions, actor: &Actor, gb: &crate::goal_branch::GoalBranch, report: &mut Landed) -> Result<()> {
-    if !pb.submodules.is_empty() {
-        bail!("a repo with managed submodules lands goal items on {} for now; turn the goal's branch off", pb.integration_branch());
-    }
     let (branch, _) = branch_of(root, &issue.key)?;
     let item_head = rev(root, &branch)?;
     let gb = crate::goal_branch::before_item_land(db, root, pb, gb, &issue.key, &item_head, actor)?;
@@ -1087,7 +1089,9 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
     // Submodules that land with the repo: their work must be what the branch points at, then each
     // is rebased onto its own integration branch first (docs/playbooks.md).
     crate::submodules::check_pointers(pb, &worktree)?;
-    let moving = crate::submodules::rebase(root, pb, &worktree, &base)?;
+    // An item into a goal branch moves no pointer of its own (one that does lands here alone,
+    // NIT-746): a pointer it differs by came from main, a rollback too, and must stay as main has it.
+    let moving = if goal.is_some() { Vec::new() } else { crate::submodules::rebase(root, pb, &worktree, &base)? };
     if checkpoint && git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Merging {base} into the checkpoint {branch}"))?;
         if git(&worktree, &["merge", "--no-ff", "--no-edit", "-m", &format!("Merge {base} into {branch}"), &base]).is_err() {

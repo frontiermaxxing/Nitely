@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { invoke, isLive } from "./backend";
-import { DEVELOPMENT_MODES, MODE_DESCRIPTION, MODE_LABEL, RETIRED_LABEL, editMode, kindOf, modeForKind, modeSave, modeValidation, optionsFor, type EffectiveRepository, type ModeDraft, type ModeOptions, type PeriodicStatus, type ProjectKind, type ProjectReviewMode, type ReviewMode } from "./reviewModes";
+import { DEVELOPMENT_MODES, REVIEW_ROUNDS, REVIEW_ROUNDS_RANGE, MODE_DESCRIPTION, MODE_LABEL, RETIRED_LABEL, editMode, kindOf, modeForKind, modeSave, modeValidation, optionsFor, type EffectiveRepository, type ModeDraft, type ModeOptions, type PeriodicStatus, type ProjectKind, type ProjectReviewMode, type ReviewMode } from "./reviewModes";
 import { Button, RadioCards, Segmented, Select, SettingsRow, SettingsSection, TextField, type ChoiceOption, type SelectOption } from "./ui";
 import "./review-modes.css";
 
@@ -146,6 +146,9 @@ export function ProjectReviewModeSettings({ control, version }: { control: Revie
         <SettingsRow label="Review rounds that stall" why="Neither pauses the agent: an open question holds the land, and a fix closes it by itself.">
           <Choice label="Review rounds that stall" fallback="Ask me about each finding" value={options.stalled_reviews} choices={[["fix", "Split the change, tell me"], ["ask", "Ask me about each finding"]]} disabled={off} onChange={(stalled_reviews) => edit({ stalled_reviews })} />
         </SettingsRow>
+        <SettingsRow label="Rounds before they stall" why="Rounds in a row that ask for changes. A second blocking finding of a class an earlier round named stalls them sooner." htmlFor="review-mode-rounds">
+          <Count id="review-mode-rounds" value={options.review_rounds ?? REVIEW_ROUNDS} min={REVIEW_ROUNDS_RANGE[0]} max={REVIEW_ROUNDS_RANGE[1]} disabled={off} onChange={(review_rounds) => edit({ review_rounds })} />
+        </SettingsRow>
         <SettingsRow label="Shared build lanes">
           <Toggle label="Shared build lanes" unset="Repository" value={options.shared_lanes} disabled={off} onChange={(shared_lanes) => edit({ shared_lanes })} />
         </SettingsRow>
@@ -246,7 +249,7 @@ function EffectiveModes({ project, revision }: { project: string; revision: numb
         <dt>Goal branches</dt><dd>{r.options.goal_branches ? `On, checkpoint every ${r.options.checkpoint?.items ?? "?"} items${r.options.checkpoint?.daily ? " or daily" : ""}` : "Off"}</dd>
         <dt>Goal item review</dt><dd>{r.options.goal_branches ? items[r.options.item_review ?? "off"] : "Not used"}</dd>
         <dt>Goal plans</dt><dd>{plans[r.options.goal_plans ?? "approve"]}</dd>
-        <dt>Review rounds that stall</dt><dd>{stalled[r.options.stalled_reviews ?? "ask"]}</dd>
+        <dt>Review rounds that stall</dt><dd>{stalled[r.options.stalled_reviews ?? "ask"]}, after {r.options.review_rounds ?? REVIEW_ROUNDS} rounds or a repeated finding class</dd>
         <dt>Full-suite checks on main</dt><dd>{r.options.full_backstop?.enabled ? "On" : "Off"}</dd>
         <dt>Audit sampling</dt><dd>{r.options.audit_percent ? `${r.options.audit_percent}% of eligible changes` : "Off"}</dd></dl>
       {r.warnings.map((w, i) => <p key={i} className="settings-hint">{w}</p>)}
