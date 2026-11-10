@@ -485,6 +485,30 @@ pub fn run_in_background(db: &mut Db, config: &crate::Config, id: i64) -> Result
     run_job(db, config, id, true)
 }
 
+thread_local! {
+    /// The submit job whose submit runs on this thread (NIT-777).
+    static RUNNING: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// Runs `f` as submit job `id`; the job before is restored after.
+fn as_job<T>(id: i64, f: impl FnOnce() -> T) -> T {
+    let before = RUNNING.with(|r| r.replace(Some(id)));
+    let out = f();
+    RUNNING.with(|r| r.set(before));
+    out
+}
+
+/// Names the submit job running on this thread on the review just inserted on `conn`, so a request
+/// to accept one of its findings knows which submit recorded it (NIT-777). Called by each writer of
+/// a review a submit can record: its own review, and its land batch's when it lands by itself. A
+/// review another process records meanwhile (a separate land) is not this job's, and stays unnamed.
+pub(crate) fn name_review(conn: &rusqlite::Connection) -> Result<()> {
+    if let Some(job) = RUNNING.with(|r| r.get()) {
+        conn.execute("UPDATE review SET submit_job = ?2 WHERE id = ?1", params![conn.last_insert_rowid(), job])?;
+    }
+    Ok(())
+}
+
 /// `detached`: this is the job's own process, which nobody waits on; otherwise the job runs in its
 /// caller (no process could be started), which waits for it, so it never waits for a review batch.
 fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Result<Job> {
@@ -509,7 +533,7 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Resu
     let actor = if job.requested_by == "human" { Actor::Human } else { Actor::Agent(job.requested_by.clone()) };
     // Only a submit in the background may wait for a review batch: nobody waits on it (NIT-216).
     let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: detached, solution: job.solution.as_ref(), solution_commit: Some(&job.head), solution_patch_id: job.solution_patch_id.as_deref() };
-    let outcome = crate::submit::submit(db, config, &opts, &actor);
+    let outcome = as_job(id, || crate::submit::submit(db, config, &opts, &actor));
     if let Some(t) = tracked { t.finish(None); }
     match &outcome {
         Ok(s) => {
@@ -669,6 +693,9 @@ mod tests {
         assert_eq!(result["state"], "In Review", "{result}");
         assert_eq!(db.issue(&key).unwrap().unwrap().state, "In Review");
         assert!(done.outcome().starts_with(&format!("{key}: submitted, now In Review.")), "{}", done.outcome());
+        // Its review names the job, for a later request to accept one of its findings (NIT-777).
+        let by: Vec<Option<i64>> = db.conn.prepare("SELECT submit_job FROM review WHERE issue_key = ?1").unwrap().query_map([&key], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert!(!by.is_empty() && by.iter().all(|j| *j == Some(again.id)), "{by:?}");
         assert!(!done.needs_the_submitter());
         let told = db.undelivered_submit_jobs(actor.id()).unwrap();
         assert_eq!(told.iter().map(|j| j.id).collect::<Vec<_>>(), [again.id]);

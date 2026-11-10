@@ -362,6 +362,7 @@ fn decide(db: &mut Db, root:&Path, rules: &ReviewRules, w: &Waiting, mut review:
             review.scope.as_ref().map(|s|&s.revision), review.scope.as_ref().map(crate::submit::to_json),
         ],
     )?;
+    crate::submit_job::name_review(&db.conn)?;
     db.close_superseded_requests(key, &review.findings)?;
     crate::submit::file_minor_findings(db, key, &review, actor)?;
     let by = match &review.batch {
