@@ -1840,10 +1840,6 @@ impl Db {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, (SELECT COALESCE(MAX(id), 0) FROM event))",
             rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens, s.solution.as_ref().map(to_json), to_json(&evidence), s.branch, s.review.as_ref().and_then(|r|r.scope.as_ref()).map(|s|&s.revision), s.review.as_ref().and_then(|r|r.scope.as_ref()).map(to_json)],
         )?;
-        // The submit job that recorded it, so a request to accept a finding knows which run it was (NIT-777).
-        if let Some(job) = crate::submit_job::running() {
-            self.conn.execute("UPDATE review SET submit_job = ?2 WHERE id = ?1", rusqlite::params![self.conn.last_insert_rowid(), job])?;
-        }
         Ok(())
     }
 

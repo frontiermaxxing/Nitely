@@ -485,24 +485,6 @@ pub fn run_in_background(db: &mut Db, config: &crate::Config, id: i64) -> Result
     run_job(db, config, id, true)
 }
 
-thread_local! {
-    /// The submit job this thread is running, for the reviews its submit records (NIT-777).
-    static RUNNING: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
-}
-
-/// The submit job whose submit runs on this thread, if any.
-pub(crate) fn running() -> Option<i64> {
-    RUNNING.with(|r| r.get())
-}
-
-/// Runs `f` as submit job `id`: what it records names the job. The one before is restored after.
-fn as_job<T>(id: i64, f: impl FnOnce() -> T) -> T {
-    let before = RUNNING.with(|r| r.replace(Some(id)));
-    let out = f();
-    RUNNING.with(|r| r.set(before));
-    out
-}
-
 /// `detached`: this is the job's own process, which nobody waits on; otherwise the job runs in its
 /// caller (no process could be started), which waits for it, so it never waits for a review batch.
 fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Result<Job> {
@@ -527,7 +509,12 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Resu
     let actor = if job.requested_by == "human" { Actor::Human } else { Actor::Agent(job.requested_by.clone()) };
     // Only a submit in the background may wait for a review batch: nobody waits on it (NIT-216).
     let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: detached, solution: job.solution.as_ref(), solution_commit: Some(&job.head), solution_patch_id: job.solution_patch_id.as_deref() };
-    let outcome = as_job(id, || crate::submit::submit(db, config, &opts, &actor));
+    // Every review of the issue recorded while this job runs is this job's, whichever writer
+    // recorded it (its own review, or a land's batch review when the submit lands): a request to
+    // accept a finding then knows which submit it was (NIT-777).
+    let reviews_before: i64 = db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM review", [], |r| r.get(0))?;
+    let outcome = crate::submit::submit(db, config, &opts, &actor);
+    db.conn.execute("UPDATE review SET submit_job = ?1 WHERE issue_key = ?2 COLLATE NOCASE AND id > ?3 AND submit_job IS NULL", params![id, job.issue, reviews_before])?;
     if let Some(t) = tracked { t.finish(None); }
     match &outcome {
         Ok(s) => {
@@ -687,6 +674,9 @@ mod tests {
         assert_eq!(result["state"], "In Review", "{result}");
         assert_eq!(db.issue(&key).unwrap().unwrap().state, "In Review");
         assert!(done.outcome().starts_with(&format!("{key}: submitted, now In Review.")), "{}", done.outcome());
+        // Its review names the job, for a later request to accept one of its findings (NIT-777).
+        let by: Vec<Option<i64>> = db.conn.prepare("SELECT submit_job FROM review WHERE issue_key = ?1").unwrap().query_map([&key], |r| r.get(0)).unwrap().map(Result::unwrap).collect();
+        assert!(!by.is_empty() && by.iter().all(|j| *j == Some(again.id)), "{by:?}");
         assert!(!done.needs_the_submitter());
         let told = db.undelivered_submit_jobs(actor.id()).unwrap();
         assert_eq!(told.iter().map(|j| j.id).collect::<Vec<_>>(), [again.id]);
