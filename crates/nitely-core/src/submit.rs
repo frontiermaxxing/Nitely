@@ -309,6 +309,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         if let Some(early) = early.take() {
             let rules = rules_of(&review_policy(db, &root, &issue)?.0.review);
             let stopped = out.gate.results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED));
+            let reviewed = early.head.clone();
             match early.join(&worktree, &out.commit, &rules) {
                 Ok(((choice, mut review), moved)) => {
                     crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
@@ -316,7 +317,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
                     // Recorded whatever moved since it started: its findings are what the next
                     // round fixes, and the record says what moved (NIT-770).
                     if !moved.is_empty() {
-                        let said = format!("The review of {} was recorded although {}", &out.commit[..out.commit.len().min(7)], moved.join(", and "));
+                        let said = format!("The review of {} was recorded although {}", &reviewed[..reviewed.len().min(7)], moved.join(", and "));
                         db.log_event(actor, Some(&issue.key), Some(&wt), "status", &said)?;
                         review.note = [review.note.as_str(), &said].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(". ");
                     }
@@ -326,9 +327,14 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
                     // Recorded so the next round checks its findings first; a passing one is not,
                     // since a review on record with no passing gate must not carry over.
                     if changes {
-                        db.record_review(&out)?;
+                        // Under the commit and patch it reviewed, which the gate may not have run
+                        // on: the next round is told what was seen, not what was gated (NIT-770).
+                        let mut seen = out.clone();
+                        seen.patch_id = patch_id_range(&worktree, &since, &reviewed)?;
+                        seen.commit = reviewed.clone();
+                        db.record_review(&seen)?;
                         let (pb, _) = review_policy(db, &root, &issue)?;
-                        let diff = diff_id(&worktree, &since, &out.commit).ok();
+                        let diff = diff_id(&worktree, &since, &reviewed).ok();
                         db.conn.execute("UPDATE review SET rules = ?2, diff_id = ?3 WHERE id = ?1", rusqlite::params![db.conn.last_insert_rowid(), rules_of(&pb.review), diff])?;
                         // Its P2s are filed now: the next round carries them, and carried
                         // findings are never filed again (NIT-714).
@@ -2531,9 +2537,14 @@ exit 0
         assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "In Progress");
         // Its findings can be put to the person; once a newer head is submitted and no review of
         // it was saved, they cannot.
+        let job = |head: &str, queued_at: i64| {
+            f.db.conn.execute("INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at) VALUES (?1, ?2, 'b', ?3, 'claude:test', 0, 1, 'done', ?4)",
+                rusqlite::params![issue.key, wt.to_string_lossy(), head, queued_at]).unwrap();
+        };
+        job(&handed_in, recorded.ts - 20);
         f.db.disputed_finding(&issue.key, "1", "a trade-off").unwrap();
-        f.db.conn.execute("INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at) VALUES (?1, ?2, 'b', ?3, 'claude:test', 0, 1, 'done', ?4)",
-            rusqlite::params![issue.key, wt.to_string_lossy(), "0123456789abcdef0123456789abcdef01234567", recorded.ts + 5]).unwrap();
+        // The next submit was queued while this review ran, before it was saved: order decides.
+        job("0123456789abcdef0123456789abcdef01234567", recorded.ts - 10);
         let refused = f.db.disputed_finding(&issue.key, "1", "a trade-off").unwrap_err().to_string();
         assert!(refused.contains("no review of that was saved"), "{refused}");
     }
