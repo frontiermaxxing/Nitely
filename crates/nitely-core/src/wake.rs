@@ -377,7 +377,11 @@ pub fn wait(open: &dyn Fn() -> Result<Db>, state_file: &Path, actor: &str, token
         let step = locked(state_file, |state| {
             if first {
                 state.token = token.to_string();
-                state.watched.add(named.clone());
+                // A reply that names a job already told (two calls about the same job) adds nothing.
+                let mut named = named.clone();
+                named.submits.retain(|id| !state.told.contains(&format!("submit:{id}")));
+                named.runs.retain(|id| !state.told.contains(&format!("run:{id}")));
+                state.watched.add(named);
             } else if state.token != token {
                 return Ok(Some(Woke::Replaced));
             }

@@ -96,6 +96,8 @@ fn a_session_that_ends_its_turn_after_submit_is_woken_when_its_work_ends() {
     let said = woken(after(&home, "s1", "submit", reply(&format!("\"Handed in as submit job {fast}: the gate and the review run in the background.\""))));
     assert!(said.contains(&format!("{a}: submitted, now In Review. Call land.")), "{said}");
     assert_eq!(ended(after(&home, "s1", "submit_status", reply("{}"))).0, Some(0), "told once");
+    let again = reply(&format!("\"Submit job {fast} of {a} is running (3 s so far).\""));
+    assert_eq!(ended(after(&home, "s1", "submit_status", again)).0, Some(0), "told once, even when a later reply names it");
 
     // Two submits run; the first to end wakes the session, and says the other still runs.
     let (one, two) = (submit_job(&db, &a, "claude:s1", "running"), submit_job(&db, &b, "claude:s1", "running"));
