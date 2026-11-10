@@ -1840,6 +1840,10 @@ impl Db {
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, (SELECT COALESCE(MAX(id), 0) FROM event))",
             rusqlite::params![s.issue, s.patch_id, s.commit, reviewer, verdict, s.approver, to_json(&s.reasons), findings, flagged, note, now(), batch, seconds, tokens, s.solution.as_ref().map(to_json), to_json(&evidence), s.branch, s.review.as_ref().and_then(|r|r.scope.as_ref()).map(|s|&s.revision), s.review.as_ref().and_then(|r|r.scope.as_ref()).map(to_json)],
         )?;
+        // The submit job that recorded it, so a request to accept a finding knows which run it was (NIT-777).
+        if let Some(job) = crate::submit_job::running() {
+            self.conn.execute("UPDATE review SET submit_job = ?2 WHERE id = ?1", rusqlite::params![self.conn.last_insert_rowid(), job])?;
+        }
         Ok(())
     }
 
@@ -2120,6 +2124,10 @@ case "$prompt" in
        *) echo "PREVIOUS 1: open edge.txt:1 \`let edge = 2;\` still skips the empty line"; echo "VERDICT: clean";;
      esac;;
   *) case "$files" in
+       *rules*) root=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+                printf '\n[[review.flags]]\nname = "EXTRA"\nquestion = "the change adds a dependency"\n' >> "$root/.nitely/playbook.toml"
+                git -C "$root" commit -qam "a review flag added while a review runs"
+                echo "- [P1] Rules: rules.txt, the x is never read"; echo "VERDICT: findings";;
        *moving*) git commit -q --allow-empty -m "the agent goes on while the review runs"; echo "- [P1] Moving: moving.txt, the x is never read"; echo "VERDICT: findings";;
        *together*) touch ../review-ran; echo "- [P1] Together: together.txt, the x is never read"; echo "VERDICT: findings";;
        *mixed*) echo "- [P1] Mixed: mixed.txt, the x is never read"; echo "- [P2] Mixed edge: mixed.txt, the empty line"; echo "VERDICT: findings";;
@@ -2532,6 +2540,33 @@ exit 0
         assert!(recorded.findings.iter().any(|x| x.text.contains("Moving")));
         assert!(recorded.commit_sha.starts_with(&handed_in[..7]) && handed_in.starts_with(&recorded.commit_sha), "the reviewed commit: {}", recorded.commit_sha);
         assert!(recorded.note.contains("worktree moved"), "the record says what moved: {}", recorded.note);
+        assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "In Progress");
+    }
+
+    /// A review that stops the gate is recorded with its findings even when the review rules
+    /// changed while it ran (NIT-770, from NIT-777): the cause in the field was a playbook [review]
+    /// change or a mode save during a review, which dropped it.
+    #[test]
+    fn a_review_that_stopped_the_gate_is_recorded_though_the_rules_changed() {
+        let mut f = fixture();
+        let gate = format!("commands = ['\"{}\" gate.sh']", playbook::posix_sh());
+        let policy = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("commands = [\"exit 0\"]", &gate);
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), format!("[lanes]\ncount = 1\n{policy}")).unwrap();
+        std::fs::write(f.repo.join("gate.sh"), "sleep 30\nexit 0\n").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "a slow gate in a lane"]);
+        let (issue, wt) = f.committed("Rules", "rules.txt");
+        let handed_in = sh(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+        let s = f.submit(&wt, true).unwrap();
+        assert!(!s.gate.passed && s.gate.results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED)), "{s:?}");
+        assert!(std::fs::read_to_string(f.repo.join(playbook::PLAYBOOK_PATH)).unwrap().contains("EXTRA"), "the rules changed during the review");
+        assert!(s.review.as_ref().is_some_and(|r| r.verdict == "changes" && r.findings.iter().any(|x| x.text.contains("Rules"))), "{s:?}");
+        let recorded = f.db.reviews(&issue.key).unwrap().remove(0);
+        assert_eq!(recorded.verdict, "changes");
+        assert!(recorded.findings.iter().any(|x| x.text.contains("Rules")), "the findings are on the issue");
+        assert!(handed_in.starts_with(&recorded.commit_sha), "under the reviewed commit: {}", recorded.commit_sha);
+        assert!(recorded.note.contains("the review rules changed while it ran"), "the record says the rules moved: {}", recorded.note);
+        assert!(f.db.timeline(&issue.key).unwrap().iter().any(|e| e.summary.as_deref().is_some_and(|t| t.contains("was recorded although the review rules changed"))));
         assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "In Progress");
     }
 

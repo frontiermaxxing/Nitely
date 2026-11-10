@@ -485,6 +485,24 @@ pub fn run_in_background(db: &mut Db, config: &crate::Config, id: i64) -> Result
     run_job(db, config, id, true)
 }
 
+thread_local! {
+    /// The submit job this thread is running, for the reviews its submit records (NIT-777).
+    static RUNNING: std::cell::Cell<Option<i64>> = const { std::cell::Cell::new(None) };
+}
+
+/// The submit job whose submit runs on this thread, if any.
+pub(crate) fn running() -> Option<i64> {
+    RUNNING.with(|r| r.get())
+}
+
+/// Runs `f` as submit job `id`: what it records names the job. The one before is restored after.
+fn as_job<T>(id: i64, f: impl FnOnce() -> T) -> T {
+    let before = RUNNING.with(|r| r.replace(Some(id)));
+    let out = f();
+    RUNNING.with(|r| r.set(before));
+    out
+}
+
 /// `detached`: this is the job's own process, which nobody waits on; otherwise the job runs in its
 /// caller (no process could be started), which waits for it, so it never waits for a review batch.
 fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Result<Job> {
@@ -509,7 +527,7 @@ fn run_job(db: &mut Db, config: &crate::Config, id: i64, detached: bool) -> Resu
     let actor = if job.requested_by == "human" { Actor::Human } else { Actor::Agent(job.requested_by.clone()) };
     // Only a submit in the background may wait for a review batch: nobody waits on it (NIT-216).
     let opts = SubmitOptions { dir: &job.worktree, issue_key: Some(&job.issue), skip_review: job.skip_review, local_only: job.local_only, batch: detached, solution: job.solution.as_ref(), solution_commit: Some(&job.head), solution_patch_id: job.solution_patch_id.as_deref() };
-    let outcome = crate::submit::submit(db, config, &opts, &actor);
+    let outcome = as_job(id, || crate::submit::submit(db, config, &opts, &actor));
     if let Some(t) = tracked { t.finish(None); }
     match &outcome {
         Ok(s) => {
