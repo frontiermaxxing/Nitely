@@ -57,6 +57,10 @@ pub struct Submitted {
     /// The quick path (quick.rs): a small change, checked by its own checks, reviewed after landing.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub quick: bool,
+    /// For a quick change whose playbook flags a reviewer answered before it landed (NIT-764):
+    /// its review row's note, naming them.
+    #[serde(skip)]
+    pub quick_note: Option<String>,
     /// `agent` when the review is enough, `human` when it waits for approval.
     pub approver: String,
     pub reasons: Vec<String>,
@@ -280,6 +284,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         review_batched: false,
         yolo: false,
         quick: false,
+        quick_note: None,
         approver: "human".into(),
         reasons: vec![],
         approval_stands: false,
@@ -410,7 +415,17 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
     if out.review_disabled || out.yolo || out.quick {
         let mut latest = Playbook::load(&root)?;
         crate::project_modes::apply_issue(db, &issue.key, &mut latest)?;
-        out.reasons.extend(latest.review.unevaluated_reasons());
+        // A quick change has its flags answered by a reviewer before it lands, so only a yes waits
+        // for the person (NIT-764). With no reviewer to answer them, every one waits, as before.
+        let vendor = crate::git::parse_branch(&branch).0.unwrap_or_default();
+        let answered = if out.quick && latest.review.enabled && !latest.review.unevaluated_reasons().is_empty() { answer_flags(db, &latest.review, &vendor, &worktree, &since, &issue.key, actor)? } else { None };
+        match answered {
+            Some((reasons, note)) => {
+                out.reasons.extend(reasons);
+                out.quick_note = Some(note);
+            }
+            None => out.reasons.extend(latest.review.unevaluated_reasons()),
+        }
     }
     out.approver = if out.reasons.is_empty() { "agent" } else { "human" }.into();
     let mut verdict = out.review.as_ref().map_or(if out.quick { crate::quick::VERDICT } else if out.yolo { "yolo" } else if out.review_batched { crate::review_batch::PENDING } else if out.review_disabled { "disabled" } else { "none" }, |r| r.verdict.as_str()).to_string();
@@ -837,6 +852,31 @@ fn ask_shared_cause(db: &Db, pb: &Playbook, issue: &IssueRecord, worktree: &Path
     Ok(Some(told))
 }
 
+/// Before a quick change lands, a reviewer answers only the playbook's review flags, and whether it
+/// is another vendor than the author, when the playbook requires that (NIT-764). The reasons a yes
+/// gives, and the note its review row carries. None when no reviewer could answer: then every flag
+/// waits for the person, as when review is off.
+fn answer_flags(db: &Db, rules: &crate::review::ReviewRules, vendor: &str, worktree: &Path, since: &str, key: &str, actor: &Actor) -> Result<Option<(Vec<String>, String)>> {
+    let wt = worktree.to_string_lossy().into_owned();
+    let Ok(choice) = rules.choose_after(vendor, &|r| rules.is_installed(r, worktree), &[]) else { return Ok(None) };
+    db.log_event(actor, Some(key), Some(&wt), "status", &format!("{} answers the playbook's review flags before the quick land", choice.reviewer))?;
+    let flagged = rules.run_review_prompt(&choice.reviewer, worktree, &rules.flags_prompt(since)).and_then(|reply| rules.parse_flags(&choice.reviewer, &reply.text));
+    let flagged = match flagged {
+        Ok(f) => f,
+        Err(e) => {
+            db.log_event(actor, Some(key), Some(&wt), "status", &format!("The review flags were not answered ({}): they wait for you", e.to_string().lines().next().unwrap_or_default()))?;
+            return Ok(None);
+        }
+    };
+    let mut reasons: Vec<String> = rules.flags.iter().filter(|f| flagged.contains(&f.name)).map(|f| format!("{} review: {}", choice.reviewer, if f.reason.is_empty() { &f.question } else { &f.reason })).collect();
+    let mut answered: Vec<String> = rules.flags.iter().map(|f| f.name.clone()).collect();
+    if rules.require_cross_vendor {
+        reasons.extend(rules.independence_reason(&choice.reviewer, vendor, &choice.note));
+        answered.push(crate::review::CROSS_VENDOR.into());
+    }
+    Ok(Some((reasons, format!("{} {}: {}", crate::review::FLAGS_ANSWERED, choice.reviewer, answered.join(", ")))))
+}
+
 /// The item review the issue's mode asks for (Off with no mode).
 pub(crate) fn item_review_of(db: &Db, key: &str) -> Result<ItemReview> {
     Ok(crate::project_modes::for_issue(db, key)?.and_then(|m| m.options().item_review).unwrap_or(ItemReview::Off))
@@ -903,6 +943,7 @@ pub(crate) fn review_item(db: &mut Db, root: &Path, worktree: &Path, issue: &Iss
         review_batched: false,
         yolo: false,
         quick: false,
+        quick_note: None,
         approver: "agent".into(),
         reasons: vec![],
         approval_stands: false,
@@ -970,6 +1011,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
                 review_batched: false,
                 yolo: false,
                 quick: false,
+                quick_note: None,
                 approver: "agent".into(),
                 reasons: vec![],
                 approval_stands: false,
@@ -1022,6 +1064,7 @@ fn submit_into_goal(db: &mut Db, config: &crate::Config, issue: &IssueRecord, ro
         review_batched: false,
         yolo: false,
         quick: false,
+        quick_note: None,
         approver: "agent".into(),
         reasons: vec![],
         approval_stands: false,
@@ -1740,7 +1783,7 @@ impl Db {
         let (reviewer, verdict, findings, flagged, note) = match &s.review {
             Some(r) => (r.reviewer.as_str(), r.verdict.as_str(), to_json(&r.findings), to_json(&r.flagged), r.note.as_str()),
             None if s.review_batched => ("", crate::review_batch::PENDING, "[]".to_string(), "[]".to_string(), crate::review_batch::PENDING_NOTE),
-            None if s.quick => ("", crate::quick::VERDICT, "[]".to_string(), "[]".to_string(), crate::quick::NOTE),
+            None if s.quick => ("", crate::quick::VERDICT, "[]".to_string(), "[]".to_string(), s.quick_note.as_deref().unwrap_or(crate::quick::NOTE)),
             None if s.yolo => ("", "yolo", "[]".to_string(), "[]".to_string(), crate::project_yolo::NOTE),
             None if s.review_disabled => ("", "disabled", "[]".to_string(), "[]".to_string(), crate::review::DISABLED_NOTE),
             None => ("", "none", "[]".to_string(), "[]".to_string(), ""),
@@ -2777,4 +2820,39 @@ VERDICT: findings
         assert!(!old.timed_out);
     }
 
+
+    /// A quick change in a repo whose playbook has review flags has them answered by a reviewer
+    /// before it lands (NIT-764): one the flag does not fire on lands with no one, one it fires on
+    /// waits for the person.
+    #[test]
+    fn a_quick_change_has_its_review_flags_answered_before_it_lands() {
+        use crate::project_modes::{Mode, Options};
+        use crate::test_repo::git as g;
+        let mut f = fixture();
+        crate::project_modes::set_for_test(&mut f.db, "NIT", Mode::Fast, Options::default());
+        std::fs::create_dir_all(f.repo.join("notes")).unwrap();
+        std::fs::write(f.repo.join("notes/readme.txt"), "Read me.\n").unwrap();
+        std::fs::write(f.repo.join("notes/billing.txt"), "Rates: 10\n").unwrap();
+        g(&f.repo, &["add", "-A"]);
+        g(&f.repo, &["commit", "-q", "-m", "Notes"]);
+        g(&f.repo, &["push", "-q", "origin", "main"]);
+        let quick = |f: &mut Fixture, title: &str, file: &str, text: &str| {
+            let issue = f.db.create_issue(&crate::quick::new_issue("NIT", title, "claude"), &f.actor).unwrap();
+            let started = crate::quick::start(&f.db, &f.repo, &issue, "claude", &f.actor).unwrap();
+            std::fs::write(Path::new(&started.worktree).join(file), text).unwrap();
+            (issue.key, crate::quick::land(&mut f.db, &f.config, &started.worktree, None, &f.actor).unwrap())
+        };
+
+        let (readme, landed) = quick(&mut f, "Fix the readme typo", "notes/readme.txt", "Read me first.\n");
+        assert!(landed.small && landed.landed, "MONEY is no: it lands with no one: {landed:?}");
+        assert_eq!(f.db.issue(&readme).unwrap().unwrap().state, "Done");
+        assert_eq!(g(&f.base.join("remote.git"), &["show", "main:notes/readme.txt"]), "Read me first.");
+
+        let (billing, waits) = quick(&mut f, "Raise the rate", "notes/billing.txt", "Rates: 12\n");
+        assert!(waits.small && !waits.landed, "MONEY is yes: {waits:?}");
+        assert_eq!(f.db.issue(&billing).unwrap().unwrap().state, "Needs You");
+        let review = f.db.reviews(&billing).unwrap().remove(0);
+        assert_eq!((review.verdict.as_str(), review.approver.as_str()), (crate::quick::VERDICT, "human"));
+        assert_eq!(review.reasons, ["claude review: money logic"], "the flag's own reason, not an unanswered question");
+    }
 }

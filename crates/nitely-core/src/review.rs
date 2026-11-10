@@ -98,6 +98,45 @@ impl ReviewRules {
     }
 
     /// Review-dependent rules remain unanswered while review is off. The setting alone adds none.
+    /// `unevaluated_reasons`, less the flags (and `CROSS_VENDOR`) a reviewer answered on its own
+    /// before a quick land (NIT-764).
+    pub fn unevaluated_except(&self, answered: &[String]) -> Vec<String> {
+        let mut reasons: Vec<String> = self.flags.iter().filter(|f| !answered.contains(&f.name)).map(|f| format!("Unevaluated reviewer condition {}: {} (automated review is disabled)", f.name, f.question)).collect();
+        if self.require_cross_vendor && !answered.iter().any(|a| a == CROSS_VENDOR) {
+            reasons.push("Unevaluated cross-vendor review requirement (automated review is disabled)".into());
+        }
+        reasons
+    }
+
+    /// What a reviewer is asked before a quick change lands (NIT-764): only the playbook's flags,
+    /// about the change from `base`, in the closing lines a full review ends with.
+    pub fn flags_prompt(&self, base: &str) -> String {
+        let mut p = format!("This repo's rules ask a few questions about each change before it lands. Read the change on this branch (`git diff {base}...HEAD`, and the files it touches as needed). Do not review it for defects: answer only the questions below.\n\nEnd your reply with exactly these {} lines:\n", self.flags.len());
+        for f in &self.flags {
+            p.push_str(&format!("{}: <yes or no>\n", f.name));
+        }
+        for f in &self.flags {
+            p.push_str(&format!("{} is yes if {}. ", f.name, f.question.trim_end_matches('.')));
+        }
+        p.push_str("Answer yes when unsure.");
+        p
+    }
+
+    /// The flags a reply to `flags_prompt` answers yes. Fails when it leaves one unanswered.
+    pub fn parse_flags(&self, reviewer: &str, text: &str) -> Result<Vec<String>> {
+        let mut flagged = Vec::new();
+        for f in &self.flags {
+            let prefix = format!("{}:", f.name.to_lowercase());
+            let answer = text.lines().filter_map(|l| l.trim().trim_matches('*').trim().to_lowercase().strip_prefix(&prefix).map(|v| v.trim().trim_matches('*').trim().to_string())).filter(|v| v == "yes" || v == "no").next_back();
+            match answer.as_deref() {
+                Some("yes") => flagged.push(f.name.clone()),
+                Some(_) => {}
+                None => bail!("the {reviewer} reply did not answer {}:\n{}", f.name, tail_lines(text)),
+            }
+        }
+        Ok(flagged)
+    }
+
     pub fn unevaluated_reasons(&self) -> Vec<String> {
         let mut reasons: Vec<String> = self.flags.iter().map(|f| format!("Unevaluated reviewer condition {}: {} (automated review is disabled)", f.name, f.question)).collect();
         if self.require_cross_vendor {
@@ -105,6 +144,17 @@ impl ReviewRules {
         }
         reasons
     }
+}
+
+/// The note a quick change's review row carries when a reviewer answered the playbook's flags
+/// before it landed (NIT-764); the reviewer, `: ` and the names it answered follow.
+pub const FLAGS_ANSWERED: &str = "Review flags answered before the quick land by";
+/// Stands for the cross-vendor requirement among the names a quick change's flag answer covered.
+pub const CROSS_VENDOR: &str = "CROSS_VENDOR";
+
+/// The names a quick change's review note says were answered before it landed.
+pub fn answered_flags(note: &str) -> Vec<String> {
+    note.strip_prefix(FLAGS_ANSWERED).and_then(|n| n.split_once(": ")).map(|(_, names)| names.split(", ").map(str::to_string).collect()).unwrap_or_default()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
