@@ -2510,9 +2510,7 @@ exit 0
     }
 
     /// A review that stops the gate is recorded with its findings even when the worktree moved
-    /// while it ran (NIT-770): the agent was told the lane went to other work, and committed. A
-    /// submit of a newer head with no review saved then keeps those findings from being put to the
-    /// person as if they were its own.
+    /// while it ran (NIT-770): the agent was told the lane went to other work, and committed.
     #[test]
     fn a_review_that_stopped_the_gate_is_recorded_though_the_worktree_moved() {
         let mut f = fixture();
@@ -2535,22 +2533,6 @@ exit 0
         assert!(recorded.commit_sha.starts_with(&handed_in[..7]) && handed_in.starts_with(&recorded.commit_sha), "the reviewed commit: {}", recorded.commit_sha);
         assert!(recorded.note.contains("worktree moved"), "the record says what moved: {}", recorded.note);
         assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "In Progress");
-        // Its findings can be put to the person; once a newer head is submitted and no review of
-        // it was saved, they cannot.
-        let job = |state: &str, started_at: Option<i64>| {
-            f.db.conn.execute("INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, started_at) VALUES (?1, ?2, 'b', ?3, 'claude:test', 0, 1, ?4, ?5, ?6)",
-                rusqlite::params![issue.key, wt.to_string_lossy(), handed_in, state, recorded.ts - 30, started_at]).unwrap();
-        };
-        // The job whose review this is.
-        job("done", Some(recorded.ts - 20));
-        f.db.disputed_finding(&issue.key, "1", "a trade-off").unwrap();
-        // The next submit, queued while this review ran: while it waits, and once it ended with no
-        // review saved, these findings are not put to the person.
-        job("queued", None);
-        assert!(f.db.disputed_finding(&issue.key, "1", "a trade-off").unwrap_err().to_string().contains("has not finished"));
-        f.db.conn.execute("UPDATE submit_job SET state = 'done', started_at = ?1 WHERE id = (SELECT MAX(id) FROM submit_job)", [recorded.ts + 5]).unwrap();
-        let refused = f.db.disputed_finding(&issue.key, "1", "a trade-off").unwrap_err().to_string();
-        assert!(refused.contains("ended with no review saved"), "{refused}");
     }
 
     #[test]

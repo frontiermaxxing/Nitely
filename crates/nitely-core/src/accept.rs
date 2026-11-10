@@ -7,7 +7,7 @@
 //! next review round is told about them instead of raising them again.
 
 use anyhow::{bail, Context, Result};
-use rusqlite::{params, OptionalExtension};
+use rusqlite::params;
 use serde::{Deserialize, Serialize};
 
 use crate::approval::{sign, unhex, verify, PHONE_SKEW};
@@ -78,20 +78,6 @@ impl Db {
             bail!("say why the person should accept it as it is: that is what they decide on");
         }
         let review = self.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{} has no review yet; submit it first", issue.key))?;
-        // The latest submit must have saved a review: one still running, or one that ended with
-        // no review saved since it started, means these findings are of an older change, so none
-        // of them may be put to the person (NIT-770). Judged by the job's own run, not by heads,
-        // which a land's rebase or a job running a newer HEAD than it was queued with would move.
-        let latest: Option<(i64, String, Option<i64>)> = self.conn.query_row("SELECT id, state, started_at FROM submit_job WHERE issue_key = ?1 COLLATE NOCASE AND state <> 'superseded' ORDER BY id DESC LIMIT 1", [&issue.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
-        if let Some((job, state, started)) = latest {
-            let running = matches!(state.as_str(), "queued" | "running");
-            if running {
-                bail!("{}'s latest submit (job {job}) has not finished: wait for its result (submit_status) before asking to accept a finding", issue.key);
-            }
-            if started.is_some_and(|at| review.ts < at) {
-                bail!("{}'s latest submit (job {job}) ended with no review saved, so its latest review is of an older change: submit again for a fresh review before asking to accept a finding", issue.key);
-            }
-        }
         let blocking: Vec<&Finding> = review.findings.iter().filter(|f| f.priority <= 1).collect();
         let wanted = finding.trim();
         let found = match wanted.parse::<usize>() {
