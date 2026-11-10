@@ -7,7 +7,7 @@
 //! next review round is told about them instead of raising them again.
 
 use anyhow::{bail, Context, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::approval::{sign, unhex, verify, PHONE_SKEW};
@@ -78,15 +78,19 @@ impl Db {
             bail!("say why the person should accept it as it is: that is what they decide on");
         }
         let review = self.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{} has no review yet; submit it first", issue.key))?;
-        // A submit handed in a newer head than this review saw, and no review of it was saved:
-        // its findings are not this review's, so none of these may be put to the person (NIT-770).
-        // Judged by the order the submits were handed in, not by when the review was saved, which
-        // can be after a newer submit was queued.
-        let jobs: Vec<(String, i64)> = self.conn.prepare("SELECT head, queued_at FROM submit_job WHERE issue_key = ?1 COLLATE NOCASE ORDER BY id DESC")?.query_map([&issue.key], |r| Ok((r.get(0)?, r.get(1)?)))?.collect::<rusqlite::Result<_>>()?;
-        let of_review = |head: &str| !review.commit_sha.is_empty() && head.starts_with(&review.commit_sha);
-        let reviewed_by_a_job = jobs.iter().any(|(head, _)| of_review(head));
-        if let Some((head, _)) = jobs.first().filter(|(head, at)| !of_review(head) && (reviewed_by_a_job || *at >= review.ts)) {
-            bail!("{}'s latest review is of {}, but its latest submit handed in {}, and no review of that was saved: submit again for a fresh review before asking to accept a finding", issue.key, &review.commit_sha[..review.commit_sha.len().min(7)], &head[..head.len().min(7)]);
+        // The latest submit must have saved a review: one still running, or one that ended with
+        // no review saved since it started, means these findings are of an older change, so none
+        // of them may be put to the person (NIT-770). Judged by the job's own run, not by heads,
+        // which a land's rebase or a job running a newer HEAD than it was queued with would move.
+        let latest: Option<(i64, String, Option<i64>)> = self.conn.query_row("SELECT id, state, started_at FROM submit_job WHERE issue_key = ?1 COLLATE NOCASE AND state <> 'superseded' ORDER BY id DESC LIMIT 1", [&issue.key], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?))).optional()?;
+        if let Some((job, state, started)) = latest {
+            let running = matches!(state.as_str(), "queued" | "running");
+            if running {
+                bail!("{}'s latest submit (job {job}) has not finished: wait for its result (submit_status) before asking to accept a finding", issue.key);
+            }
+            if started.is_some_and(|at| review.ts < at) {
+                bail!("{}'s latest submit (job {job}) ended with no review saved, so its latest review is of an older change: submit again for a fresh review before asking to accept a finding", issue.key);
+            }
         }
         let blocking: Vec<&Finding> = review.findings.iter().filter(|f| f.priority <= 1).collect();
         let wanted = finding.trim();
