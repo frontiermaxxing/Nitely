@@ -114,13 +114,16 @@ heavy`; NIT-202). The command still runs.
 Its second PostToolUse hook, `nitely wake claude`, wakes a session when the work it started ends
 (NIT-765). It follows `submit`, `submit_status`, `land`, `quick_land`, `run` and `run_status`, and
 runs in the background (`async`) for up to an hour. It watches Nitely's database for the session's
-work: submit jobs, land jobs and lane runs it asked for or that run on an issue it claims, the job
-the tool's reply names (even one that ended before the hook looked), and a land that went on in a
-process of its own. As soon as one ends it exits 2, and Claude Code's `asyncRewake` shows what it
-came to, and what still runs, and wakes the session, idle or not. While the session holds an issue
-in review it keeps watching, so a land another session runs on it wakes the claimer too. With
-nothing to watch it exits at once and wakes nobody. A newer waiter for the same session takes over
-what the older one watched, and what was told is not told again. So an agent can end
+work: the submit jobs, land jobs and lane runs it asked for, the job the tool's reply names (even
+one that ended before the hook looked), a land that went on in a process of its own (and the lane
+run a detached `run` queued), and what other sessions' lands and submits came to on the issues it
+claims (their `landed`, `land_failed` and `submit` events, however the land ran). As soon as one
+ends it exits 2, and Claude Code's `asyncRewake` shows what it came to, and what still runs, and
+wakes the session, idle or not. While the session holds an issue in review it keeps watching, so
+another session's land on it wakes the claimer. With nothing to watch it exits at once and wakes
+nobody. A newer waiter for the same session takes over what the older one watched, under a lock,
+and what was told is not told again; a waiter that cannot go on wakes the session to say so. So an
+agent can end
 its turn after `submit` instead of polling `submit_status`, which costs a model call over its whole
 context each time. Codex, Cursor and Claude Desktop's own session messaging offer no way for
 another process to wake an idle session, so agents there make one `submit_status` call with

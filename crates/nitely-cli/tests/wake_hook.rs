@@ -126,10 +126,10 @@ fn a_session_that_ends_its_turn_after_submit_is_woken_when_its_work_ends() {
     db.conn.execute("UPDATE issue SET claimed_by = 'claude:s1', state = 'In Review' WHERE key = ?1", [&a]).unwrap();
     let mut claimer = after(&home, "s1", "submit_status", reply("{}"));
     assert!(waits(&mut claimer), "it watches while it holds an issue in review");
-    let theirs = submit_job(&db, &a, "claude:other", "running");
-    assert!(waits(&mut claimer));
-    finish(&db, theirs, "Done");
-    assert!(woken(claimer).contains(&format!("{a}: submitted, now Done")));
+    // Another session's land, run in a process of its own: no job row, only its event.
+    db.log_event(&Actor::Agent("claude:other".into()), Some(&a), None, "landed", &format!("Landed {a} on main at abc123")).unwrap();
+    let said = woken(claimer);
+    assert!(said.contains(&format!("{a} (your issue, by another session): Landed {a} on main at abc123")), "{said}");
     db.conn.execute("UPDATE issue SET state = 'Done' WHERE key = ?1", [&a]).unwrap();
 
     // What `pipeline` counts for the landed change: every status poll, and the short ones.

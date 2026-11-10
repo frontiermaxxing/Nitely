@@ -38,6 +38,7 @@ const KEY_COLUMNS: &[(&str, &str)] = &[
     ("review_queue", "issue_key"),
     ("periodic_review_landing", "issue_key"),
     ("periodic_review_finding", "issue_key"),
+    ("status_poll", "issue_key"),
 ];
 
 /// `key` under its project's current prefix, given `Db::project_aliases`: `OLD-12` → `NEW-12`.

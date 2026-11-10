@@ -1066,10 +1066,13 @@ fn run_wake(vendor: &str) -> Result<Option<String>> {
         named,
         std::time::Duration::from_secs(env("NITELY_WAKE_WAIT_SECS", wake::WAIT)),
         std::time::Duration::from_millis(env("NITELY_WAKE_EVERY_MS", 5000)),
-    )?;
+    );
     Ok(match woke {
-        wake::Woke::Wake(message) => Some(message),
-        wake::Woke::Nothing | wake::Woke::Replaced => None,
+        Ok(wake::Woke::Wake(message)) => Some(message),
+        Ok(wake::Woke::Nothing | wake::Woke::Replaced) => None,
+        // A waiter that cannot go on (a newer build upgraded the database while it watched) says
+        // so, rather than leave the session waiting for a wake that never comes.
+        Err(e) => Some(format!("Nitely stopped watching your work: {e:#}. Make one status call (submit_status, run_status, get_issue) to see where it stands.")),
     })
 }
 

@@ -1426,7 +1426,9 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
             Some(id) => {
                 let wait = status_wait(args.get("wait_seconds").and_then(Value::as_u64), wait_cap());
                 let issue = db.lane_run(id)?.and_then(|r| r.issue);
-                db.record_status_poll(issue.as_deref(), name, actor.id(), wait)?;
+                // What it asked to wait, not what this client allows: a capped long wait is no short poll.
+                let asked = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600);
+                db.record_status_poll(issue.as_deref(), name, actor.id(), asked)?;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
                 loop {
                     let run = db.lane_run(id)?.with_context(|| format!("no run {id}"))?;
@@ -1483,7 +1485,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 (None, None) => bail!("pass the job id submit returned, or the issue key"),
             };
             let seconds = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600).min(wait_cap().as_secs());
-            db.record_status_poll(Some(&job.issue), name, actor.id(), seconds)?;
+            db.record_status_poll(Some(&job.issue), name, actor.id(), args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600))?;
             let job = nitely_core::submit_job::wait(&db, job.id, std::time::Duration::from_secs(seconds))?;
             job_json(&db, &job, &actor, detail(args))?
         }

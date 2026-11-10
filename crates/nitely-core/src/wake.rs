@@ -93,10 +93,49 @@ struct State {
     /// a finished job still unread in the database is not told again.
     #[serde(default)]
     told: Vec<String>,
+    /// The last event read for news of the session's claimed issues; None before the first waiter.
+    #[serde(default)]
+    cursor: Option<i64>,
 }
 
 /// How many told pieces the state remembers.
 const TOLD: usize = 100;
+
+/// Runs `f` on the state file's contents with the session's lock held, so two waiters that start
+/// together never both read the old state and drop each other's work. A lock left by a waiter that
+/// died is broken after a minute.
+fn locked<T>(file: &Path, f: impl FnOnce(&mut State) -> Result<T>) -> Result<T> {
+    let lock = file.with_extension("lock");
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&lock) {
+            Ok(_) => break,
+            Err(_) if std::time::Instant::now() < deadline => {
+                let stale = std::fs::metadata(&lock).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).is_some_and(|age| age.as_secs() > 60);
+                if stale {
+                    std::fs::remove_file(&lock).ok();
+                }
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            Err(e) => return Err(anyhow::anyhow!("the wake state of this session is locked: {e}")),
+        }
+    }
+    let mut state = read_state(file).unwrap_or_default();
+    let out = f(&mut state);
+    let written = out.is_ok().then(|| {
+        let n = state.told.len();
+        state.told.drain(..n.saturating_sub(TOLD));
+        write_state(file, &state)
+    });
+    std::fs::remove_file(&lock).ok();
+    if let Some(w) = written {
+        w?;
+    }
+    out
+}
 
 /// The state file of `actor`'s waiter.
 pub fn state_path(dir: &Path, actor: &str) -> PathBuf {
@@ -165,21 +204,37 @@ fn answers(response: &Value) -> Vec<Value> {
     out
 }
 
-/// The session's work in the database now: open submit jobs, land jobs and lane runs it asked for
-/// or that run on an issue it claims, and those that ended lately without being told to it.
+/// The session's own work in the database now: open submit jobs, land jobs and lane runs it asked
+/// for, and its jobs that ended lately without being told to it.
 pub fn scan(db: &Db, actor: &str) -> Result<Watched> {
     let ids = |sql: &str| -> Result<Vec<i64>> {
         let mut s = db.conn.prepare(sql)?;
         let rows = s.query_map(rusqlite::params![actor, now() - RECENT_SECS], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
         Ok(rows)
     };
-    let mine = "(requested_by = ?1 OR issue_key IN (SELECT key FROM issue WHERE claimed_by = ?1))";
     Ok(Watched {
-        submits: ids(&format!("SELECT id FROM submit_job WHERE {mine} AND (state IN ('queued', 'running') OR (requested_by = ?1 AND delivered_at IS NULL AND ended_at >= ?2)) ORDER BY id"))?,
-        lands: ids(&format!("SELECT id FROM land_job WHERE {mine} AND (state IN ('waiting', 'landing') OR (requested_by = ?1 AND delivered_at IS NULL AND ended_at >= ?2)) ORDER BY id"))?,
-        runs: ids(&format!("SELECT id FROM lane_run WHERE {mine} AND state IN ('queued', 'running') AND ?2 = ?2 ORDER BY id"))?,
+        submits: ids("SELECT id FROM submit_job WHERE requested_by = ?1 AND (state IN ('queued', 'running') OR (delivered_at IS NULL AND ended_at >= ?2)) ORDER BY id")?,
+        lands: ids("SELECT id FROM land_job WHERE requested_by = ?1 AND (state IN ('waiting', 'landing') OR (delivered_at IS NULL AND ended_at >= ?2)) ORDER BY id")?,
+        runs: ids("SELECT id FROM lane_run WHERE requested_by = ?1 AND state IN ('queued', 'running') AND ?2 = ?2 ORDER BY id")?,
         apart: vec![],
     })
+}
+
+/// What other sessions' work came to on the issues `actor` claims, after event `cursor`: a land
+/// (however it ran, in a job or a process of its own), a land that stopped, a submit's outcome.
+/// Lines, and the cursor to move to.
+pub fn claimed_news(db: &Db, actor: &str, cursor: i64) -> Result<(Vec<String>, i64)> {
+    let mut s = db.conn.prepare(
+        "SELECT id, issue_key, summary FROM event WHERE id > ?2 AND actor != ?1 AND type IN ('landed', 'land_failed', 'submit') \
+         AND issue_key IN (SELECT key FROM issue WHERE claimed_by = ?1) ORDER BY id",
+    )?;
+    let rows: Vec<(i64, String, Option<String>)> = s.query_map(rusqlite::params![actor, cursor], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
+    let next = rows.last().map(|r| r.0).unwrap_or(cursor);
+    Ok((rows.into_iter().map(|(_, key, summary)| format!("{key} (your issue, by another session): {}", summary.unwrap_or_default())).collect(), next))
+}
+
+fn last_event(db: &Db) -> Result<i64> {
+    Ok(db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM event", [], |r| r.get(0))?)
 }
 
 /// Whether the session holds an issue another session may still submit or land: one in review or
@@ -217,13 +272,22 @@ fn outcome_run(db: &Db, id: i64) -> Result<Option<String>> {
     })
 }
 
-fn outcome_apart(tool: &str, file: &Path) -> Option<String> {
+/// A call that went on apart: its answer once it is written, or the lane run it queued (a `run`
+/// past the call's wait writes `{"queued": id}` first).
+enum Apart {
+    Answered(String),
+    Queued(i64),
+}
+
+/// None while neither is there.
+fn outcome_apart(tool: &str, file: &Path) -> Option<Apart> {
     let answer = std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())?;
-    Some(match (answer.get("ok"), answer.get("error")) {
-        (_, Some(e)) => format!("{tool}: {}", e.as_str().unwrap_or("stopped")),
-        (Some(ok), _) => format!("{tool}: {}", said(ok)),
-        _ => format!("{tool}: ended"),
-    })
+    match (answer.get("ok"), answer.get("error"), answer.get("queued").and_then(Value::as_i64)) {
+        (_, Some(e), _) => Some(Apart::Answered(format!("{tool}: {}", e.as_str().unwrap_or("stopped")))),
+        (Some(ok), _, _) => Some(Apart::Answered(format!("{tool}: {}", said(ok)))),
+        (None, None, Some(run)) => Some(Apart::Queued(run)),
+        _ => None,
+    }
 }
 
 /// Takes the pieces of `watched` that have ended out of it, with a line each.
@@ -260,7 +324,16 @@ pub fn take_ended(db: &Db, watched: &mut Watched, told: &mut Vec<String>) -> Res
     }
     for (tool, file) in std::mem::take(&mut watched.apart) {
         match outcome_apart(&tool, &file) {
-            Some(l) => lines.push(l),
+            Some(Apart::Answered(l)) => lines.push(l),
+            // Its run is watched from here, until it ends.
+            Some(Apart::Queued(run)) if !told.contains(&format!("run:{run}")) => match outcome_run(db, run)? {
+                Some(l) => {
+                    lines.push(l);
+                    told.push(format!("run:{run}"));
+                }
+                None => keep.runs.push(run),
+            },
+            Some(Apart::Queued(_)) => {}
             None => keep.apart.push((tool, file)),
         }
     }
@@ -320,46 +393,55 @@ pub enum Woke {
 }
 
 /// Watches `actor`'s work, starting from what the tool call named (`named`) and what the session's
-/// previous waiter still watched, until a piece ends (wake), a newer waiter takes over, or `wait`
-/// runs out. Looks every `every`; `open` opens the database for each look, so no connection stays
-/// open for an hour.
+/// previous waiter still watched, until a piece ends or news of a claimed issue comes (wake), a
+/// newer waiter takes over, or `wait` runs out. Looks every `every`; `open` opens the database for
+/// each look, so no connection stays open for an hour.
 pub fn wait(open: &dyn Fn() -> Result<Db>, state_file: &Path, actor: &str, token: &str, named: Watched, wait: std::time::Duration, every: std::time::Duration) -> Result<Woke> {
-    let (mut watched, mut told) = read_state(state_file).map(|s| (s.watched, s.told)).unwrap_or_default();
-    watched.add(named);
-    let state = |token: &str, watched: &Watched, told: &[String]| State { token: token.to_string(), watched: watched.clone(), told: told[told.len().saturating_sub(TOLD)..].to_vec() };
     let deadline = std::time::Instant::now() + wait;
     let mut first = true;
     loop {
         let db = open()?;
-        if first {
-            write_state(state_file, &state(token, &watched, &told))?;
-        } else {
-            match read_state(state_file) {
-                Some(s) if s.token == token => {}
-                _ => return Ok(Woke::Replaced),
+        let step = locked(state_file, |state| {
+            if first {
+                // Starting while no waiter watched: news older than the recent window is old news.
+                if state.token.is_empty() {
+                    let old: i64 = db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM event WHERE ts < ?1", [now() - RECENT_SECS], |r| r.get(0))?;
+                    state.cursor = Some(state.cursor.map_or(old, |c| c.max(old)));
+                }
+                state.token = token.to_string();
+                state.watched.add(named.clone());
+            } else if state.token != token {
+                return Ok(Some(Woke::Replaced));
             }
-        }
-        let before = watched.clone();
-        let mut found = scan(&db, actor)?;
-        found.submits.retain(|id| !told.contains(&format!("submit:{id}")));
-        found.lands.retain(|id| !told.contains(&format!("land:{id}")));
-        found.runs.retain(|id| !told.contains(&format!("run:{id}")));
-        watched.add(found);
-        let ended = take_ended(&db, &mut watched, &mut told)?;
-        if !ended.is_empty() {
-            // What still runs goes to the next waiter, whoever starts it.
-            write_state(state_file, &state("", &watched, &told))?;
-            return Ok(Woke::Wake(message(&ended, &watched)));
-        }
-        if watched != before {
-            write_state(state_file, &state(token, &watched, &told))?;
-        }
-        if watched.is_empty() && !holds_open_review(&db, actor)? {
-            return Ok(Woke::Nothing);
-        }
-        if std::time::Instant::now() >= deadline {
-            write_state(state_file, &state("", &watched, &told))?;
-            return Ok(if watched.is_empty() { Woke::Nothing } else { Woke::Wake(still_running(&watched)) });
+            let cursor = match state.cursor {
+                Some(c) => c,
+                None => last_event(&db)?,
+            };
+            let (mut lines, cursor) = claimed_news(&db, actor, cursor)?;
+            state.cursor = Some(cursor);
+            let mut found = scan(&db, actor)?;
+            found.submits.retain(|id| !state.told.contains(&format!("submit:{id}")));
+            found.lands.retain(|id| !state.told.contains(&format!("land:{id}")));
+            found.runs.retain(|id| !state.told.contains(&format!("run:{id}")));
+            state.watched.add(found);
+            lines.extend(take_ended(&db, &mut state.watched, &mut state.told)?);
+            if !lines.is_empty() {
+                // What still runs goes to the next waiter, whoever starts it.
+                state.token.clear();
+                return Ok(Some(Woke::Wake(message(&lines, &state.watched))));
+            }
+            if state.watched.is_empty() && !holds_open_review(&db, actor)? {
+                state.token.clear();
+                return Ok(Some(Woke::Nothing));
+            }
+            if std::time::Instant::now() >= deadline {
+                state.token.clear();
+                return Ok(Some(Woke::Wake(still_running(&state.watched))));
+            }
+            Ok(None)
+        })?;
+        if let Some(woke) = step {
+            return Ok(woke);
         }
         first = false;
         drop(db);
