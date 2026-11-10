@@ -830,9 +830,11 @@ thread_local! {
 impl GateStop {
     /// Runs `f` (the gate) with this the gate it may stop.
     pub fn watch<T>(&self, f: impl FnOnce() -> T) -> T {
-        WATCHED.with(|w| *w.borrow_mut() = Some(self.clone()));
+        // Nested (a gate run while another's is watched on this thread), the outer one is watched
+        // again afterwards, so its stop never lands on the inner gate's run or loses its own (NIT-770).
+        let outer = WATCHED.with(|w| w.borrow_mut().replace(self.clone()));
         let out = f();
-        WATCHED.with(|w| *w.borrow_mut() = None);
+        WATCHED.with(|w| *w.borrow_mut() = outer);
         out
     }
 
