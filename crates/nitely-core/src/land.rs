@@ -1419,8 +1419,9 @@ pub(crate) fn check_approval_at(db: &Db, pb: &Playbook, key: &str, worktree: &Pa
     pb.approval.check_blocked(&files)?;
     let mut reasons = pb.human_reasons(&files)?;
     if matches!(review.verdict.as_str(), "disabled" | "yolo" | crate::quick::VERDICT) {
-        let unanswered = pb.review.unevaluated_reasons();
-        reasons.extend(unanswered);
+        // A quick change's flags a reviewer answered before it landed are not unanswered (NIT-764).
+        let answered = if review.verdict == crate::quick::VERDICT { crate::review::answered_flags(&review.note) } else { vec![] };
+        reasons.extend(pb.review.unevaluated_except(&answered));
     }
     if review.approver == "human" {
         reasons.extend(review.reasons.iter().cloned());
