@@ -56,7 +56,7 @@ settings, and cannot make a disabled reviewer run.
 A quick change (`quick_start`, then `quick_land`) lands with only its own checks and no review
 before landing. When the playbook has `[[review.flags]]` (or requires a review by another vendor), a
 reviewer first answers only those questions about the change (NIT-764): a no lands it, a yes waits
-for you, and a reviewer that cannot answer leaves every flag to you. Nitely records it at landing. Once 5 quick changes wait, or the oldest has waited
+for you, and a reviewer that cannot answer leaves every flag to you. Nitely records the quick change at landing. Once 5 quick changes wait, or the oldest has waited
 3 hours, the app reviews all of them together in one reviewer call. That call uses the
 integration branch's review rules and a checkout of the branch's head. A P0 or P1 finding that
 names one change reopens that change's issue, unless a person decided on it since it landed.
