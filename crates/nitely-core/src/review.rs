@@ -101,7 +101,7 @@ impl ReviewRules {
     /// `unevaluated_reasons`, less the flags (and `CROSS_VENDOR`) a reviewer answered on its own
     /// before a quick land (NIT-764).
     pub fn unevaluated_except(&self, answered: &[String]) -> Vec<String> {
-        let mut reasons: Vec<String> = self.flags.iter().filter(|f| !answered.contains(&f.name)).map(|f| format!("Unevaluated reviewer condition {}: {} (automated review is disabled)", f.name, f.question)).collect();
+        let mut reasons: Vec<String> = self.flags.iter().filter(|f| !answered.contains(&f.answer_key())).map(|f| format!("Unevaluated reviewer condition {}: {} (automated review is disabled)", f.name, f.question)).collect();
         if self.require_cross_vendor && !answered.iter().any(|a| a == CROSS_VENDOR) {
             reasons.push("Unevaluated cross-vendor review requirement (automated review is disabled)".into());
         }
@@ -111,23 +111,28 @@ impl ReviewRules {
     /// What a reviewer is asked before a quick change lands (NIT-764): only the playbook's flags,
     /// about the change from `base`, in the closing lines a full review ends with.
     pub fn flags_prompt(&self, base: &str) -> String {
-        let mut p = format!("This repo's rules ask a few questions about each change before it lands. Read the change on this branch (`git diff {base}...HEAD`, and the files it touches as needed). Do not review it for defects: answer only the questions below.\n\nEnd your reply with exactly these {} lines:\n", self.flags.len());
+        let mut p = format!("This repo's rules ask a few questions about each change before it lands. Read the change on this branch (`git diff {base}...HEAD`, and the files it touches as needed). Do not review it for defects: answer only the questions below.\n\nEnd your reply with exactly these {} lines:\nVERDICT: clean\n", 1 + self.flags.len());
         for f in &self.flags {
             p.push_str(&format!("{}: <yes or no>\n", f.name));
         }
         for f in &self.flags {
             p.push_str(&format!("{} is yes if {}. ", f.name, f.question.trim_end_matches('.')));
         }
-        p.push_str("Answer yes when unsure.");
+        p.push_str("The VERDICT line says you finished. Answer yes when unsure.");
         p
     }
 
-    /// The flags a reply to `flags_prompt` answers yes. Fails when it leaves one unanswered.
+    /// The flags a reply to `flags_prompt` answers yes. Fails when the reply is unfinished: no
+    /// VERDICT line (an empty reply, or a sign-in message, answers nothing, even with no flags to
+    /// answer), or a flag left unanswered.
     pub fn parse_flags(&self, reviewer: &str, text: &str) -> Result<Vec<String>> {
+        if !text.lines().any(|l| l.trim().trim_matches('*').trim().to_lowercase().starts_with("verdict:")) {
+            bail!("the {reviewer} reply did not finish (no VERDICT line):\n{}", tail_lines(text));
+        }
         let mut flagged = Vec::new();
         for f in &self.flags {
             let prefix = format!("{}:", f.name.to_lowercase());
-            let answer = text.lines().filter_map(|l| l.trim().trim_matches('*').trim().to_lowercase().strip_prefix(&prefix).map(|v| v.trim().trim_matches('*').trim().to_string())).filter(|v| v == "yes" || v == "no").next_back();
+            let answer = text.lines().filter_map(|l| l.trim().trim_matches('*').trim().to_lowercase().strip_prefix(&prefix).map(|v| v.trim().trim_matches('*').trim().to_string())).rfind(|v| v == "yes" || v == "no");
             match answer.as_deref() {
                 Some("yes") => flagged.push(f.name.clone()),
                 Some(_) => {}
@@ -155,6 +160,15 @@ pub const CROSS_VENDOR: &str = "CROSS_VENDOR";
 /// The names a quick change's review note says were answered before it landed.
 pub fn answered_flags(note: &str) -> Vec<String> {
     note.strip_prefix(FLAGS_ANSWERED).and_then(|n| n.split_once(": ")).map(|(_, names)| names.split(", ").map(str::to_string).collect()).unwrap_or_default()
+}
+
+impl Flag {
+    /// The flag as one answer covers it: its name and its question, so an answer given to an
+    /// earlier wording does not answer a changed one (NIT-764).
+    pub fn answer_key(&self) -> String {
+        use sha2::{Digest, Sha256};
+        format!("{}#{}", self.name, &format!("{:x}", Sha256::digest(self.question.trim().as_bytes()))[..12])
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1571,6 +1585,28 @@ fn with_submodule_code(prompt: String, worktree: &Path, base: &str) -> String {
         prompt.replace("`git diff ", "`git diff --submodule=diff ")
     } else {
         prompt
+    }
+}
+
+#[cfg(test)]
+mod quick_flag_tests {
+    use super::*;
+
+    /// A quick change's flag answer counts only for the wording it answered, and only when the
+    /// reviewer finished (NIT-764).
+    #[test]
+    fn a_flag_answer_covers_its_own_question_and_needs_a_finished_reply() {
+        let mut rules = ReviewRules { require_cross_vendor: true, ..Default::default() };
+        assert!(rules.parse_flags("codex", "").is_err(), "an empty reply answers nothing, even with no flags");
+        assert!(rules.parse_flags("codex", "Please log in to continue.").is_err());
+        assert_eq!(rules.parse_flags("codex", "VERDICT: clean").unwrap(), Vec::<String>::new());
+        rules.flags = vec![Flag { name: "MONEY".into(), question: "the change alters refunds".into(), reason: String::new() }];
+        assert!(rules.parse_flags("codex", "VERDICT: clean").is_err(), "MONEY unanswered");
+        assert_eq!(rules.parse_flags("codex", "VERDICT: clean\nMONEY: yes").unwrap(), ["MONEY"]);
+        let answered = vec![rules.flags[0].answer_key(), CROSS_VENDOR.to_string()];
+        assert!(rules.unevaluated_except(&answered).is_empty());
+        rules.flags[0].question = "the change alters billing".into();
+        assert_eq!(rules.unevaluated_except(&answered).len(), 1, "a reworded question is asked again");
     }
 }
 

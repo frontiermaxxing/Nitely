@@ -860,7 +860,7 @@ fn answer_flags(db: &Db, rules: &crate::review::ReviewRules, vendor: &str, workt
     let wt = worktree.to_string_lossy().into_owned();
     let Ok(choice) = rules.choose_after(vendor, &|r| rules.is_installed(r, worktree), &[]) else { return Ok(None) };
     db.log_event(actor, Some(key), Some(&wt), "status", &format!("{} answers the playbook's review flags before the quick land", choice.reviewer))?;
-    let flagged = rules.run_review_prompt(&choice.reviewer, worktree, &rules.flags_prompt(since)).and_then(|reply| rules.parse_flags(&choice.reviewer, &reply.text));
+    let flagged = rules.run_review_prompt(&choice.reviewer, worktree, &rules.flags_prompt(since)).and_then(|reply| if reply.only_a_login_message { Err(reply.signed_out(rules)) } else { rules.parse_flags(&choice.reviewer, &reply.text) });
     let flagged = match flagged {
         Ok(f) => f,
         Err(e) => {
@@ -869,7 +869,7 @@ fn answer_flags(db: &Db, rules: &crate::review::ReviewRules, vendor: &str, workt
         }
     };
     let mut reasons: Vec<String> = rules.flags.iter().filter(|f| flagged.contains(&f.name)).map(|f| format!("{} review: {}", choice.reviewer, if f.reason.is_empty() { &f.question } else { &f.reason })).collect();
-    let mut answered: Vec<String> = rules.flags.iter().map(|f| f.name.clone()).collect();
+    let mut answered: Vec<String> = rules.flags.iter().map(|f| f.answer_key()).collect();
     if rules.require_cross_vendor {
         reasons.extend(rules.independence_reason(&choice.reviewer, vendor, &choice.note));
         answered.push(crate::review::CROSS_VENDOR.into());
