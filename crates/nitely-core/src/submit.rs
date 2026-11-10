@@ -418,7 +418,11 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         // A quick change has its flags answered by a reviewer before it lands, so only a yes waits
         // for the person (NIT-764). With no reviewer to answer them, every one waits, as before.
         let vendor = crate::git::parse_branch(&branch).0.unwrap_or_default();
-        let answered = if out.quick && latest.review.enabled && !latest.review.unevaluated_reasons().is_empty() { answer_flags(db, &latest.review, &vendor, &worktree, &since, &issue.key, actor)? } else { None };
+        // The flag reviewer reads the live review switch before it launches, as any reviewer does.
+        let mut rules = latest.review.clone();
+        rules.policy_root = Some(root.to_path_buf());
+        rules.yolo_guards = crate::project_yolo::ReviewGuard::for_issue(db, &issue.key)?.into_iter().collect();
+        let answered = if out.quick && latest.review.enabled && !latest.review.unevaluated_reasons().is_empty() { answer_flags(db, &rules, &vendor, &worktree, &since, &issue.key, actor)? } else { None };
         match answered {
             Some((reasons, note)) => {
                 out.reasons.extend(reasons);

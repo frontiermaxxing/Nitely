@@ -126,8 +126,9 @@ impl ReviewRules {
     /// VERDICT line (an empty reply, or a sign-in message, answers nothing, even with no flags to
     /// answer), or a flag left unanswered.
     pub fn parse_flags(&self, reviewer: &str, text: &str) -> Result<Vec<String>> {
-        if !text.lines().any(|l| l.trim().trim_matches('*').trim().to_lowercase().starts_with("verdict:")) {
-            bail!("the {reviewer} reply did not finish (no VERDICT line):\n{}", tail_lines(text));
+        let finished = |l: &str| l.trim().trim_matches('*').trim().to_lowercase().strip_prefix("verdict:").is_some_and(|v| v.trim().trim_matches('*').trim() == "clean");
+        if !text.lines().any(finished) {
+            bail!("the {reviewer} reply did not finish (no `VERDICT: clean` line):\n{}", tail_lines(text));
         }
         let mut flagged = Vec::new();
         for f in &self.flags {
@@ -1599,6 +1600,8 @@ mod quick_flag_tests {
         let mut rules = ReviewRules { require_cross_vendor: true, ..Default::default() };
         assert!(rules.parse_flags("codex", "").is_err(), "an empty reply answers nothing, even with no flags");
         assert!(rules.parse_flags("codex", "Please log in to continue.").is_err());
+        assert!(rules.parse_flags("codex", "VERDICT:").is_err(), "a bare VERDICT line is not finished");
+        assert!(rules.parse_flags("codex", "VERDICT: maybe").is_err());
         assert_eq!(rules.parse_flags("codex", "VERDICT: clean").unwrap(), Vec::<String>::new());
         rules.flags = vec![Flag { name: "MONEY".into(), question: "the change alters refunds".into(), reason: String::new() }];
         assert!(rules.parse_flags("codex", "VERDICT: clean").is_err(), "MONEY unanswered");
