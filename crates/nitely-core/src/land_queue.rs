@@ -481,7 +481,10 @@ fn stack_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, batch: Vec<
     if let Some(why) = land::left_index_lock(root, land::INDEX_LOCK_GRACE_SECS) {
         bail!("{why}");
     }
-    let before = land::rev(root, &base)?;
+    // Never stack onto, or push, a commit nobody landed (NIT-762).
+    // The commit checked is the one stacked onto; main anywhere else after the gate sends the run
+    // back.
+    let before = land::refuse_stray(root, &base)?;
     let stack = stack_worktree(root, pb, &before)?;
 
     // Stack, oldest first; a change that cannot go on top goes back to its agent.
@@ -821,10 +824,11 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
     crate::project_modes::check_playbook_authority(db, &keys, pb)?;
     anyhow::ensure!(land::rev(root, &base)? == before, "{base} moved after the gate; land again");
     land::fast_forward_main(root, &tip).with_context(|| land::refused_fast_forward(root))?;
+    let unrecorded = land::record_landed_tip(root, &tip);
     let head = git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
     let pushed = push.then(|| git_remote(root, &["push", "origin", &base]));
     // The after steps once for the whole stack, still under the lock.
-    let mut after = Landed { base: base.clone(), landed_from: Some(before.to_string()), ..Default::default() };
+    let mut after = Landed { base: base.clone(), landed_from: Some(before.to_string()), warnings: unrecorded.into_iter().collect(), ..Default::default() };
     {
         // This install serves the actual landed prefix, which may differ from the queued batch.
         // A shared install belongs to its common project, never an arbitrary member issue or

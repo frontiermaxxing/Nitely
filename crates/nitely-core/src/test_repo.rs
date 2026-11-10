@@ -136,6 +136,16 @@ pub(crate) fn add_remote(repo: &Path, remote: &Path) {
     git(repo, &["push", "-q", "-u", "origin", "main"]);
 }
 
+/// Commits what is staged and changed in `repo`'s main checkout on main, and pushes it when the
+/// repo has an origin: the person's own deliberate change, published, not a stray commit that land
+/// refuses to build on (NIT-762).
+pub(crate) fn commit_on_main(repo: &Path, message: &str) {
+    git(repo, &["commit", "-qam", message]);
+    if git(repo, &["remote"]).lines().any(|l| l.trim() == "origin") {
+        git(repo, &["push", "-q", "origin", "main"]);
+    }
+}
+
 /// What a submit that passed with no person needed leaves for land: a passing review of the
 /// branch's real patch at its head, and the issue In Review. For tests about what happens after
 /// submit; a submit runs a gate and a reviewer, tens of git processes each (NIT-498).

@@ -260,6 +260,8 @@ pub fn make(root: &Path, gitignore: Option<&[String]>, include: &[String], ident
         bail!("nothing to commit: the folder has no files that would go in");
     }
     git(root, &["commit", "--quiet", "-m", "Initial commit"])?;
+    // Nitely made it: a land later counts it as Nitely's, not a stray commit (NIT-762).
+    crate::land::record_landed_tip(root, "HEAD");
     let branch = git(root, &["symbolic-ref", "--short", "HEAD"]).map(|b| b.trim().to_string()).unwrap_or_else(|_| "the branch".into());
     Ok(format!("Made the first commit on {branch}: {staged} file{}. It was not pushed.", if staged == 1 { "" } else { "s" }))
 }
