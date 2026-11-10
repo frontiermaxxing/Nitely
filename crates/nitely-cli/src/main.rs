@@ -1055,14 +1055,15 @@ fn run_wake(vendor: &str) -> Result<Option<String>> {
         return Ok(None);
     }
     let actor = format!("claude:{session}");
-    let pending = wake::pending(&Db::open_default()?, &actor, tool, value.get("tool_response").unwrap_or(&serde_json::Value::Null))?;
+    let named = wake::named(tool, value.get("tool_response").unwrap_or(&serde_json::Value::Null));
     let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
     let token = format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
     let woke = wake::wait(
         &Db::open_default,
-        &wake::token_path(&nitely_core::paths::data_dir(), &actor),
+        &wake::state_path(&nitely_core::paths::data_dir(), &actor),
+        &actor,
         &token,
-        &pending,
+        named,
         std::time::Duration::from_secs(env("NITELY_WAKE_WAIT_SECS", wake::WAIT)),
         std::time::Duration::from_millis(env("NITELY_WAKE_EVERY_MS", 5000)),
     )?;

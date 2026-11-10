@@ -1,22 +1,26 @@
-//! Waking an agent session when its own background work ends (NIT-765), so it ends its turn after
+//! Waking an agent session when its background work ends (NIT-765), so it ends its turn after
 //! `submit` instead of polling `submit_status`: each poll is a model call over its whole context.
 //!
 //! Claude Code runs `nitely wake claude` after each of Nitely's job tools (a PostToolUse hook with
-//! `asyncRewake`, written by `connect`). The hook runs in the background, waits on the database for
-//! what the session still has running (submit jobs, land jobs, lane runs, a land or quick land that
-//! went on in a process of its own), and exits 2 with what each one came to. Claude Code shows that
-//! to the session and wakes it, even when it is idle. With nothing running it exits at once and
-//! wakes nobody. No other agent host lets a process wake an idle session: Codex and the rest are
-//! told to make one long `wait_seconds` call instead (instructions.rs).
+//! `asyncRewake`, written by `connect`). The hook runs in the background and watches, on the
+//! database, the session's work: submit jobs, land jobs and lane runs it asked for or that run on
+//! an issue it claims, the job or run the tool's own reply names, and a land or quick land that
+//! went on in a process of its own. As soon as one of them ends, it exits 2 with what each ended
+//! one came to and what still runs; Claude Code shows that and wakes the session, even when idle.
+//! While the session holds an issue in review, it keeps watching, so a land another session runs
+//! on it still wakes the claimer. With nothing to watch it exits at once and wakes nobody.
 //!
-//! A newer waiter for a session replaces an older one (its token file), so a session that polls
-//! anyway, or starts more work, is woken once, by the waiter that knows about all of it.
+//! One waiter per session: a newer one takes over (the state file's token) and inherits what the
+//! older one still watched, so nothing is dropped and nothing is told twice. No other agent host
+//! lets a process wake an idle session: Codex and the rest are told to make one long
+//! `wait_seconds` call instead (instructions.rs).
 
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
 
-use crate::db::Db;
+use crate::db::{now, Db};
 
 /// The tools after which the hook looks for work to wait on: the ones that start or report a job.
 pub const TOOLS: &[&str] = &["submit", "submit_status", "land", "quick_land", "run", "run_status"];
@@ -26,59 +30,128 @@ pub fn matcher() -> String {
     format!("mcp__nitely__({})$", TOOLS.join("|"))
 }
 
-/// How long Claude Code lets the hook run, in seconds, and how long it waits before it wakes the
+/// How long Claude Code lets the hook run, in seconds, and how long it watches before it wakes the
 /// session anyway to say what is still running (a little less, so it is never cut off).
 pub const HOOK_TIMEOUT: u64 = 3600;
 pub const WAIT: u64 = HOOK_TIMEOUT - 120;
 
-/// What a session has running, as the hook found it right after the tool call.
-#[derive(Debug, Default, Clone, PartialEq)]
-pub struct Pending {
+/// A finished job not yet told to its session counts as news this long after it ended: one that
+/// ended between the tool's reply and the hook's first look.
+const RECENT_SECS: i64 = 600;
+
+/// What a session's waiter watches. Kept in the state file, so a newer waiter inherits it.
+#[derive(Debug, Default, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Watched {
+    #[serde(default)]
     pub submits: Vec<i64>,
+    #[serde(default)]
     pub lands: Vec<i64>,
+    #[serde(default)]
     pub runs: Vec<i64>,
     /// The answer files of calls that went on in a process of their own (`run_apart`), with the
     /// tool that started each.
+    #[serde(default)]
     pub apart: Vec<(String, PathBuf)>,
 }
 
-impl Pending {
+impl Watched {
     pub fn is_empty(&self) -> bool {
         self.submits.is_empty() && self.lands.is_empty() && self.runs.is_empty() && self.apart.is_empty()
     }
-}
 
-/// What `actor` has running now. `tool` and `response` are the call the hook follows: a land or
-/// quick land past the call's wait names the log of the process it goes on in, and its answer
-/// lands beside it.
-pub fn pending(db: &Db, actor: &str, tool: &str, response: &Value) -> Result<Pending> {
-    let ids = |sql: &str| -> Result<Vec<i64>> {
-        let mut s = db.conn.prepare(sql)?;
-        let rows = s.query_map([actor], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
-        Ok(rows)
-    };
-    let mut out = Pending {
-        submits: ids("SELECT id FROM submit_job WHERE requested_by = ?1 AND state IN ('queued', 'running') ORDER BY id")?,
-        lands: ids("SELECT id FROM land_job WHERE requested_by = ?1 AND state IN ('waiting', 'landing') ORDER BY id")?,
-        runs: ids("SELECT id FROM lane_run WHERE requested_by = ?1 AND state IN ('queued', 'running') ORDER BY id")?,
-        apart: vec![],
-    };
-    for body in answers(response) {
-        if body.get("still_running").and_then(Value::as_bool) == Some(true) {
-            if let Some(log) = body.get("log").and_then(Value::as_str) {
-                out.apart.push((tool.to_string(), Path::new(log).with_extension("json")));
+    fn add(&mut self, other: Watched) {
+        fn merge<T: PartialEq>(into: &mut Vec<T>, from: Vec<T>) {
+            for x in from {
+                if !into.contains(&x) {
+                    into.push(x);
+                }
             }
         }
+        merge(&mut self.submits, other.submits);
+        merge(&mut self.lands, other.lands);
+        merge(&mut self.runs, other.runs);
+        merge(&mut self.apart, other.apart);
     }
-    Ok(out)
+
+    fn names(&self) -> Vec<String> {
+        let mut what = vec![];
+        what.extend(self.submits.iter().map(|id| format!("submit job {id}")));
+        what.extend(self.lands.iter().map(|id| format!("land job {id}")));
+        what.extend(self.runs.iter().map(|id| format!("lane run {id}")));
+        what.extend(self.apart.iter().map(|(tool, _)| tool.clone()));
+        what
+    }
 }
 
-/// The JSON answers inside an MCP tool response as Claude Code hands it to the hook: the result
-/// itself, or its `content` text blocks.
+/// The session's waiter state on disk: whose turn it is to watch, and what is watched.
+#[derive(Debug, Default, Serialize, Deserialize)]
+struct State {
+    token: String,
+    #[serde(default)]
+    watched: Watched,
+    /// What a waiter already told the session (`submit:12`, `land:3`, `run:40`, the newest last), so
+    /// a finished job still unread in the database is not told again.
+    #[serde(default)]
+    told: Vec<String>,
+}
+
+/// How many told pieces the state remembers.
+const TOLD: usize = 100;
+
+/// The state file of `actor`'s waiter.
+pub fn state_path(dir: &Path, actor: &str) -> PathBuf {
+    let safe: String = actor.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    dir.join("wake").join(format!("{safe}.json"))
+}
+
+fn read_state(file: &Path) -> Option<State> {
+    std::fs::read(file).ok().and_then(|b| serde_json::from_slice(&b).ok())
+}
+
+fn write_state(file: &Path, state: &State) -> Result<()> {
+    if let Some(dir) = file.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(file, serde_json::to_vec(state)?)?;
+    Ok(())
+}
+
+/// What the tool call the hook follows names as still going: the submit job its reply names, a lane
+/// run it says is queued or running, the answer file of a call that went on apart.
+pub fn named(tool: &str, response: &Value) -> Watched {
+    let mut out = Watched::default();
+    for answer in answers(response) {
+        match &answer {
+            Value::String(s) => {
+                // "Handed in as submit job 12: …", "Submit job 12 of APP-3 is running …".
+                let lower = s.to_ascii_lowercase();
+                if let Some(id) = lower.split_once("submit job ").and_then(|(_, rest)| rest.split(|c: char| !c.is_ascii_digit()).next()).and_then(|n| n.parse().ok()) {
+                    out.submits.push(id);
+                }
+            }
+            Value::Object(o) => {
+                if o.get("still_running").and_then(Value::as_bool) == Some(true) {
+                    if let Some(log) = o.get("log").and_then(Value::as_str) {
+                        out.apart.push((tool.to_string(), Path::new(log).with_extension("json")));
+                    }
+                }
+                let open = o.get("state").and_then(Value::as_str).is_some_and(|s| matches!(s, "queued" | "running"));
+                if let (true, true, Some(id)) = (matches!(tool, "run" | "run_status"), open, o.get("id").and_then(Value::as_i64)) {
+                    out.runs.push(id);
+                }
+            }
+            _ => {}
+        }
+    }
+    out
+}
+
+/// The answers inside an MCP tool response as Claude Code hands it to the hook: the result itself,
+/// or its `content` text blocks, each parsed as JSON where it is JSON.
 fn answers(response: &Value) -> Vec<Value> {
     let mut out = vec![];
     let mut take = |v: &Value| match v {
-        Value::String(s) => out.extend(serde_json::from_str::<Value>(s).ok()),
+        Value::String(s) => out.push(serde_json::from_str::<Value>(s).unwrap_or_else(|_| Value::String(s.clone()))),
         Value::Object(_) => out.push(v.clone()),
         _ => {}
     };
@@ -92,46 +165,107 @@ fn answers(response: &Value) -> Vec<Value> {
     out
 }
 
-/// What each pending piece came to, one line each, once every one of them has ended; None while
-/// any still runs.
-pub fn ended(db: &Db, pending: &Pending) -> Result<Option<Vec<String>>> {
+/// The session's work in the database now: open submit jobs, land jobs and lane runs it asked for
+/// or that run on an issue it claims, and those that ended lately without being told to it.
+pub fn scan(db: &Db, actor: &str) -> Result<Watched> {
+    let ids = |sql: &str| -> Result<Vec<i64>> {
+        let mut s = db.conn.prepare(sql)?;
+        let rows = s.query_map(rusqlite::params![actor, now() - RECENT_SECS], |r| r.get(0))?.collect::<rusqlite::Result<Vec<i64>>>()?;
+        Ok(rows)
+    };
+    let mine = "(requested_by = ?1 OR issue_key IN (SELECT key FROM issue WHERE claimed_by = ?1))";
+    Ok(Watched {
+        submits: ids(&format!("SELECT id FROM submit_job WHERE {mine} AND (state IN ('queued', 'running') OR (requested_by = ?1 AND delivered_at IS NULL AND ended_at >= ?2)) ORDER BY id"))?,
+        lands: ids(&format!("SELECT id FROM land_job WHERE {mine} AND (state IN ('waiting', 'landing') OR (requested_by = ?1 AND delivered_at IS NULL AND ended_at >= ?2)) ORDER BY id"))?,
+        runs: ids(&format!("SELECT id FROM lane_run WHERE {mine} AND state IN ('queued', 'running') AND ?2 = ?2 ORDER BY id"))?,
+        apart: vec![],
+    })
+}
+
+/// Whether the session holds an issue another session may still submit or land: one in review or
+/// waiting on the person.
+fn holds_open_review(db: &Db, actor: &str) -> Result<bool> {
+    Ok(db.conn.query_row("SELECT EXISTS(SELECT 1 FROM issue WHERE claimed_by = ?1 AND state IN ('In Review', 'Needs You', 'Approved'))", [actor], |r| r.get(0))?)
+}
+
+/// What one watched piece came to, or None while it still runs.
+fn outcome_submit(db: &Db, id: i64) -> Result<Option<String>> {
+    Ok(match db.submit_job(id)? {
+        Some(j) if !j.finished() => None,
+        Some(j) => Some(j.outcome()),
+        None => Some(format!("submit job {id}: gone")),
+    })
+}
+
+fn outcome_land(db: &Db, id: i64) -> Result<Option<String>> {
+    Ok(match db.land_job(id)? {
+        Some(j) if !j.finished() => None,
+        Some(j) => Some(match (&j.result, &j.error) {
+            (_, Some(e)) => format!("{}: the land stopped: {e}", j.issue),
+            (Some(r), _) => format!("{}: {}", j.issue, said(r)),
+            _ => format!("{}: the land is {}.", j.issue, j.state),
+        }),
+        None => Some(format!("land job {id}: gone")),
+    })
+}
+
+fn outcome_run(db: &Db, id: i64) -> Result<Option<String>> {
+    Ok(match db.lane_run(id)? {
+        Some(r) if matches!(r.state.as_str(), "queued" | "running") => None,
+        Some(r) => Some(format!("Run {} (`{}`): {}{}", r.id, r.command, r.state, r.exit_code.map(|c| format!(", exit {c}")).unwrap_or_default())),
+        None => Some(format!("lane run {id}: gone")),
+    })
+}
+
+fn outcome_apart(tool: &str, file: &Path) -> Option<String> {
+    let answer = std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok())?;
+    Some(match (answer.get("ok"), answer.get("error")) {
+        (_, Some(e)) => format!("{tool}: {}", e.as_str().unwrap_or("stopped")),
+        (Some(ok), _) => format!("{tool}: {}", said(ok)),
+        _ => format!("{tool}: ended"),
+    })
+}
+
+/// Takes the pieces of `watched` that have ended out of it, with a line each.
+/// `told` gets the database pieces it takes.
+pub fn take_ended(db: &Db, watched: &mut Watched, told: &mut Vec<String>) -> Result<Vec<String>> {
     let mut lines = vec![];
-    for id in &pending.submits {
-        match db.submit_job(*id)? {
-            Some(j) if !j.finished() => return Ok(None),
-            Some(j) => lines.push(j.outcome()),
-            None => {}
+    let mut keep = Watched::default();
+    for id in std::mem::take(&mut watched.submits) {
+        match outcome_submit(db, id)? {
+            Some(l) => {
+                lines.push(l);
+                told.push(format!("submit:{id}"));
+            }
+            None => keep.submits.push(id),
         }
     }
-    for id in &pending.lands {
-        match db.land_job(*id)? {
-            Some(j) if !j.finished() => return Ok(None),
-            Some(j) => lines.push(match (&j.result, &j.error) {
-                (_, Some(e)) => format!("{}: the land stopped: {e}", j.issue),
-                (Some(r), _) => format!("{}: {}", j.issue, said(r)),
-                _ => format!("{}: the land is {}.", j.issue, j.state),
-            }),
-            None => {}
+    for id in std::mem::take(&mut watched.lands) {
+        match outcome_land(db, id)? {
+            Some(l) => {
+                lines.push(l);
+                told.push(format!("land:{id}"));
+            }
+            None => keep.lands.push(id),
         }
     }
-    for id in &pending.runs {
-        match db.lane_run(*id)? {
-            Some(r) if matches!(r.state.as_str(), "queued" | "running") => return Ok(None),
-            Some(r) => lines.push(format!("Run {} (`{}`): {}{}", r.id, r.command, r.state, r.exit_code.map(|c| format!(", exit {c}")).unwrap_or_default())),
-            None => {}
+    for id in std::mem::take(&mut watched.runs) {
+        match outcome_run(db, id)? {
+            Some(l) => {
+                lines.push(l);
+                told.push(format!("run:{id}"));
+            }
+            None => keep.runs.push(id),
         }
     }
-    for (tool, file) in &pending.apart {
-        let Some(answer) = std::fs::read(file).ok().and_then(|b| serde_json::from_slice::<Value>(&b).ok()) else {
-            return Ok(None);
-        };
-        lines.push(match (answer.get("ok"), answer.get("error")) {
-            (_, Some(e)) => format!("{tool}: {}", e.as_str().unwrap_or("stopped")),
-            (Some(ok), _) => format!("{tool}: {}", said(ok)),
-            _ => format!("{tool}: ended"),
-        });
+    for (tool, file) in std::mem::take(&mut watched.apart) {
+        match outcome_apart(&tool, &file) {
+            Some(l) => lines.push(l),
+            None => keep.apart.push((tool, file)),
+        }
     }
-    Ok(Some(lines))
+    *watched = keep;
+    Ok(lines)
 }
 
 /// A tool's answer in a line: its `next` or `error` when it has one, else the JSON, cut short.
@@ -148,76 +282,87 @@ fn said(v: &Value) -> String {
     s
 }
 
-/// What the hook tells the session it wakes.
-pub fn message(lines: &[String]) -> String {
-    let mut text = String::from("Nitely: what you were waiting on has ended.");
+/// What the hook tells the session it wakes: what ended, and what still runs.
+pub fn message(lines: &[String], still: &Watched) -> String {
+    let mut text = String::from("Nitely: work you were waiting on has ended.");
     for l in lines {
         text.push_str("\n- ");
         text.push_str(l);
+    }
+    if !still.is_empty() {
+        text.push_str(&format!(
+            "\nStill running: {}. Nitely keeps watching it after your next submit, land, run or status call; with nothing else to do, make one status call without wait_seconds and end your turn.",
+            still.names().join(", ")
+        ));
     }
     text.push_str("\nCarry on from here: `next_task` or the issue's own status call has the detail.");
     text
 }
 
-/// What it tells the session when its work is still running as the hook's time runs out.
-pub fn still_running(pending: &Pending) -> String {
-    let mut what = vec![];
-    what.extend(pending.submits.iter().map(|id| format!("submit job {id}")));
-    what.extend(pending.lands.iter().map(|id| format!("land job {id}")));
-    what.extend(pending.runs.iter().map(|id| format!("lane run {id}")));
-    what.extend(pending.apart.iter().map(|(tool, _)| tool.clone()));
+/// What it tells the session when its work still runs as the hook's time runs out.
+pub fn still_running(still: &Watched) -> String {
     format!(
-        "Nitely: still running after {} minutes: {}. To be woken when it ends, call its status tool once without wait_seconds (submit_status, run_status) and end your turn.",
+        "Nitely: still running after {} minutes: {}. To be woken when it ends, make one status call without wait_seconds (submit_status, run_status) and end your turn.",
         WAIT / 60,
-        what.join(", ")
+        still.names().join(", ")
     )
-}
-
-/// The token file that says which waiter is the session's current one.
-pub fn token_path(dir: &Path, actor: &str) -> PathBuf {
-    let safe: String = actor.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
-    dir.join("wake").join(format!("{safe}.token"))
 }
 
 /// What the waiter did.
 #[derive(Debug, PartialEq)]
 pub enum Woke {
-    /// Nothing was running: wake nobody.
+    /// Nothing to watch: wake nobody.
     Nothing,
-    /// A newer waiter took over the session, or the session's work was told some other way.
+    /// A newer waiter took over the session, with what this one watched.
     Replaced,
     /// Wake the session with this.
     Wake(String),
 }
 
-/// Waits for the session's pending work, up to `wait`: checks every `every` while it is still the
-/// session's current waiter (`token`). `open` opens the database for each look, so no connection
-/// stays open for an hour.
-pub fn wait(open: &dyn Fn() -> Result<Db>, token_file: &Path, token: &str, pending: &Pending, wait: std::time::Duration, every: std::time::Duration) -> Result<Woke> {
-    if pending.is_empty() {
-        // Nothing to wait on: an older waiter has nothing left to say either.
-        if std::fs::read_to_string(token_file).is_ok() {
-            std::fs::write(token_file, token)?;
-        }
-        return Ok(Woke::Nothing);
-    }
-    if let Some(dir) = token_file.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(token_file, token)?;
+/// Watches `actor`'s work, starting from what the tool call named (`named`) and what the session's
+/// previous waiter still watched, until a piece ends (wake), a newer waiter takes over, or `wait`
+/// runs out. Looks every `every`; `open` opens the database for each look, so no connection stays
+/// open for an hour.
+pub fn wait(open: &dyn Fn() -> Result<Db>, state_file: &Path, actor: &str, token: &str, named: Watched, wait: std::time::Duration, every: std::time::Duration) -> Result<Woke> {
+    let (mut watched, mut told) = read_state(state_file).map(|s| (s.watched, s.told)).unwrap_or_default();
+    watched.add(named);
+    let state = |token: &str, watched: &Watched, told: &[String]| State { token: token.to_string(), watched: watched.clone(), told: told[told.len().saturating_sub(TOLD)..].to_vec() };
     let deadline = std::time::Instant::now() + wait;
+    let mut first = true;
     loop {
-        if std::fs::read_to_string(token_file).ok().as_deref() != Some(token) {
-            return Ok(Woke::Replaced);
+        let db = open()?;
+        if first {
+            write_state(state_file, &state(token, &watched, &told))?;
+        } else {
+            match read_state(state_file) {
+                Some(s) if s.token == token => {}
+                _ => return Ok(Woke::Replaced),
+            }
         }
-        if let Some(lines) = ended(&open()?, pending)? {
-            std::fs::remove_file(token_file).ok();
-            return Ok(Woke::Wake(message(&lines)));
+        let before = watched.clone();
+        let mut found = scan(&db, actor)?;
+        found.submits.retain(|id| !told.contains(&format!("submit:{id}")));
+        found.lands.retain(|id| !told.contains(&format!("land:{id}")));
+        found.runs.retain(|id| !told.contains(&format!("run:{id}")));
+        watched.add(found);
+        let ended = take_ended(&db, &mut watched, &mut told)?;
+        if !ended.is_empty() {
+            // What still runs goes to the next waiter, whoever starts it.
+            write_state(state_file, &state("", &watched, &told))?;
+            return Ok(Woke::Wake(message(&ended, &watched)));
+        }
+        if watched != before {
+            write_state(state_file, &state(token, &watched, &told))?;
+        }
+        if watched.is_empty() && !holds_open_review(&db, actor)? {
+            return Ok(Woke::Nothing);
         }
         if std::time::Instant::now() >= deadline {
-            std::fs::remove_file(token_file).ok();
-            return Ok(Woke::Wake(still_running(pending)));
+            write_state(state_file, &state("", &watched, &told))?;
+            return Ok(if watched.is_empty() { Woke::Nothing } else { Woke::Wake(still_running(&watched)) });
         }
+        first = false;
+        drop(db);
         std::thread::sleep(every);
     }
 }
