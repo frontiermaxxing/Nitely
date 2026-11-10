@@ -7,7 +7,7 @@
 //! next review round is told about them instead of raising them again.
 
 use anyhow::{bail, Context, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::approval::{sign, unhex, verify, PHONE_SKEW};
@@ -78,6 +78,12 @@ impl Db {
             bail!("say why the person should accept it as it is: that is what they decide on");
         }
         let review = self.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{} has no review yet; submit it first", issue.key))?;
+        // A submit handed in a newer head than this review saw, and no review of it was saved:
+        // its findings are not this review's, so none of these may be put to the person (NIT-770).
+        let latest: Option<(String, i64)> = self.conn.query_row("SELECT head, queued_at FROM submit_job WHERE issue_key = ?1 COLLATE NOCASE ORDER BY id DESC LIMIT 1", [&issue.key], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((head, _)) = latest.filter(|(head, at)| !head.starts_with(&review.commit_sha) && *at >= review.ts) {
+            bail!("{}'s latest review is of {}, but its latest submit handed in {}, and no review of that was saved: submit again for a fresh review before asking to accept a finding", issue.key, &review.commit_sha[..review.commit_sha.len().min(7)], &head[..head.len().min(7)]);
+        }
         let blocking: Vec<&Finding> = review.findings.iter().filter(|f| f.priority <= 1).collect();
         let wanted = finding.trim();
         let found = match wanted.parse::<usize>() {

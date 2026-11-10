@@ -308,10 +308,18 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
         // The review that ran alongside comes back with the failure, so one round fixes both.
         if let Some(early) = early.take() {
             let rules = rules_of(&review_policy(db, &root, &issue)?.0.review);
+            let stopped = out.gate.results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED));
             match early.join(&worktree, &out.commit, &rules) {
-                Ok(Some((choice, mut review))) => {
+                Ok(((choice, mut review), moved)) => {
                     crate::review_batch::hold_interactions(db, &worktree, &mut review)?;
                     review.note = choice.note.clone();
+                    // Recorded whatever moved since it started: its findings are what the next
+                    // round fixes, and the record says what moved (NIT-770).
+                    if !moved.is_empty() {
+                        let said = format!("The review of {} was recorded although {}", &out.commit[..out.commit.len().min(7)], moved.join(", and "));
+                        db.log_event(actor, Some(&issue.key), Some(&wt), "status", &said)?;
+                        review.note = [review.note.as_str(), &said].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join(". ");
+                    }
                     let changes = review.verdict == "changes";
                     out.next = format!("{} {}", out.next, crate::submit_rules::beside_failed_gate(changes, &review.reviewer));
                     out.review = Some(review);
@@ -334,7 +342,9 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
                         }
                     }
                 }
-                Ok(None) => {}
+                // The review stopped the gate and cannot be attached: the job fails saying so,
+                // never "the review asked for changes" with nothing to fix (NIT-770).
+                Err(e) if stopped => bail!("the review alongside the gate stopped it, but its result could not be recorded: {e:#}; submit again for a fresh review"),
                 Err(e) => db.log_event(actor, Some(&issue.key), Some(&wt), "status", &format!("The review alongside the gate did not finish: {e:#}"))?,
             }
         }
@@ -387,7 +397,7 @@ fn submit_as(db: &mut Db, config: &crate::Config, opts: &SubmitOptions, quick: b
             // The review that ran alongside the gate, when it reviewed the commit the gate passed.
             let alongside = match early.take() {
                 Some(e) if reused.is_none() => match e.join(&worktree, &out.commit, &rules_of(&pb.review))? {
-                    Some(done) if done.1.scope.as_ref().map(|s|s.current(db,&issue)).transpose()?.unwrap_or(false)=>Some(done),
+                    (done, moved) if moved.is_empty() && done.1.scope.as_ref().map(|s|s.current(db,&issue)).transpose()?.unwrap_or(false)=>Some(done),
                     _=>None,
                 },
                 _ => None,
@@ -685,14 +695,34 @@ struct EarlyReview {
 }
 
 impl EarlyReview {
-    /// Its result, once it finishes, when it is still of the change: the gate ran on the commit it
-    /// reviewed, the worktree has not moved since, and the review policy (`rules`, as now) is the
-    /// one it ran under, so a flag added meanwhile is answered (NIT-711 review). None when it is not.
-    fn join(self, worktree: &Path, gated: &str, rules: &str) -> Result<Option<(crate::review::Choice, Review)>> {
+    /// Its result, once it finishes, with what moved since it started: the gate ran on another
+    /// commit than it reviewed, the worktree's HEAD moved, or the review policy (`rules`, as now)
+    /// changed, so a flag added meanwhile would go unanswered (NIT-711 review). A passing gate uses
+    /// it only when nothing moved; a failed one records it whatever moved, saying what (NIT-770).
+    fn join(self, worktree: &Path, gated: &str, rules: &str) -> Result<((crate::review::Choice, Review), Vec<String>)> {
         let done = self.handle.join().map_err(|_| anyhow::anyhow!("the review stopped unexpectedly"))??;
-        let at = |rev: &str| git(worktree, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")]).map(|c| c.trim().to_string());
-        Ok((at(gated)? == self.head && at("HEAD")? == self.head && rules == self.rules).then_some(done))
+        Ok((done, drift(worktree, &self.head, gated, &self.rules, rules)?))
     }
+}
+
+/// What moved between a review that started on `reviewed` under `then` and now: the gated commit,
+/// the worktree's HEAD, the review policy. Empty when it is still of the change as it stands.
+fn drift(worktree: &Path, reviewed: &str, gated: &str, then: &str, now: &str) -> Result<Vec<String>> {
+    let at = |rev: &str| git(worktree, &["rev-parse", "--verify", &format!("{rev}^{{commit}}")]).map(|c| c.trim().to_string());
+    let short = |c: &str| c[..c.len().min(7)].to_string();
+    let mut moved = vec![];
+    let gated = at(gated)?;
+    if gated != reviewed {
+        moved.push(format!("the gate ran on {}, not the reviewed {}", short(&gated), short(reviewed)));
+    }
+    let head = at("HEAD")?;
+    if head != reviewed {
+        moved.push(format!("the worktree moved to {} while it ran", short(&head)));
+    }
+    if then != now {
+        moved.push("the review rules changed while it ran".into());
+    }
+    Ok(moved)
 }
 
 /// Starts the change's review on its own connection, alongside the gate, when it would be reviewed
@@ -1263,7 +1293,7 @@ does not.\n",
 /// The gate a review stopped while it was still queued: it ran nothing.
 fn stopped_gate(head: &str) -> GateResult {
     let result = crate::playbook::CommandResult { step: None, command: "gate".into(), ok: false, seconds: 0, output: crate::lanes::GATE_STOPPED.into(), skipped: false, timed_out: false };
-    GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head[..head.len().min(7)].to_string(), results: vec![result], warnings: vec![], flaked: vec![], lane_run: None }
+    GateResult { mode_authority: None, passed: false, plan: None, skipped: None, commit: head.to_string(), results: vec![result], warnings: vec![], flaked: vec![], lane_run: None }
 }
 
 fn after_failed_gate(gate: &GateResult) -> String {
@@ -1886,8 +1916,8 @@ mod tests {
                 Ok((crate::review::Choice { reviewer: "fake".into(), independent: true, note: String::new() }, review))
             }),
         };
-        assert!(early("before").join(&dir, &head, "before").unwrap().is_some());
-        assert!(early("before").join(&dir, &head, "a flag added").unwrap().is_none());
+        assert!(early("before").join(&dir, &head, "before").unwrap().1.is_empty(), "nothing moved: a passing gate uses it");
+        assert_eq!(early("before").join(&dir, &head, "a flag added").unwrap().1, ["the review rules changed while it ran"]);
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -2084,6 +2114,7 @@ case "$prompt" in
        *) echo "PREVIOUS 1: open edge.txt:1 \`let edge = 2;\` still skips the empty line"; echo "VERDICT: clean";;
      esac;;
   *) case "$files" in
+       *moving*) git commit -q --allow-empty -m "the agent goes on while the review runs"; echo "- [P1] Moving: moving.txt, the x is never read"; echo "VERDICT: findings";;
        *together*) touch ../review-ran; echo "- [P1] Together: together.txt, the x is never read"; echo "VERDICT: findings";;
        *mixed*) echo "- [P1] Mixed: mixed.txt, the x is never read"; echo "- [P2] Mixed edge: mixed.txt, the empty line"; echo "VERDICT: findings";;
        *edge*) echo "- [P2] Edge case: edge.txt, the empty line"; echo "VERDICT: findings";;
@@ -2470,6 +2501,41 @@ exit 0
         assert_eq!(f.db.reviews(&issue.key).unwrap()[0].verdict, "changes");
         let (state, error): (String, String) = f.db.conn.query_row("SELECT state, error FROM lane_run ORDER BY id DESC LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
         assert_eq!((state.as_str(), error.as_str()), ("abandoned", crate::lanes::GATE_STOPPED));
+    }
+
+    /// A review that stops the gate is recorded with its findings even when the worktree moved
+    /// while it ran (NIT-770): the agent was told the lane went to other work, and committed. A
+    /// submit of a newer head with no review saved then keeps those findings from being put to the
+    /// person as if they were its own.
+    #[test]
+    fn a_review_that_stopped_the_gate_is_recorded_though_the_worktree_moved() {
+        let mut f = fixture();
+        let gate = format!("commands = ['\"{}\" gate.sh']", playbook::posix_sh());
+        let policy = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("commands = [\"exit 0\"]", &gate);
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), format!("[lanes]\ncount = 1\n{policy}")).unwrap();
+        std::fs::write(f.repo.join("gate.sh"), "sleep 30\nexit 0\n").unwrap();
+        sh(&f.repo, &["add", "."]);
+        sh(&f.repo, &["commit", "-qm", "a slow gate in a lane"]);
+        let (issue, wt) = f.committed("Moving", "moving.txt");
+        let handed_in = sh(&wt, &["rev-parse", "HEAD"]).trim().to_string();
+        let s = f.submit(&wt, true).unwrap();
+        assert!(!s.gate.passed && s.gate.results.iter().any(|r| r.output.starts_with(crate::lanes::GATE_STOPPED)), "{s:?}");
+        assert_ne!(sh(&wt, &["rev-parse", "HEAD"]).trim(), handed_in, "the worktree moved during the review");
+        let review = s.review.as_ref().expect("the review that stopped the gate is on the result");
+        assert!(review.verdict == "changes" && review.findings.iter().any(|x| x.text.contains("Moving")), "{review:?}");
+        let recorded = f.db.reviews(&issue.key).unwrap().remove(0);
+        assert_eq!(recorded.verdict, "changes");
+        assert!(recorded.findings.iter().any(|x| x.text.contains("Moving")));
+        assert!(recorded.commit_sha.starts_with(&handed_in[..7]) && handed_in.starts_with(&recorded.commit_sha), "the reviewed commit: {}", recorded.commit_sha);
+        assert!(recorded.note.contains("worktree moved"), "the record says what moved: {}", recorded.note);
+        assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "In Progress");
+        // Its findings can be put to the person; once a newer head is submitted and no review of
+        // it was saved, they cannot.
+        f.db.disputed_finding(&issue.key, "1", "a trade-off").unwrap();
+        f.db.conn.execute("INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at) VALUES (?1, ?2, 'b', ?3, 'claude:test', 0, 1, 'done', ?4)",
+            rusqlite::params![issue.key, wt.to_string_lossy(), "0123456789abcdef0123456789abcdef01234567", recorded.ts + 5]).unwrap();
+        let refused = f.db.disputed_finding(&issue.key, "1", "a trade-off").unwrap_err().to_string();
+        assert!(refused.contains("no review of that was saved"), "{refused}");
     }
 
     #[test]
