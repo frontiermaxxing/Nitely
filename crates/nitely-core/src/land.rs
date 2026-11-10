@@ -771,12 +771,6 @@ pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
         std::fs::remove_file(&index_lock).ok();
     }
     std::fs::remove_file(&mark).ok();
-    // Nitely's own record of what it landed, beside origin's, for `stray_commits` (NIT-762).
-    if done.is_ok() {
-        if let Ok(branch) = git(root, &["branch", "--show-current"]) {
-            git(root, &["update-ref", &landed_ref(branch.trim()), to]).ok();
-        }
-    }
     // What a refusal means for the person, a lock left there included: `refused_fast_forward`.
     done.map(|_| ())
 }
@@ -786,11 +780,22 @@ pub(crate) fn landed_ref(base: &str) -> String {
     format!("refs/nitely/landed/{base}")
 }
 
+/// Records `to` as what Nitely put on the branch the main checkout is on (`landed_ref`), beside
+/// origin's, for `stray_commits`. A failure is said, never dropped: until a later land records one,
+/// commits this land kept local would be taken for stray.
+pub(crate) fn record_landed_tip(root: &Path, to: &str) -> Option<String> {
+    let recorded = git(root, &["branch", "--show-current"]).and_then(|b| git(root, &["update-ref", &landed_ref(b.trim()), to]));
+    recorded.err().map(|e| {
+        format!("Nitely could not record what it landed ({}); until a later land does, commits of this land that origin lacks read as not landed by Nitely: push them", first_line(&e))
+    })
+}
+
 /// The commits in `tip` (the local integration branch `base`'s, as read once) that neither origin
 /// nor Nitely's lands put there, as `<sha> <subject>`: a commit made in the main checkout by mistake
 /// (an agent whose `cd` failed), which a land would publish and a goal branch would merge
-/// (NIT-762). A repo with no origin keeps its integration branch only here, and one whose origin
-/// has no such branch yet has published none: its local tip is the truth and none is stray.
+/// (NIT-762). A repo with no origin keeps its integration branch only here: its local tip is the
+/// truth and none is stray. One whose origin has not got the branch, and with no land recorded,
+/// cannot tell and refuses until the person pushes it once.
 pub(crate) fn stray_commits(root: &Path, base: &str, tip: &str) -> Result<Vec<String>> {
     if !playbook::has_origin(root) {
         return Ok(vec![]);
@@ -806,7 +811,10 @@ pub(crate) fn stray_commits(root: &Path, base: &str, tip: &str) -> Result<Vec<St
         trusted = known(root);
         if trusted.is_empty() {
             match git_remote(root, &["ls-remote", "--heads", "origin", base]) {
-                Ok(heads) if heads.trim().is_empty() => return Ok(vec![]),
+                // Nothing published and nothing landed: no commit here is explained yet.
+                Ok(heads) if heads.trim().is_empty() => bail!(
+                    "origin has no {base} yet and Nitely has landed nothing on it here, so it cannot tell the commits on {base} from stray ones; push {base} to origin yourself once (`git push -u origin {base}`), then try again"
+                ),
                 _ => bail!(
                     "Nitely cannot tell which commits on {base} origin has: there is no {remote} here and fetching it failed ({}); fetch origin, then try again",
                     fetched.err().map(|e| first_line(&e)).unwrap_or_else(|| "origin answered with nothing".into())
@@ -1285,6 +1293,7 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
         };
         return Err(e).context(format!("{}{back}", refused_fast_forward(root)));
     }
+    report.warnings.extend(record_landed_tip(root, &head));
     drop(held);
     report.landed = true;
     report.landed_from = Some(before.clone());

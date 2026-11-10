@@ -824,10 +824,11 @@ fn land_prefix(db: &mut Db, root: &Path, pb: &Playbook, run: i64, stack: &Path, 
     crate::project_modes::check_playbook_authority(db, &keys, pb)?;
     anyhow::ensure!(land::rev(root, &base)? == before, "{base} moved after the gate; land again");
     land::fast_forward_main(root, &tip).with_context(|| land::refused_fast_forward(root))?;
+    let unrecorded = land::record_landed_tip(root, &tip);
     let head = git(root, &["rev-parse", "--short", "HEAD"])?.trim().to_string();
     let pushed = push.then(|| git_remote(root, &["push", "origin", &base]));
     // The after steps once for the whole stack, still under the lock.
-    let mut after = Landed { base: base.clone(), landed_from: Some(before.to_string()), ..Default::default() };
+    let mut after = Landed { base: base.clone(), landed_from: Some(before.to_string()), warnings: unrecorded.into_iter().collect(), ..Default::default() };
     {
         // This install serves the actual landed prefix, which may differ from the queued batch.
         // A shared install belongs to its common project, never an arbitrary member issue or
