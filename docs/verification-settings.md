@@ -205,6 +205,13 @@ affected-tests map, protected, human and blocked paths, review focus and the rev
   the land queue's lock, merging main in rather than rebasing. When the full gate fails, the land
   bisects over the items' commits on the goal branch, reverts the one at fault there, sends it back
   to Todo and opens the next checkpoint without it.
+- **Only main as Nitely knows it (NIT-762).** In a repo with an origin, a commit on the local
+  integration branch that is neither on `origin/<branch>` nor one Nitely landed (each land records
+  its tip in `refs/nitely/landed/<branch>`) is stray: a commit made in the main checkout by
+  mistake. Land, the land queue, making a goal branch and merging main into one all refuse while
+  one is there, naming each commit; a goal's refusal is said on the goal. Nitely never moves the
+  branch: push the commit if it belongs there, or take it off yourself. A repo with no origin has
+  only its local branch, so nothing there is stray.
 - **Repos with managed submodules (NIT-746).** The goal branch lives in the root repo only; no
   submodule has one. An item that moves no `[[submodules]]` pointer goes through the goal branch
   like any other, its submodule checked out where the goal branch points it. An item that moves a

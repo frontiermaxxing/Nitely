@@ -2246,7 +2246,7 @@ reason = "money logic"
         let policy="[worktree]\ndir='../wt/{key}'\n[lanes]\ncount=1\n[gate]\ncommands=['exit 37']\n[review]\nreviewer={ '*'='missing' }\ncommands={ missing=['nitely-test-do-not-launch'] }\n[verification]\nversion=1\nmode='active'\ncomments=['math[.]rs']\nbasic=['echo basic-checked']\naudit_percent=100\n[verification.backstop]\nenabled=true\n";
         std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH),policy).unwrap();
         std::fs::write(f.repo.join("math.rs"),"// old\nfn value()->i32 { 1 }").unwrap();
-        sh(&f.repo,&["add","."]);sh(&f.repo,&["commit","-m","approved policy"]);
+        sh(&f.repo,&["add","."]);crate::test_repo::commit_on_main(&f.repo,"approved policy");
         let head=sh(&f.repo,&["rev-parse","HEAD"]).trim().to_string();
         crate::project_modes::set_for_test(&mut f.db,"NIT",crate::project_modes::Mode::Custom,crate::project_modes::Options{test_depth:Some(crate::project_modes::TestDepth::Risk),pre_review:Some(crate::project_modes::PreReview::Off),audit_percent:Some(100),full_backstop:Some(crate::project_modes::Backstop{enabled:true,landings:5,delay_seconds:1800}),..Default::default()});
         let (issue,wt)=f.started("Clarify an ordinary source comment");
@@ -2274,7 +2274,7 @@ reason = "money logic"
         let mut f = fixture();
         let policy = "[worktree]\ndir = \"../wt/{key}\"\n[gate]\ncommands = [\"exit 37\"]\n[review]\nreviewer = { \"*\" = \"missing\" }\ncommands = { missing = [\"nitely-test-do-not-launch\"] }\n";
         std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), policy).unwrap();
-        sh(&f.repo, &["commit", "-qam", "checks must not launch"]);
+        crate::test_repo::commit_on_main(&f.repo, "checks must not launch");
         use crate::project_modes::{Mode, Options, PreReview, TestDepth};
         let off = || Options { test_depth: Some(TestDepth::Off), pre_review: Some(PreReview::Off), ..Default::default() };
         f.db.set_project_review_mode("NIT", Mode::Custom, off(), 0, &Actor::Human).unwrap();
@@ -2336,7 +2336,7 @@ reason = "money logic"
         for mode in ["off", "small", "all", "shadow"] {
             let policy = format!("[worktree]\ndir = \"../wt/{{key}}\"\n[gate]\ncommands = [\"exit 0\"]\n[review]\nenabled = false\nbatch = \"{mode}\"\nreviewer = {{ \"*\" = \"missing\" }}\ncommands = {{ missing = [\"nitely-test-do-not-launch\"] }}\n");
             std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), &policy).unwrap();
-            sh(&f.repo, &["commit", "-qam", "disable review"]);
+            crate::test_repo::commit_on_main(&f.repo, "disable review");
             let s = submit(&mut f.db, &f.config, &SubmitOptions { dir: &wt.to_string_lossy(), issue_key: None, skip_review: false, local_only: mode != "shadow", batch: true, solution: None, solution_commit: None, solution_patch_id: None }, &f.actor).unwrap();
             assert!(s.gate.passed && s.review_disabled && s.review.is_none(), "{s:?}");
             assert_eq!((s.approver.as_str(), s.state.as_str()), ("agent", "In Review"));
@@ -2375,7 +2375,7 @@ reason = "money logic"
         crate::project_modes::set_for_test(&mut f.db, "NIT", crate::project_modes::Mode::Custom, crate::project_modes::Options { pre_review: Some(crate::project_modes::PreReview::Off), ..Default::default() });
         let policy = PLAYBOOK.replace("{sh}", &playbook::posix_sh()).replace("[review]\n", "[review]\nenabled = false\nrequire_cross_vendor = true\n");
         std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), format!("{policy}\n[approval]\nalways_human = true\n")).unwrap();
-        sh(&f.repo, &["commit", "-qam", "disable review"]);
+        crate::test_repo::commit_on_main(&f.repo, "disable review");
         let (issue, wt) = f.committed("Approval conditions", "feature.txt");
         let s = f.submit(&wt, true).unwrap();
         assert!(s.review_disabled && s.review.is_none());
