@@ -771,8 +771,58 @@ pub(crate) fn fast_forward_main(root: &Path, to: &str) -> Result<()> {
         std::fs::remove_file(&index_lock).ok();
     }
     std::fs::remove_file(&mark).ok();
+    // Nitely's own record of what it landed, beside origin's, for `stray_commits` (NIT-762).
+    if done.is_ok() {
+        if let Ok(branch) = git(root, &["branch", "--show-current"]) {
+            git(root, &["update-ref", &landed_ref(branch.trim()), to]).ok();
+        }
+    }
     // What a refusal means for the person, a lock left there included: `refused_fast_forward`.
     done.map(|_| ())
+}
+
+/// Where Nitely records the integration branch's tip each time a land moves it (NIT-762).
+pub(crate) fn landed_ref(base: &str) -> String {
+    format!("refs/nitely/landed/{base}")
+}
+
+/// The commits on the local integration branch `base` that neither origin nor Nitely's lands put
+/// there, as `<sha> <subject>`: a commit made in the main checkout by mistake (an agent whose `cd`
+/// failed), which a land would publish and a goal branch would merge (NIT-762). A repo with no
+/// origin keeps its integration branch only here, so its local tip is the truth and none is stray.
+pub(crate) fn stray_commits(root: &Path, base: &str) -> Result<Vec<String>> {
+    if !playbook::has_origin(root) {
+        return Ok(vec![]);
+    }
+    let known: Vec<String> = [format!("refs/remotes/origin/{base}"), landed_ref(base)]
+        .into_iter()
+        .filter(|r| git(root, &["rev-parse", "--verify", "--quiet", r]).is_ok())
+        .collect();
+    if known.is_empty() {
+        return Ok(vec![]);
+    }
+    let mut args = vec!["log", "--format=%h %s", base, "--not"];
+    args.extend(known.iter().map(String::as_str));
+    Ok(git(root, &args)?.lines().map(str::to_string).filter(|l| !l.trim().is_empty()).collect())
+}
+
+/// Refuses while `base` holds stray commits (`stray_commits`), naming them. Nitely never moves the
+/// person's branch: whether they belong there is theirs to say.
+pub(crate) fn refuse_stray(root: &Path, base: &str) -> Result<()> {
+    let stray = stray_commits(root, base)?;
+    if stray.is_empty() {
+        return Ok(());
+    }
+    let n = stray.len();
+    bail!(
+        "{base} has {n} commit{} Nitely did not land: {}. {} neither on origin nor landed by Nitely, so Nitely uses none of {base} until it is explained, and leaves {base} as it is: push {} if {} there, or take {} off {base} yourself",
+        if n == 1 { "" } else { "s" },
+        stray.join("; "),
+        if n == 1 { "It is" } else { "They are" },
+        if n == 1 { "it" } else { "them" },
+        if n == 1 { "it belongs" } else { "they belong" },
+        if n == 1 { "it" } else { "them" },
+    );
 }
 
 /// How long a fast-forward of the main checkout may take, for telling its lock from a later one.
@@ -1066,6 +1116,8 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
         if let Some(why) = left_index_lock(root, INDEX_LOCK_GRACE_SECS) {
             bail!("{why}");
         }
+        // Never rebase onto, or push, a commit nobody landed (NIT-762).
+        refuse_stray(root, &base)?;
     }
     // A goal's checkpoint holds the shared goal branch, merges of main included: main is merged
     // into it, never rebased under it.
@@ -2458,7 +2510,7 @@ when_changed = ["billing"]
         let path = f.repo.join(playbook::PLAYBOOK_PATH);
         let pb = std::fs::read_to_string(&path).unwrap().replacen("[[land.after]]", &format!("[land]\nby = \"{mode}\"\n[[land.after]]"), 1);
         std::fs::write(&path, pb).unwrap();
-        sh(&f.repo, &["commit", "-q", "-am", mode]);
+        crate::test_repo::commit_on_main(&f.repo, mode);
     }
 
     fn state(f: &Fixture, key: &str) -> String {

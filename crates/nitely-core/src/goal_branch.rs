@@ -633,6 +633,7 @@ pub(crate) fn prepare(db: &Db, root: &Path, pb: &Playbook, gb: &GoalBranch, acto
     match (have_local, have_remote) {
         (None, None) => {
             let base = pb.integration_branch();
+            crate::land::refuse_stray(root, base).with_context(|| format!("{} was not made", gb.branch))?;
             let from = rev(root, base)?;
             git(root, &["branch", &gb.branch, &from])?;
             if origin {
@@ -898,6 +899,13 @@ pub enum Flow {
 /// The caller holds the goal's lock.
 pub(crate) fn merge_main(db: &mut Db, root: &Path, pb: &Playbook, gb: &GoalBranch, actor: &Actor) -> Result<Flow> {
     let base = pb.integration_branch();
+    // Only main as origin has it or Nitely landed it: a stray local commit is merged into no goal
+    // branch, nor pushed with one (NIT-762). Said on the goal; its branch stays as it is.
+    if let Err(e) = crate::land::refuse_stray(root, base) {
+        let why = format!("{e:#}");
+        db.log_event(actor, None, Some(&root.to_string_lossy()), "goal_branch", &format!("Main was not merged into {} (goal {}): {why}", gb.branch, gb.goal))?;
+        bail!("{why}");
+    }
     let main = rev(root, base)?;
     let local = format!("refs/heads/{}", gb.branch);
     let head = rev(root, &local)?;
@@ -2002,6 +2010,53 @@ test_patterns = [\"src/**/*.test.ts\"]
         assert_eq!(f.db.goal_branch(f.goal).unwrap().unwrap().state, "green");
         assert_eq!(f.pointer("goal-1"), f.pointer("main"));
         assert!(f.has("goal-1", "a.txt") && f.has("goal-1", "c.txt"));
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// NIT-762: a commit made in the main checkout by mistake is neither merged into a goal branch
+    /// nor landed and pushed on top of; each refuses, naming it, and leaves main as it is. Once the
+    /// person pushes it, it is origin's and main flows again.
+    #[test]
+    fn a_stray_local_commit_on_main_is_merged_into_no_goal_branch_and_published_by_no_land() {
+        let mut f = fixture("nitely-goal-stray", true);
+        f.db.enable_goal_branch(f.goal, &f.repo, None, Some(10), &f.actor).unwrap();
+        let a = f.issue("A", Some(f.goal));
+        f.work(&a, "a.txt", "a\n");
+        assert!(f.land(&a).landed);
+
+        // An agent whose `cd` failed commits in the main checkout.
+        std::fs::write(f.repo.join("stray.txt"), "someone else's work\n").unwrap();
+        sh(&f.repo, &["add", "stray.txt"]);
+        sh(&f.repo, &["commit", "-q", "-m", "Half-done work"]);
+        let stray = f.head("main");
+        let short_stray = sh(&f.repo, &["rev-parse", "--short", "main"]);
+        let (goal_before, origin_goal_before, origin_main_before) = (f.head("goal-1"), f.head("origin/goal-1"), f.head("origin/main"));
+
+        // The goal branch's refresh refuses and says so on the goal.
+        let said = flow_main_in(&mut f.db, &f.repo, &f.actor);
+        assert!(said.iter().any(|s| s.contains("1 commit Nitely did not land") && s.contains(&short_stray) && s.contains("Half-done work")), "{said:?}");
+        assert_eq!((f.head("goal-1"), f.head("origin/goal-1")), (goal_before, origin_goal_before), "nothing merged or pushed");
+        let logged: i64 = f.db.conn.query_row("SELECT COUNT(*) FROM event WHERE type = 'goal_branch' AND summary LIKE ?1", [format!("%{short_stray}%")], |r| r.get(0)).unwrap();
+        assert_eq!(logged, 1, "said on the goal");
+
+        // A land on main refuses too: nothing rebased onto it, nothing pushed, main left as it is.
+        let c = f.issue("C", None);
+        let wt = f.work(&c, "c.txt", "c\n");
+        f.submit(&wt);
+        let refused = f.land(&c);
+        let error = refused.error.clone().unwrap_or_default();
+        assert!(!refused.landed && error.contains("main has 1 commit Nitely did not land") && error.contains(&short_stray), "{refused:?}");
+        assert_eq!(f.head("main"), stray, "the person's branch is never reset");
+        assert_eq!(f.head("origin/main"), origin_main_before);
+        assert_eq!(sh(&f.base.join("remote.git"), &["rev-parse", "main"]), origin_main_before, "origin never got it");
+        assert!(!f.has("goal-1", "stray.txt"));
+
+        // The person says it belongs: pushed, it is origin's, and lands and refreshes go again.
+        sh(&f.repo, &["push", "-q", "origin", "main"]);
+        let landed = f.land(&c);
+        assert!(landed.landed, "{landed:?}");
+        assert!(landed.goals.iter().any(|g| g.contains("main merged into goal-1")), "{:?}", landed.goals);
+        assert!(f.has("goal-1", "stray.txt") && f.has("goal-1", "c.txt") && f.has("origin/goal-1", "c.txt"));
         std::fs::remove_dir_all(&f.base).ok();
     }
 }
