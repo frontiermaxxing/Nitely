@@ -1443,7 +1443,12 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                     std::thread::sleep(std::time::Duration::from_secs(1));
                 }
             }
-            None => json!(db.lane_runs_by(actor.id(), 5)?),
+            None => {
+                // A look at its last runs is a poll too, about the issue of the newest one.
+                let runs = db.lane_runs_by(actor.id(), 5)?;
+                db.record_status_poll(runs.first().and_then(|r| r.issue.as_deref()), name, actor.id(), 0)?;
+                json!(runs)
+            }
         },
         "submit" => {
             let dir = match task_dir(&config, &db, args, &server.cwd) {

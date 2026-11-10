@@ -3,12 +3,11 @@
 //!
 //! Claude Code runs `nitely wake claude` after each of Nitely's job tools (a PostToolUse hook with
 //! `asyncRewake`, written by `connect`). The hook runs in the background and watches, on the
-//! database, the session's work: submit jobs, land jobs and lane runs it asked for or that run on
-//! an issue it claims, the job or run the tool's own reply names, and a land or quick land that
-//! went on in a process of its own. As soon as one of them ends, it exits 2 with what each ended
-//! one came to and what still runs; Claude Code shows that and wakes the session, even when idle.
-//! While the session holds an issue in review, it keeps watching, so a land another session runs
-//! on it still wakes the claimer. With nothing to watch it exits at once and wakes nobody.
+//! database, the session's own work: submit jobs, land jobs and lane runs it asked for, the job or
+//! run the tool's own reply names, and a land or quick land that went on in a process of its own.
+//! As soon as one of them ends, it exits 2 with what each ended one came to and what still runs;
+//! Claude Code shows that and wakes the session, even when idle. With nothing to watch it exits at
+//! once and wakes nobody. Work another session runs on an issue this one claims is NIT-774.
 //!
 //! One waiter per session: a newer one takes over (the state file's token) and inherits what the
 //! older one still watched, so nothing is dropped and nothing is told twice. No other agent host
@@ -93,9 +92,6 @@ struct State {
     /// a finished job still unread in the database is not told again.
     #[serde(default)]
     told: Vec<String>,
-    /// The last event read for news of the session's claimed issues; None before the first waiter.
-    #[serde(default)]
-    cursor: Option<i64>,
 }
 
 /// How many told pieces the state remembers.
@@ -218,29 +214,6 @@ pub fn scan(db: &Db, actor: &str) -> Result<Watched> {
         runs: ids("SELECT id FROM lane_run WHERE requested_by = ?1 AND state IN ('queued', 'running') AND ?2 = ?2 ORDER BY id")?,
         apart: vec![],
     })
-}
-
-/// What other sessions' work came to on the issues `actor` claims, after event `cursor`: a land
-/// (however it ran, in a job or a process of its own), a land that stopped, a submit's outcome.
-/// Lines, and the cursor to move to.
-pub fn claimed_news(db: &Db, actor: &str, cursor: i64) -> Result<(Vec<String>, i64)> {
-    let mut s = db.conn.prepare(
-        "SELECT id, issue_key, summary FROM event WHERE id > ?2 AND actor != ?1 AND type IN ('landed', 'land_failed', 'submit') \
-         AND issue_key IN (SELECT key FROM issue WHERE claimed_by = ?1) ORDER BY id",
-    )?;
-    let rows: Vec<(i64, String, Option<String>)> = s.query_map(rusqlite::params![actor, cursor], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?.collect::<rusqlite::Result<_>>()?;
-    let next = rows.last().map(|r| r.0).unwrap_or(cursor);
-    Ok((rows.into_iter().map(|(_, key, summary)| format!("{key} (your issue, by another session): {}", summary.unwrap_or_default())).collect(), next))
-}
-
-fn last_event(db: &Db) -> Result<i64> {
-    Ok(db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM event", [], |r| r.get(0))?)
-}
-
-/// Whether the session holds an issue another session may still submit or land: one in review or
-/// waiting on the person.
-fn holds_open_review(db: &Db, actor: &str) -> Result<bool> {
-    Ok(db.conn.query_row("SELECT EXISTS(SELECT 1 FROM issue WHERE claimed_by = ?1 AND state IN ('In Review', 'Needs You', 'Approved'))", [actor], |r| r.get(0))?)
 }
 
 /// What one watched piece came to, or None while it still runs.
@@ -393,8 +366,8 @@ pub enum Woke {
 }
 
 /// Watches `actor`'s work, starting from what the tool call named (`named`) and what the session's
-/// previous waiter still watched, until a piece ends or news of a claimed issue comes (wake), a
-/// newer waiter takes over, or `wait` runs out. Looks every `every`; `open` opens the database for
+/// previous waiter still watched, until a piece ends (wake), a newer waiter takes over, or `wait`
+/// runs out. Looks every `every`; `open` opens the database for
 /// each look, so no connection stays open for an hour.
 pub fn wait(open: &dyn Fn() -> Result<Db>, state_file: &Path, actor: &str, token: &str, named: Watched, wait: std::time::Duration, every: std::time::Duration) -> Result<Woke> {
     let deadline = std::time::Instant::now() + wait;
@@ -403,34 +376,23 @@ pub fn wait(open: &dyn Fn() -> Result<Db>, state_file: &Path, actor: &str, token
         let db = open()?;
         let step = locked(state_file, |state| {
             if first {
-                // Starting while no waiter watched: news older than the recent window is old news.
-                if state.token.is_empty() {
-                    let old: i64 = db.conn.query_row("SELECT COALESCE(MAX(id), 0) FROM event WHERE ts < ?1", [now() - RECENT_SECS], |r| r.get(0))?;
-                    state.cursor = Some(state.cursor.map_or(old, |c| c.max(old)));
-                }
                 state.token = token.to_string();
                 state.watched.add(named.clone());
             } else if state.token != token {
                 return Ok(Some(Woke::Replaced));
             }
-            let cursor = match state.cursor {
-                Some(c) => c,
-                None => last_event(&db)?,
-            };
-            let (mut lines, cursor) = claimed_news(&db, actor, cursor)?;
-            state.cursor = Some(cursor);
             let mut found = scan(&db, actor)?;
             found.submits.retain(|id| !state.told.contains(&format!("submit:{id}")));
             found.lands.retain(|id| !state.told.contains(&format!("land:{id}")));
             found.runs.retain(|id| !state.told.contains(&format!("run:{id}")));
             state.watched.add(found);
-            lines.extend(take_ended(&db, &mut state.watched, &mut state.told)?);
+            let lines = take_ended(&db, &mut state.watched, &mut state.told)?;
             if !lines.is_empty() {
                 // What still runs goes to the next waiter, whoever starts it.
                 state.token.clear();
                 return Ok(Some(Woke::Wake(message(&lines, &state.watched))));
             }
-            if state.watched.is_empty() && !holds_open_review(&db, actor)? {
+            if state.watched.is_empty() {
                 state.token.clear();
                 return Ok(Some(Woke::Nothing));
             }
