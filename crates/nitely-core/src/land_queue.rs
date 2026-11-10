@@ -482,8 +482,9 @@ fn stack_and_land(db: &mut Db, root: &Path, pb: &Playbook, run: i64, batch: Vec<
         bail!("{why}");
     }
     // Never stack onto, or push, a commit nobody landed (NIT-762).
-    land::refuse_stray(root, &base)?;
-    let before = land::rev(root, &base)?;
+    // The commit checked is the one stacked onto; main anywhere else after the gate sends the run
+    // back.
+    let before = land::refuse_stray(root, &base)?;
     let stack = stack_worktree(root, pb, &before)?;
 
     // Stack, oldest first; a change that cannot go on top goes back to its agent.

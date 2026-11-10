@@ -786,32 +786,48 @@ pub(crate) fn landed_ref(base: &str) -> String {
     format!("refs/nitely/landed/{base}")
 }
 
-/// The commits on the local integration branch `base` that neither origin nor Nitely's lands put
-/// there, as `<sha> <subject>`: a commit made in the main checkout by mistake (an agent whose `cd`
-/// failed), which a land would publish and a goal branch would merge (NIT-762). A repo with no
-/// origin keeps its integration branch only here, so its local tip is the truth and none is stray.
-pub(crate) fn stray_commits(root: &Path, base: &str) -> Result<Vec<String>> {
+/// The commits in `tip` (the local integration branch `base`'s, as read once) that neither origin
+/// nor Nitely's lands put there, as `<sha> <subject>`: a commit made in the main checkout by mistake
+/// (an agent whose `cd` failed), which a land would publish and a goal branch would merge
+/// (NIT-762). A repo with no origin keeps its integration branch only here, and one whose origin
+/// has no such branch yet has published none: its local tip is the truth and none is stray.
+pub(crate) fn stray_commits(root: &Path, base: &str, tip: &str) -> Result<Vec<String>> {
     if !playbook::has_origin(root) {
         return Ok(vec![]);
     }
-    let known: Vec<String> = [format!("refs/remotes/origin/{base}"), landed_ref(base)]
-        .into_iter()
-        .filter(|r| git(root, &["rev-parse", "--verify", "--quiet", r]).is_ok())
-        .collect();
-    if known.is_empty() {
-        return Ok(vec![]);
+    let remote = format!("refs/remotes/origin/{base}");
+    let known = |root: &Path| -> Vec<String> {
+        [remote.clone(), landed_ref(base)].into_iter().filter(|r| git(root, &["rev-parse", "--verify", "--quiet", r]).is_ok()).collect()
+    };
+    let mut trusted = known(root);
+    // No record of what origin or Nitely put there (origin added, never fetched): ask origin.
+    if trusted.is_empty() {
+        let fetched = git_remote(root, &["fetch", "--quiet", "origin", &format!("+refs/heads/{base}:{remote}")]);
+        trusted = known(root);
+        if trusted.is_empty() {
+            match git_remote(root, &["ls-remote", "--heads", "origin", base]) {
+                Ok(heads) if heads.trim().is_empty() => return Ok(vec![]),
+                _ => bail!(
+                    "Nitely cannot tell which commits on {base} origin has: there is no {remote} here and fetching it failed ({}); fetch origin, then try again",
+                    fetched.err().map(|e| first_line(&e)).unwrap_or_else(|| "origin answered with nothing".into())
+                ),
+            }
+        }
     }
-    let mut args = vec!["log", "--format=%h %s", base, "--not"];
-    args.extend(known.iter().map(String::as_str));
+    let mut args = vec!["log", "--format=%h %s", tip, "--not"];
+    args.extend(trusted.iter().map(String::as_str));
     Ok(git(root, &args)?.lines().map(str::to_string).filter(|l| !l.trim().is_empty()).collect())
 }
 
-/// Refuses while `base` holds stray commits (`stray_commits`), naming them. Nitely never moves the
-/// person's branch: whether they belong there is theirs to say.
-pub(crate) fn refuse_stray(root: &Path, base: &str) -> Result<()> {
-    let stray = stray_commits(root, base)?;
+/// The integration branch `base`'s tip, read once, when it holds no stray commit
+/// (`stray_commits`); refused otherwise, naming them. The caller builds on this commit, never on
+/// `base` read again, so a commit made after the check is never used. Nitely never moves the
+/// person's branch: whether a stray commit belongs there is theirs to say.
+pub(crate) fn refuse_stray(root: &Path, base: &str) -> Result<String> {
+    let tip = rev(root, base)?;
+    let stray = stray_commits(root, base, &tip)?;
     if stray.is_empty() {
-        return Ok(());
+        return Ok(tip);
     }
     let n = stray.len();
     bail!(
@@ -1102,6 +1118,7 @@ pub fn after_steps_running(root: &Path) -> bool {
 #[allow(clippy::too_many_arguments)]
 fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, actor: &Actor, report: &mut Landed, goal: Option<&crate::goal_branch::GoalBranch>) -> Result<()> {
     let base = report.base.clone();
+    let mut checked: Option<String> = None;
     // A repo with no origin is local: what lands stays in it.
     let push = opts.push && playbook::has_origin(root);
     if goal.is_none() {
@@ -1116,8 +1133,9 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
         if let Some(why) = left_index_lock(root, INDEX_LOCK_GRACE_SECS) {
             bail!("{why}");
         }
-        // Never rebase onto, or push, a commit nobody landed (NIT-762).
-        refuse_stray(root, &base)?;
+        // Never rebase onto, or push, a commit nobody landed (NIT-762): what lands is built on
+        // the commit checked, and the land stops if main is anywhere else at the end.
+        checked = Some(refuse_stray(root, &base)?);
     }
     // A goal's checkpoint holds the shared goal branch, merges of main included: main is merged
     // into it, never rebased under it.
@@ -1137,16 +1155,19 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
     let wt = worktree.to_string_lossy().into_owned();
     check_worktree(&worktree, &branch)?;
 
-    let before = rev(root, &base)?;
+    let before = match checked {
+        Some(tip) => tip,
+        None => rev(root, &base)?,
+    };
     // Submodules that land with the repo: their work must be what the branch points at, then each
     // is rebased onto its own integration branch first (docs/playbooks.md).
     crate::submodules::check_pointers(pb, &worktree)?;
     // An item into a goal branch moves no pointer of its own (one that does lands here alone,
     // NIT-746): a pointer it differs by came from main, a rollback too, and must stay as main has it.
-    let moving = if goal.is_some() { Vec::new() } else { crate::submodules::rebase(root, pb, &worktree, &base)? };
-    if checkpoint && git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
+    let moving = if goal.is_some() { Vec::new() } else { crate::submodules::rebase(root, pb, &worktree, &before)? };
+    if checkpoint && git(root, &["merge-base", "--is-ancestor", &before, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Merging {base} into the checkpoint {branch}"))?;
-        if git(&worktree, &["merge", "--no-ff", "--no-edit", "-m", &format!("Merge {base} into {branch}"), &base]).is_err() {
+        if git(&worktree, &["merge", "--no-ff", "--no-edit", "-m", &format!("Merge {base} into {branch}"), &before]).is_err() {
             report.conflicts = git(&worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
             git(&worktree, &["merge", "--abort"]).ok();
             bail!(
@@ -1154,10 +1175,10 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
                 report.conflicts.join(", ")
             );
         }
-    } else if git(root, &["merge-base", "--is-ancestor", &base, &branch]).is_err() {
+    } else if git(root, &["merge-base", "--is-ancestor", &before, &branch]).is_err() {
         db.log_event(actor, Some(key), Some(&wt), "status", &format!("Rebasing {branch} onto {base}"))?;
         let union = crate::rebase_review::union_args(pb, &worktree)?;
-        let rebased = crate::submodules::rebase_repo(&worktree, &base, &moving, &union);
+        let rebased = crate::submodules::rebase_repo(&worktree, &before, &moving, &union);
         if let Err(e) = rebased {
             if !crate::test_command_merge::finish_rebase(&worktree).unwrap_or(false) {
                 report.conflicts = git(&worktree, &["diff", "--name-only", "--diff-filter=U"])?.lines().map(str::to_string).collect();
@@ -1179,7 +1200,7 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
     // A passing review the rebase changed more than conflicts in is brought up to date here, at
     // the land, not in a new submit round (NIT-700). A checkpoint merges its base instead.
     if goal.is_none() && !checkpoint {
-        crate::rebase_review::review_at_land(db, root, pb, key, &worktree, &base, &branch, actor)?;
+        crate::rebase_review::review_at_land(db, root, pb, key, &worktree, &before, &branch, actor)?;
     }
     let head = rev(root, &branch)?;
     report.approval = Some(match goal {
@@ -1195,10 +1216,10 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
             }
             check_item(db, key, pb, &worktree, &base, gb)?
         },
-        None => check_approval(db, pb, key, &worktree, &base, &branch)?,
+        None => check_approval(db, pb, key, &worktree, &before, &branch)?,
     });
     let project = db.issue(key)?.and_then(|i| i.project);
-    crate::private_terms::check(project.as_deref(), &worktree, &base)?;
+    crate::private_terms::check(project.as_deref(), &worktree, &before)?;
 
     // In a repo with build lanes, a land request: first in line, and answered from the record when
     // this same tree passed its gate already (a rebase that changed nothing). An item hop runs the
@@ -1230,7 +1251,7 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
     }
     crate::project_modes::check_gate_authority(db, &[key], report.gate.as_ref().expect("gate recorded"))?;
     crate::verification::check_gate_authority(db,root,&worktree,key,report.gate.as_ref().expect("gate recorded"))?;
-    report.approval = Some(check_approval(db, &Playbook::load(root)?, key, &worktree, &base, &branch)?);
+    report.approval = Some(check_approval(db, &Playbook::load(root)?, key, &worktree, &before, &branch)?);
 
     if push {
         // The pull request should show the commits that land, not the ones from before the rebase:
@@ -1242,7 +1263,7 @@ fn run(db: &mut Db, root: &Path, pb: &Playbook, key: &str, opts: &LandOptions, a
         }
     }
 
-    report.commits = git(root, &["log", "--oneline", &format!("{base}..{head}")])?.lines().map(str::to_string).collect();
+    report.commits = git(root, &["log", "--oneline", &format!("{before}..{head}")])?.lines().map(str::to_string).collect();
     let held = crate::lanes::hold_checkout(root, pb)?;
     if held.is_some() && git(root, &["branch", "--show-current"])?.trim() != base {
         bail!("the main checkout left {base} during the gate; land again once it is back on {base}");

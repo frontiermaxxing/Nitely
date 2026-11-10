@@ -633,8 +633,7 @@ pub(crate) fn prepare(db: &Db, root: &Path, pb: &Playbook, gb: &GoalBranch, acto
     match (have_local, have_remote) {
         (None, None) => {
             let base = pb.integration_branch();
-            crate::land::refuse_stray(root, base).with_context(|| format!("{} was not made", gb.branch))?;
-            let from = rev(root, base)?;
+            let from = crate::land::refuse_stray(root, base).with_context(|| format!("{} was not made", gb.branch))?;
             git(root, &["branch", &gb.branch, &from])?;
             if origin {
                 git_remote(root, &["push", "--quiet", "origin", &format!("{from}:{local}")]).with_context(|| format!("pushing the new {}", gb.branch))?;
@@ -901,12 +900,14 @@ pub(crate) fn merge_main(db: &mut Db, root: &Path, pb: &Playbook, gb: &GoalBranc
     let base = pb.integration_branch();
     // Only main as origin has it or Nitely landed it: a stray local commit is merged into no goal
     // branch, nor pushed with one (NIT-762). Said on the goal; its branch stays as it is.
-    if let Err(e) = crate::land::refuse_stray(root, base) {
-        let why = format!("{e:#}");
-        db.log_event(actor, None, Some(&root.to_string_lossy()), "goal_branch", &format!("Main was not merged into {} (goal {}): {why}", gb.branch, gb.goal))?;
-        bail!("{why}");
-    }
-    let main = rev(root, base)?;
+    let main = match crate::land::refuse_stray(root, base) {
+        Ok(tip) => tip,
+        Err(e) => {
+            let why = format!("{e:#}");
+            db.log_event(actor, None, Some(&root.to_string_lossy()), "goal_branch", &format!("Main was not merged into {} (goal {}): {why}", gb.branch, gb.goal))?;
+            bail!("{why}");
+        }
+    };
     let local = format!("refs/heads/{}", gb.branch);
     let head = rev(root, &local)?;
     if is_ancestor(root, &main, &head) {
@@ -2031,6 +2032,11 @@ test_patterns = [\"src/**/*.test.ts\"]
         let stray = f.head("main");
         let short_stray = sh(&f.repo, &["rev-parse", "--short", "main"]);
         let (goal_before, origin_goal_before, origin_main_before) = (f.head("goal-1"), f.head("origin/goal-1"), f.head("origin/main"));
+
+        // No record here of origin's main or of Nitely's lands (origin added, never fetched): Nitely
+        // asks origin instead of trusting the local tip.
+        crate::playbook::git(&f.repo, &["update-ref", "-d", "refs/remotes/origin/main"]).unwrap();
+        crate::playbook::git(&f.repo, &["update-ref", "-d", &crate::land::landed_ref("main")]).ok();
 
         // The goal branch's refresh refuses and says so on the goal.
         let said = flow_main_in(&mut f.db, &f.repo, &f.actor);
