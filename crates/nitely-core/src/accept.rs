@@ -7,7 +7,7 @@
 //! next review round is told about them instead of raising them again.
 
 use anyhow::{bail, Context, Result};
-use rusqlite::params;
+use rusqlite::{params, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::approval::{sign, unhex, verify, PHONE_SKEW};
@@ -78,6 +78,7 @@ impl Db {
             bail!("say why the person should accept it as it is: that is what they decide on");
         }
         let review = self.reviews(&issue.key)?.into_iter().find(|r| !r.reviewer.is_empty()).with_context(|| format!("{} has no review yet; submit it first", issue.key))?;
+        self.newest_submit_reviewed(&issue.key, &review)?;
         let blocking: Vec<&Finding> = review.findings.iter().filter(|f| f.priority <= 1).collect();
         let wanted = finding.trim();
         let found = match wanted.parse::<usize>() {
@@ -96,6 +97,33 @@ impl Db {
         }
         let found = found.clone();
         Ok((issue, found, review.reviewer))
+    }
+
+    /// Refuses when `review`, `key`'s latest, is not of its newest submit (NIT-777): that submit is
+    /// still running, or it ran and saved no review, so the findings are of an older change. Judged
+    /// by the order the submits were handed in (job ids), and by which job recorded the review, not
+    /// by heads (a land's rebase moves them) or by when the review was saved (after a newer submit
+    /// was queued, when that submit queued while it ran). A review recorded outside a job (a land's
+    /// review) counts for the newest submit when it was saved once that submit had ended.
+    fn newest_submit_reviewed(&self, key: &str, review: &ReviewRecord) -> Result<()> {
+        let Some((job, state, ended)) = self
+            .conn
+            .query_row("SELECT id, state, ended_at FROM submit_job WHERE issue_key = ?1 COLLATE NOCASE AND state <> 'superseded' ORDER BY id DESC LIMIT 1", [key], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?, r.get::<_, Option<i64>>(2)?)))
+            .optional()?
+        else {
+            return Ok(());
+        };
+        let recorded_by: Option<i64> = self.conn.query_row("SELECT submit_job FROM review WHERE issue_key = ?1 COLLATE NOCASE AND reviewer <> '' ORDER BY ts DESC, id DESC LIMIT 1", [key], |r| r.get(0)).optional()?.flatten();
+        if recorded_by == Some(job) {
+            return Ok(());
+        }
+        if matches!(state.as_str(), "queued" | "running") {
+            bail!("{key}'s latest submit (job {job}) has not finished: wait for its result (submit_status) before asking to accept a finding");
+        }
+        if recorded_by.is_some() || ended.is_none_or(|at| review.ts < at) {
+            bail!("{key}'s latest submit (job {job}) saved no review, so its latest review is of an older change: submit again for a fresh review before asking to accept a finding");
+        }
+        Ok(())
     }
 
     /// Review rounds on `key` stopped converging (`why`): the person decides each P0/P1 finding of
@@ -409,4 +437,49 @@ fn one_line(text: &str) -> Result<String> {
         bail!("keep the reason to one line (500 characters at most)");
     }
     Ok(line)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A finding is put to the person only from a review of the newest submit, judged by the order
+    /// the submits were handed in and by which job recorded the review (NIT-777).
+    #[test]
+    fn a_finding_is_disputed_only_from_the_newest_submits_review() {
+        let file = crate::paths::unique_temp("accept-newest-submit", ".sqlite");
+        let mut db = Db::open(&file).unwrap();
+        db.create_project("APP", "Example").unwrap();
+        let issue = db.create_issue(&crate::NewIssue { project: "APP".into(), title: "Cap the import size".into(), body: "b".into(), evidence: "e".into(), source: "codex".into(), kind: "bug".into(), ..Default::default() }, &Actor::Human).unwrap();
+        let key = issue.key.clone();
+        let job = |db: &Db, state: &str, started: Option<i64>, ended: Option<i64>| {
+            db.conn.execute("INSERT INTO submit_job (issue_key, worktree, branch, head, requested_by, skip_review, local_only, state, queued_at, started_at, ended_at) VALUES (?1, 'w', 'b', 'h', 'codex:test', 0, 1, ?2, 100, ?3, ?4)", params![key, state, started, ended]).unwrap();
+            db.conn.last_insert_rowid()
+        };
+        let review = |db: &Db, ts: i64, by: Option<i64>| {
+            db.conn.execute("INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, findings, ts, submit_job) VALUES (?1, 'p', 'c', 'codex', 'changes', 'agent', ?2, ?3, ?4)",
+                params![key, r#"[{"priority":1,"text":"Reads past the cap: import.rs, read_all"}]"#, ts, by]).unwrap();
+        };
+        let dispute = |db: &Db| db.disputed_finding(&key, "1", "the cap is the caller's");
+
+        // Job A runs; while its review runs, job B is queued. A's review is saved after B was queued.
+        let a = job(&db, "running", Some(110), None);
+        let b = job(&db, "queued", None, None);
+        review(&db, 200, Some(a));
+        db.conn.execute("UPDATE submit_job SET state = 'done', ended_at = 201 WHERE id = ?1", [a]).unwrap();
+        assert!(dispute(&db).unwrap_err().to_string().contains("has not finished"), "B is the newest submit");
+        // B dies waiting for A's lock: it never started and saved no review. A's findings are stale.
+        db.conn.execute("UPDATE submit_job SET state = 'failed', ended_at = 202 WHERE id = ?1", [b]).unwrap();
+        assert!(dispute(&db).unwrap_err().to_string().contains("saved no review"));
+        // A land's review after B ended is of the change as it stands.
+        review(&db, 300, None);
+        dispute(&db).unwrap();
+        // A newer job that recorded its own review: its findings go to the person.
+        let c = job(&db, "done", Some(310), Some(400));
+        assert!(dispute(&db).is_err(), "the land's review predates C");
+        review(&db, 390, Some(c));
+        dispute(&db).unwrap();
+        drop(db);
+        std::fs::remove_file(file).ok();
+    }
 }
