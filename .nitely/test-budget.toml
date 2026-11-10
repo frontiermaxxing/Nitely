@@ -38,6 +38,7 @@ nitely_core = 60
 "submit::tests::submits_with_a_review_and_routes_flags_to_a_human" = "submit with a real reviewer, a flag routed to a person, a push"
 "submit::tests::basic_submission_and_land_run_only_basic_checks_and_enqueue_an_audit" = "reduced checks, land and the audit they enqueue"
 "submit::tests::a_confirmed_p1_stays_with_a_worker_without_a_risk_waiver" = "review rounds that stall: the follow-up, the shared-cause question asked once per run (NIT-735), a decline starting the count over"
+"submit::tests::a_quick_change_has_its_review_flags_answered_before_it_lands" = "the quick path in a repo with review flags (NIT-764): a reviewer answers only the flags, a no lands, a yes waits for the person"
 "submit_job::tests::a_submit_hands_in_at_once_and_the_job_brings_the_result_back" = "async submit: enqueue, supersede, run, deliver"
 "affected_tests::tests::reverse_imports_select_helpers_and_tests_but_execute_whole_suite" = "the selector against real git: commit ids, tree, policy blob"
 "affected_tests::tests::a_repo_of_thirty_thousand_files_still_gets_a_reduced_selection" = "the selector on a 30,000-file tree: indexing and selecting at scale (NIT-726)"
