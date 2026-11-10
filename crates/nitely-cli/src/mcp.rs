@@ -458,7 +458,7 @@ fn tools() -> Value {
     json!([
         {
             "name": "pipeline",
-            "description": "How the project's pipeline performed per week, oldest first (NIT-703): reviews per landed issue, the changes rate and new blocking findings per review by round; blocking findings the person accepted or split to a follow-up; lane wait against run time per kind; land stops by cause; questions to the person per landing; per issue, claim to first submit, submit rounds, fixing between rounds and last submit to landed (medians); tokens per landed issue and the median context per model call. Issues run in parallel, so their times overlap.",
+            "description": "How the project's pipeline performed per week, oldest first (NIT-703): reviews per landed issue, the changes rate and new blocking findings per review by round; blocking findings the person accepted or split to a follow-up; lane wait against run time per kind; land stops by cause; questions to the person per landing; per issue, claim to first submit, submit rounds, fixing between rounds and last submit to landed (medians); tokens per landed issue and the median context per model call; submit_status and run_status polls per landed issue, and how many asked to wait under a minute (NIT-765). Issues run in parallel, so their times overlap.",
             "inputSchema": { "type": "object", "properties": {
                 "project": { "type": "string" },
                 "weeks": { "type": "integer", "minimum": 1, "maximum": 52, "description": "How many weeks back, this one included; default 4." },
@@ -1425,6 +1425,8 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
         "run_status" => match args.get("id").and_then(Value::as_i64) {
             Some(id) => {
                 let wait = status_wait(args.get("wait_seconds").and_then(Value::as_u64), wait_cap());
+                let issue = db.lane_run(id)?.and_then(|r| r.issue);
+                db.record_status_poll(issue.as_deref(), name, actor.id(), wait)?;
                 let deadline = std::time::Instant::now() + std::time::Duration::from_secs(wait);
                 loop {
                     let run = db.lane_run(id)?.with_context(|| format!("no run {id}"))?;
@@ -1465,7 +1467,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 job_json(&db, &job, &actor, detail(args))?
             } else if !job.finished() {
                 json!(format!(
-                    "Handed in as submit job {}: the gate and the review run in the background. Pick up other work (next_task) or stop; the result comes as a notice on your next nitely call, or from submit_status with job {} and wait_seconds {}.",
+                    "Handed in as submit job {}: the gate and the review run in the background. Pick up other work (next_task), or end your turn: on Claude Code, Nitely wakes you when it ends. Where nothing wakes you, make one submit_status call with job {} and wait_seconds {} at a time, never short polls; the result also comes as a notice on your next nitely call.",
                     job.id,
                     job.id,
                     wait_cap().as_secs()
@@ -1481,6 +1483,7 @@ fn run_tool_as(server: &Server, name: &str, args: &Value, params: &Value, detach
                 (None, None) => bail!("pass the job id submit returned, or the issue key"),
             };
             let seconds = args.get("wait_seconds").and_then(Value::as_u64).unwrap_or(0).min(600).min(wait_cap().as_secs());
+            db.record_status_poll(Some(&job.issue), name, actor.id(), seconds)?;
             let job = nitely_core::submit_job::wait(&db, job.id, std::time::Duration::from_secs(seconds))?;
             job_json(&db, &job, &actor, detail(args))?
         }
@@ -2141,7 +2144,7 @@ fn short_job(job: &nitely_core::submit_job::Job, now: i64, cap: u64) -> Value {
     if !job.finished() {
         let since = now - job.started_at.unwrap_or(job.queued_at);
         return json!(format!(
-            "Submit job {} of {} is {} ({} s so far). The result comes as a notice on your next nitely call, or call submit_status with job {} and wait_seconds {cap}: one long wait costs less than many short ones.",
+            "Submit job {} of {} is {} ({} s so far). On Claude Code, end your turn and Nitely wakes you when it ends. Otherwise call submit_status with job {} and wait_seconds {cap}: one long wait costs less than many short ones. The result also comes as a notice on your next nitely call.",
             job.id, job.issue, job.state, since.max(0), job.id
         ));
     }

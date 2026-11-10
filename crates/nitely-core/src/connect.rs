@@ -574,6 +574,37 @@ pub(crate) fn is_nitely_mcp(command: Option<&str>, args: Option<Vec<&str>>) -> b
     command.is_some_and(|c| is_nitely_exe(&shell_word(c))) && args == Some(vec!["mcp"])
 }
 
+/// The PostToolUse hook that wakes a session when the work its submit, land or lane run started
+/// ends (NIT-765, wake.rs): run in the background (`async`), and `asyncRewake` wakes the session,
+/// idle or not, when it exits 2. Claude Code times out even a background hook, so it gets the hour
+/// the waiter allows for. One entry of its own; one already there keeps its place and is brought
+/// to these settings (and, with `repoint`, to this install's path).
+fn wake_hook(hooks: &mut serde_json::Map<String, Value>, nitely: &str, repoint: bool) {
+    let wanted = json!({ "type": "command", "command": format!("{} wake claude", shell_word(nitely)), "timeout": crate::wake::HOOK_TIMEOUT, "async": true, "asyncRewake": true });
+    let list = hooks.entry("PostToolUse".to_string()).or_insert_with(|| json!([]));
+    let mut present = false;
+    for entry in list.as_array_mut().into_iter().flatten() {
+        let mut ours = false;
+        for h in entry.get_mut("hooks").and_then(Value::as_array_mut).into_iter().flatten() {
+            let command = h.get("command").and_then(Value::as_str).unwrap_or_default().to_string();
+            if !command.strip_suffix(" wake claude").is_some_and(is_nitely_exe) {
+                continue;
+            }
+            ours = true;
+            let keep = if repoint { wanted["command"].clone() } else { json!(command) };
+            *h = wanted.clone();
+            h["command"] = keep;
+        }
+        if ours {
+            entry["matcher"] = json!(crate::wake::matcher());
+            present = true;
+        }
+    }
+    if let (false, Some(a)) = (present, list.as_array_mut()) {
+        a.push(json!({ "matcher": crate::wake::matcher(), "hooks": [wanted] }));
+    }
+}
+
 fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
     let dir = agent_home().join(".claude");
     let found = installed("claude", &dir) || (agent_home_override().is_some() && agent_home().join(".claude.json").exists());
@@ -623,9 +654,10 @@ fn claude_plan(nitely: &str, repoint: bool) -> Result<AgentPlan> {
             }
         }
     }
+    wake_hook(hooks, nitely, repoint);
     changes.push(Change::json(
         &settings_path,
-        "hooks that show each session's status, give it the repo's instructions at start, tell Nitely which session makes each MCP call, and remind a build in a light worktree to use `run`",
+        "hooks that show each session's status, give it the repo's instructions at start, tell Nitely which session makes each MCP call, remind a build in a light worktree to use `run`, and wake a session when its submit, land or lane run ends",
         &settings,
     ));
 
@@ -1190,6 +1222,10 @@ args = [\"nitely\", \"mcp\"]
         };
         assert_eq!(sorted(documented), sorted(written));
         assert!(hooks.values().all(|list| list[0]["hooks"][0]["command"] == "nitely hook claude"));
+        // The wake hook (NIT-765) as `connect` writes it for `nitely` on PATH.
+        let mut written = serde_json::Map::new();
+        wake_hook(&mut written, "nitely", true);
+        assert_eq!(hooks["PostToolUse"][1], written["PostToolUse"][0]);
     }
 
     #[test]

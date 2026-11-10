@@ -43,6 +43,18 @@ pub struct Week {
     pub issues: IssueTimes,
     /// None when the agents' session files could not be read.
     pub tokens: Option<Tokens>,
+    pub polls: Polls,
+}
+
+/// The `submit_status` and `run_status` calls agents made about the issues landed this week, up to
+/// each one's land (NIT-765). Each is a model call over the agent's whole context, which waking the
+/// agent when its work ends saves.
+#[derive(Debug, Clone, Default, Serialize, PartialEq)]
+pub struct Polls {
+    pub polls: usize,
+    pub per_landed: Option<f64>,
+    /// Calls that asked to wait less than a minute: the short polls the instructions rule out.
+    pub short: usize,
 }
 
 /// The reviews of the issues landed this week.
@@ -378,6 +390,18 @@ fn week(db: &Db, usage: Option<&[crate::usage::Attributed]>, project: &str, from
         Tokens { per_landed: (!keys.is_empty()).then(|| spent / keys.len() as u64), calls: context.len(), median_context: median(&mut context).map(|m| m as u64) }
     });
 
+    let mut polls = Polls::default();
+    for (key, at) in &landed_at {
+        let (n, short): (i64, i64) = c.query_row(
+            "SELECT COUNT(*), COALESCE(SUM(waited < 60), 0) FROM status_poll WHERE issue_key = ?1 COLLATE NOCASE AND ts <= ?2",
+            rusqlite::params![key, at],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        polls.polls += n as usize;
+        polls.short += short as usize;
+    }
+    polls.per_landed = ratio(polls.polls, keys.len());
+
     Ok(Week {
         week: chrono::DateTime::from_timestamp(from, 0).map(|d| d.format("%Y-%m-%d").to_string()).unwrap_or_default(),
         landed: keys.len(),
@@ -388,6 +412,7 @@ fn week(db: &Db, usage: Option<&[crate::usage::Attributed]>, project: &str, from
         asks: Asks { asks, about_findings: about, per_landed: ratio(asks, keys.len()) },
         issues: issue_times(&landed),
         tokens,
+        polls,
     })
 }
 
