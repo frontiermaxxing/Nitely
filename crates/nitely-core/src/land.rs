@@ -530,12 +530,21 @@ pub fn after_auto_land(db: &mut Db, key: &str, landed: &Result<Landed>, actor: &
             }
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
             // It waits only for the person's approval: nothing in it is to fix, so it stays where
-            // the Inbox shows it until they approve it or send it back (NIT-783).
+            // the Inbox shows it until they approve it or send it back (NIT-783). The land can
+            // return minutes after it stopped (it drains the rest of its queue first), and the
+            // person may have decided meanwhile: approved it, or sent it back. That decision stands;
+            // only a change still where its submit left it (In Review) goes to them.
             if why.contains(crate::land_rules::WAITS_FOR_A_PERSON) {
-                if issue.origin == "nitely" && !matches!(issue.state.as_str(), "Needs You" | "Approved") {
+                if issue.origin == "nitely" && issue.state == "In Review" {
                     db.move_issue(key, "Needs You", None, None, actor)?;
                 }
-                return Ok((state(db)?, crate::land_rules::waits_for_approval_next(&why)));
+                let now = state(db)?;
+                let next = match now.as_str() {
+                    "Needs You" => crate::land_rules::waits_for_approval_next(&why),
+                    "Approved" => "The person approved it while this land ran: Nitely lands it on that approval. There is nothing to do.".to_string(),
+                    other => format!("It waited for the person's approval, and the person has since moved it to {other}: follow what they asked for on the issue."),
+                };
+                return Ok((now, next));
             }
             // Sent back to Needs You for an unsigned approval: the person approves it again.
             if issue.origin == "nitely" && issue.state != "In Progress" && !why.contains(crate::approval::UNSIGNED) {
@@ -2704,6 +2713,40 @@ when_changed = ["billing"]
         assert!(r.approval.unwrap().contains("approved by a human"));
         assert!(f.repo.join("billing.txt").exists());
         std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// An automatic land that stopped for the person's approval returns after it drained its queue,
+    /// minutes later (NIT-783, as AND-1717 showed): whatever the person decided meanwhile stands.
+    /// Only a change still where its submit left it goes to them; nothing tells its agent to fix it.
+    #[test]
+    fn a_land_that_waited_for_the_person_keeps_what_they_decided_meanwhile() {
+        let file = crate::paths::unique_temp("land-waits-person", ".sqlite");
+        let mut db = Db::open(&file).unwrap();
+        db.create_project("APP", "Example").unwrap();
+        let lander = Actor::Agent(AUTO_LANDER.into());
+        let why = crate::land_rules::waits_for_a_person(&["billing and money: billing.rs".into(), "codex review: money or release logic".into()]);
+        let stopped = |key: &str| Ok(Landed { issue: key.into(), error: Some(why.clone()), ..Default::default() });
+        let issue = |db: &mut Db, title: &str, state: &str| {
+            let i = db.create_issue(&crate::NewIssue { project: "APP".into(), title: title.into(), body: "b".into(), evidence: "e".into(), source: "codex".into(), kind: "feature".into(), allow_similar: true, ..Default::default() }, &Actor::Human).unwrap();
+            db.conn.execute("UPDATE issue SET state = ?2 WHERE key = ?1", [&i.key, state]).unwrap();
+            i.key
+        };
+        // Still where its submit left it: to the person, and its agent has nothing to do.
+        let waiting = issue(&mut db, "Rate rounding", "In Review");
+        let (state, next) = after_auto_land(&mut db, &waiting, &stopped(&waiting), &lander).unwrap();
+        assert_eq!(state, "Needs You");
+        assert!(next.contains("nothing to do") && next.contains("billing and money") && !next.contains("Fix it"), "{next}");
+        // Approved while the land drained its queue: the approval stands, and the app lands it.
+        let approved = issue(&mut db, "Gateway fee", "Approved");
+        let (state, next) = after_auto_land(&mut db, &approved, &stopped(&approved), &lander).unwrap();
+        assert_eq!(state, "Approved", "{next}");
+        // Sent back meanwhile: it stays with whoever the person sent it to.
+        let sent_back = issue(&mut db, "Refund copy", "Todo");
+        let (state, next) = after_auto_land(&mut db, &sent_back, &stopped(&sent_back), &lander).unwrap();
+        assert_eq!(state, "Todo");
+        assert!(!next.contains("nothing to do"), "{next}");
+        drop(db);
+        std::fs::remove_file(file).ok();
     }
 
     /// An approval holds for the patch it saw through a land-time review by another reviewer that
