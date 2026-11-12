@@ -529,6 +529,14 @@ pub fn after_auto_land(db: &mut Db, key: &str, landed: &Result<Landed>, actor: &
                 return Ok((state(db)?, format!("Nitely tried to land it and stopped: {why}\nNothing in the change is to fix: land it again.")));
             }
             let issue = db.issue(key)?.with_context(|| format!("no issue {key}"))?;
+            // It waits only for the person's approval: nothing in it is to fix, so it stays where
+            // the Inbox shows it until they approve it or send it back (NIT-783).
+            if why.contains(crate::land_rules::WAITS_FOR_A_PERSON) {
+                if issue.origin == "nitely" && !matches!(issue.state.as_str(), "Needs You" | "Approved") {
+                    db.move_issue(key, "Needs You", None, None, actor)?;
+                }
+                return Ok((state(db)?, crate::land_rules::waits_for_approval_next(&why)));
+            }
             // Sent back to Needs You for an unsigned approval: the person approves it again.
             if issue.origin == "nitely" && issue.state != "In Progress" && !why.contains(crate::approval::UNSIGNED) {
                 db.move_issue(key, "In Progress", None, None, actor)?;
@@ -1581,7 +1589,10 @@ impl Db {
         let base = &reviews[approved];
         let mut unchanged = true;
         for r in &reviews[..approved] {
-            unchanged &= r.patch_id == base.patch_id && self.review_passes(key, r)? && r.reasons.iter().all(|x| base.reasons.contains(x));
+            // The same conditions, whichever reviewer answered them: a land-time review by another
+            // reviewer answering the same flag asks nothing new of the person (NIT-783).
+            let seen = |x: &String| base.reasons.iter().any(|b| crate::land_rules::reason_condition(b) == crate::land_rules::reason_condition(x));
+            unchanged &= r.patch_id == base.patch_id && self.review_passes(key, r)? && r.reasons.iter().all(seen);
         }
         Ok((self.review_passes(key, base)? && unchanged).then_some(at))
     }
@@ -2692,6 +2703,53 @@ when_changed = ["billing"]
         assert!(r.warnings.iter().any(|w| w.contains("exit 3")), "{r:?}");
         assert!(r.approval.unwrap().contains("approved by a human"));
         assert!(f.repo.join("billing.txt").exists());
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// An approval holds for the patch it saw through a land-time review by another reviewer that
+    /// answers the same flag (NIT-783): the reason names its reviewer, the condition is the same.
+    #[test]
+    fn an_approval_holds_through_another_reviewers_passing_review_of_the_same_patch() {
+        let mut f = fixture();
+        let (b, _) = f.submitted("Billing fix", "billing.txt", "x");
+        assert_eq!(state(&f, &b), "Needs You");
+        // As in the field: the first reviewer answered a flag yes, which names it.
+        f.db.conn.execute("UPDATE review SET reasons = json_insert(reasons, '$[#]', 'claude review: money or release logic') WHERE id = (SELECT MAX(id) FROM review WHERE issue_key = ?1)", [&b]).unwrap();
+        approve(&mut f.db, &b);
+        let base = f.db.reviews(&b).unwrap().remove(0);
+        let flagged: Vec<String> = base.reasons.iter().filter(|r| crate::land_rules::reason_condition(r) != r.as_str()).cloned().collect();
+        assert_eq!(flagged, ["claude review: money or release logic"], "{:?}", base.reasons);
+        // The land reviews it again, by another reviewer, which answers the same flag yes.
+        let land_review = |reasons: &[String]| {
+            f.db.conn.execute(
+                "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, after_event) VALUES (?1, ?2, ?3, 'codex', 'pass', 'human', ?4, '[]', ?5, (SELECT MAX(id) FROM event))",
+                rusqlite::params![b, base.patch_id, base.commit_sha, serde_json::to_string(reasons).unwrap(), now()],
+            ).unwrap();
+        };
+        let mut again = base.reasons.clone();
+        again.extend(flagged.iter().map(|r| format!("codex review: {}", crate::land_rules::reason_condition(r))));
+        land_review(&again);
+        assert!(f.db.standing_approval(&b).unwrap().is_some(), "the approval stands: {again:?}");
+        let r = f.land(&b);
+        assert!(r.landed, "it lands on the approval given: {r:?}");
+        assert_eq!(state(&f, &b), "Done");
+        std::fs::remove_dir_all(&f.base).ok();
+    }
+
+    /// A land-time review that raises a condition the approval did not see asks the person again.
+    #[test]
+    fn a_new_condition_at_land_asks_the_person_again() {
+        let mut f = fixture();
+        let (b, _) = f.submitted("Billing fix", "billing.txt", "x");
+        approve(&mut f.db, &b);
+        let base = f.db.reviews(&b).unwrap().remove(0);
+        let mut more = base.reasons.clone();
+        more.push("codex review: the change alters a release".into());
+        f.db.conn.execute(
+            "INSERT INTO review (issue_key, patch_id, commit_sha, reviewer, verdict, approver, reasons, findings, ts, after_event) VALUES (?1, ?2, ?3, 'codex', 'pass', 'human', ?4, '[]', ?5, (SELECT MAX(id) FROM event))",
+            rusqlite::params![b, base.patch_id, base.commit_sha, serde_json::to_string(&more).unwrap(), now()],
+        ).unwrap();
+        assert!(f.db.standing_approval(&b).unwrap().is_none());
         std::fs::remove_dir_all(&f.base).ok();
     }
 

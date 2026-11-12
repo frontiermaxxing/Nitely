@@ -389,7 +389,7 @@ fn decide(db: &mut Db, root:&Path, rules: &ReviewRules, w: &Waiting, mut review:
         if state.1 && state.0 != "Needs You" {
             db.move_issue(key, "Needs You", None, None, actor)?;
         }
-        return Ok(Err(format!("this change waits for a human ({}); it lands once they approve it in Nitely, after the review", reasons.join("; "))));
+        return Ok(Err(crate::land_rules::waits_for_a_person(&reasons)));
     }
     db.add_note(key, &format!("Review by {by} at its land passed"), "submit", actor)?;
     Ok(Ok(()))

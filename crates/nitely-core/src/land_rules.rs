@@ -225,7 +225,28 @@ pub fn approved_by_a_person(reasons: &[String]) -> String {
 
 /// Why a change that needs a person and has no approval waits.
 pub fn waits_for_a_person(reasons: &[String]) -> String {
-    format!("this change waits for a human ({}); it lands once they approve it in Nitely, after the review", reasons.join("; "))
+    format!("{WAITS_FOR_A_PERSON} ({}); it lands once they approve it in Nitely, after the review", reasons.join("; "))
+}
+
+/// How a land that stopped only for the person's approval begins its reason: nothing in the change
+/// is to fix, so the issue waits in Needs You, where the Inbox shows it (NIT-783).
+pub const WAITS_FOR_A_PERSON: &str = "this change waits for a human";
+
+/// What the agent is told when its change waits only for the person's approval (NIT-783).
+pub fn waits_for_approval_next(why: &str) -> String {
+    let reasons = why.split_once(WAITS_FOR_A_PERSON).and_then(|(_, r)| r.trim().strip_prefix('(')).and_then(|r| r.split_once("); it lands")).map(|(r, _)| r).unwrap_or("");
+    let reasons = if reasons.is_empty() { String::new() } else { format!(" ({reasons})") };
+    format!("It waits for the person's approval in the Inbox{reasons}. There is nothing to do: Nitely lands it once they approve it.")
+}
+
+/// A human-approval reason as the condition it names, whichever reviewer raised it: a flag answered
+/// yes reads `<reviewer> review: <reason>`, and a later review by another reviewer answering the same
+/// flag raises the same condition, not a new one (NIT-783).
+pub fn reason_condition(reason: &str) -> &str {
+    match reason.split_once(" review: ") {
+        Some((who, rest)) if !who.is_empty() && !who.contains(' ') => rest,
+        _ => reason,
+    }
 }
 
 /// What a `[[land.after]]` step does for what landed.
