@@ -215,7 +215,7 @@ mod tests {
             ("src-tauri/src/notify.rs", "UNUserNotificationCenter", 0, "as Toast::new; init() skips the Mac's center under the harness"),
             ("src-tauri/src/update.rs", "updater_builder", 0, "base_status disables updates under the harness"),
             ("crates/nitely-crew/src/crew.rs", "nitely_on_path", 1, "the installed nitely, for a crew's supervisor; the app asks harness::nitely instead under the harness"),
-            ("src-tauri/src/lib.rs", "nitely_on_path", 1, "keep_crews_once uses harness::nitely under the harness"),
+            ("src-tauri/src/lib.rs", "nitely_on_path", 2, "keep_crews_once and the auto-land round (NIT-752) use harness::nitely under the harness"),
         ];
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap().to_path_buf();
         let mut files = Vec::new();

@@ -111,6 +111,14 @@ enum Cmd {
     /// asks another build before putting it in place.
     #[command(hide = true)]
     CheckDatabase,
+    /// The commit this build was made from and its time, as JSON: how the app tells the installed
+    /// build is newer than its own (NIT-752).
+    #[command(hide = true)]
+    BuildInfo,
+    /// One round of landing approved changes, for an app older than this build (NIT-752): the
+    /// errors already noted per issue as JSON on stdin, the same after the round on stdout.
+    #[command(hide = true)]
+    LandApproved,
     /// Git, Claude Code, Codex and the GitHub CLI: where each is, its version, and whether it is
     /// signed in, as JSON (NIT-687). Reads no tokens.
     Tools,
@@ -1209,6 +1217,18 @@ fn run(cmd: Cmd) -> Result<()> {
         }
         Cmd::CheckFile { path } => nitely_core::affected_tests::check_file(&path),
         Cmd::Tools => print_json(&nitely_core::tools::check()),
+        Cmd::BuildInfo => {
+            let build = nitely_core::auto_land::Build::stamped(env!("NITELY_COMMIT"), env!("NITELY_COMMIT_TIME")).context("this build does not know its commit")?;
+            println!("{}", serde_json::to_string(&build)?);
+            Ok(())
+        }
+        Cmd::LandApproved => {
+            let mut input = String::new();
+            std::io::stdin().read_to_string(&mut input)?;
+            let out = nitely_core::auto_land::run_round(&mut Db::open_default()?, &Config::load()?, &input)?;
+            println!("{out}");
+            Ok(())
+        }
         Cmd::CheckDatabase => match nitely_core::db::refused_by_this_build(&paths::db_path())? {
             Some(why) => {
                 eprintln!("{why}");
