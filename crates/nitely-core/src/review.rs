@@ -1515,10 +1515,14 @@ pub fn resolve_program(program: &str) -> String {
             static STORE_CODEX: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
             let mut found = STORE_CODEX.lock().unwrap_or_else(|e| e.into_inner());
             if found.as_deref().is_none_or(|exe| !Path::new(exe).exists()) {
+                // The app shares its name's prefix with its runtime packages (OpenAI.CodexPrimaryRuntime.*),
+                // which have no codex.exe and may be listed first: take the one that has it (NIT-784).
                 let out = shell_free_command("powershell")
-                    .args(["-NoProfile", "-Command", "(Get-AppxPackage -Name 'OpenAI.Codex*' | Select-Object -First 1).InstallLocation"])
+                    .args(["-NoProfile", "-Command", "Get-AppxPackage -Name 'OpenAI.Codex*' | ForEach-Object { $_.InstallLocation }"])
                     .output();
-                *found = out.ok().map(|out| Path::new(String::from_utf8_lossy(&out.stdout).trim()).join("app").join("resources").join("codex.exe")).filter(|exe| exe.exists()).map(|exe| exe.to_string_lossy().into_owned());
+                *found = out.ok().and_then(|out| {
+                    String::from_utf8_lossy(&out.stdout).lines().map(str::trim).filter(|dir| !dir.is_empty()).map(|dir| Path::new(dir).join("app").join("resources").join("codex.exe")).find(|exe| exe.exists()).map(|exe| exe.to_string_lossy().into_owned())
+                });
             }
             if let Some(exe) = found.clone() {
                 return exe;
