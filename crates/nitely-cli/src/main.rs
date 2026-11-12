@@ -67,6 +67,14 @@ enum Cmd {
         /// Codex passes its payload as an argument instead of on stdin.
         payload: Option<String>,
     },
+    /// Wait for what this agent session still has running after one of Nitely's job tools, and
+    /// wake it when that ends (NIT-765): Claude Code's PostToolUse hook with asyncRewake runs it in
+    /// the background, and exit 2 with a message on stderr wakes the session. Exits 0 at once when
+    /// nothing is running.
+    Wake {
+        /// Which agent sent it: claude (the only host that can be woken this way).
+        vendor: String,
+    },
     /// Run the MCP server on stdio (register it as `nitely mcp` in your agent's MCP config).
     Mcp,
     /// Run one of the app's read commands and print its JSON, for the browser preview's live mode.
@@ -966,6 +974,17 @@ fn cli_main() {
             }
             return;
         }
+        Cmd::Wake { vendor } => {
+            match run_wake(vendor) {
+                Ok(Some(message)) => {
+                    eprintln!("{message}");
+                    exit(2);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!("nitely wake: {e:#}"),
+            }
+            return;
+        }
         Cmd::Mcp => {
             if let Err(e) = mcp::serve() {
                 eprintln!("nitely mcp: {e:#}");
@@ -1018,6 +1037,43 @@ fn cli_main() {
         eprintln!("nitely: {e:#}");
         exit(1);
     }
+}
+
+/// `nitely wake`: what to wake the session with, or None to wake nobody (NIT-765).
+/// `NITELY_WAKE_WAIT_SECS` and `NITELY_WAKE_EVERY_MS` shorten the wait, for tests.
+fn run_wake(vendor: &str) -> Result<Option<String>> {
+    use nitely_core::wake;
+    let mut input = String::new();
+    std::io::stdin().read_to_string(&mut input)?;
+    let value: serde_json::Value = serde_json::from_str(&input)?;
+    let session = value.get("session_id").and_then(|v| v.as_str()).unwrap_or_default();
+    let tool = value.get("tool_name").and_then(|v| v.as_str()).unwrap_or_default();
+    let Some(tool) = tool.strip_prefix("mcp__nitely__").filter(|t| wake::TOOLS.contains(t)) else {
+        return Ok(None);
+    };
+    if vendor != "claude" || session.is_empty() {
+        return Ok(None);
+    }
+    let actor = format!("claude:{session}");
+    let named = wake::named(tool, value.get("tool_response").unwrap_or(&serde_json::Value::Null));
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|s| s.parse().ok()).unwrap_or(d);
+    let token = format!("{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+    let woke = wake::wait(
+        &Db::open_default,
+        &wake::state_path(&nitely_core::paths::data_dir(), &actor),
+        &actor,
+        &token,
+        named,
+        std::time::Duration::from_secs(env("NITELY_WAKE_WAIT_SECS", wake::WAIT)),
+        std::time::Duration::from_millis(env("NITELY_WAKE_EVERY_MS", 5000)),
+    );
+    Ok(match woke {
+        Ok(wake::Woke::Wake(message)) => Some(message),
+        Ok(wake::Woke::Nothing | wake::Woke::Replaced) => None,
+        // A waiter that cannot go on (a newer build upgraded the database while it watched) says
+        // so, rather than leave the session waiting for a wake that never comes.
+        Err(e) => Some(format!("Nitely stopped watching your work: {e:#}. Make one status call (submit_status, run_status, get_issue) to see where it stands.")),
+    })
 }
 
 fn run_hook(vendor: &str, payload: Option<&str>) -> Result<()> {
@@ -1173,7 +1229,7 @@ fn run(cmd: Cmd) -> Result<()> {
         Cmd::Preview { command } => preview::run(command),
         Cmd::TestSweep { command } => test_sweep::run(command),
         Cmd::Executor { command } => executor::run(command),
-        Cmd::Hook { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),
+        Cmd::Hook { .. } | Cmd::Wake { .. } | Cmd::Mcp | Cmd::McpCall | Cmd::McpCalls | Cmd::McpDetached | Cmd::Ui { .. } => unreachable!(),
         Cmd::PerfSeed => {
             let home = paths::data_dir();
             let real = paths::normalize(&paths::real_data_dir().to_string_lossy());

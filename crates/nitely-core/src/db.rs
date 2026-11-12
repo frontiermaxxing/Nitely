@@ -695,6 +695,13 @@ impl Db {
         Ok(())
     }
 
+    /// Counts one `submit_status` or `run_status` call by `actor` about `issue` (NIT-765), and how
+    /// many seconds it was allowed to wait: each is a model call over the agent's whole context.
+    pub fn record_status_poll(&self, issue: Option<&str>, tool: &str, actor: &str, waited: u64) -> Result<()> {
+        self.conn.execute("INSERT INTO status_poll (issue_key, tool, actor, waited, ts) VALUES (?1, ?2, ?3, ?4, ?5)", params![issue, tool, actor, waited as i64, now()])?;
+        Ok(())
+    }
+
     /// The session that made the tool call `tool_use_id`, if its hook noted it.
     pub fn session_of_tool_call(&self, tool_use_id: &str) -> Result<Option<String>> {
         Ok(self.conn.query_row("SELECT session_id FROM tool_call WHERE tool_use_id = ?1", [tool_use_id], |r| r.get(0)).optional()?)

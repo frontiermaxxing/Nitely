@@ -95,6 +95,7 @@ mod test_command_merge;
 pub mod submit_job;
 pub mod unlink;
 pub mod updates;
+pub mod wake;
 pub mod submodules;
 pub mod review_batch;
 pub mod review_compare;

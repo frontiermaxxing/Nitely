@@ -32,7 +32,10 @@ Nitely tracks its own build. Its backlog is the **NIT** project in Nitely, reach
    `main`, and moves the issue: back to In Progress when the review finds P0 or P1 problems (fix
    them and submit again), to Needs You when Andrew must approve, and to In Review otherwise. The
    result comes back through `next_task`, `submit_status` (`nitely submit-status`), or a notice on
-   your next nitely call. `submit` with `wait: true` (`nitely submit --wait`) blocks for the result
+   your next nitely call. With nothing else to do, end your turn: on Claude Code, Nitely's wake hook
+   wakes you when the submit, a land or a lane run you started ends (docs/setup.md, "Hooks"). Where
+   nothing wakes you, make one `submit_status` call with `wait_seconds: 600` at a time, never short
+   polls: each is a model call over your whole context. `submit` with `wait: true` (`nitely submit --wait`) blocks for the result
    as before. `run_gate` alone runs just the gate. The reviewer reads the issue, the issues it
    blocks and is blocked by, its goal and your notes; put what the change deliberately leaves out,
    scope split with other issues and decisions already made in `reviewer_note` (`--reviewer-note`),

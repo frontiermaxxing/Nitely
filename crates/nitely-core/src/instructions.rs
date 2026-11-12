@@ -32,9 +32,12 @@ notice on your next nitely call. A question about the board or the code (who hol
 is done, whether a finding is stale, resubmit or wait) goes to `triage`, not the human. Never set Approved: only the human approves. When a change needs their \
 approval, `submit` already puts it in their inbox, so never `ask` for an approval.
 5. Commit, then `submit` with `solution_title` and `solution_summary` describing the implemented outcome, behavior, validation and any remaining limits for this revision (not the original problem): it hands the branch in and returns at once. The reviewer reads the issue, the issues around it and your notes: put what the change deliberately leaves out, scope split with other issues and decisions already made in `reviewer_note`, and on a resubmit answer there a finding you dispute before you `request_acceptance`. In the background it runs the \
-gate, has another vendor review the branch, opens the pull request, and moves the issue. The result \
-comes back through `next_task`, `submit_status`, or a notice on your next nitely call; meanwhile pick \
-up other work or stop. `submit` with wait: true blocks until the result instead.
+gate, has another vendor review the branch, opens the pull request, and moves the issue. Then pick \
+up other work, or end your turn when you have nothing else to do: on Claude Code, Nitely wakes you \
+when the submit, a land or a lane run you started ends, with what it came to. Where nothing wakes you \
+(Codex, Cursor), make one `submit_status` call with `wait_seconds: 600` at a time, never short polls: \
+each call costs a model call over your whole context. The result also comes through `next_task` and as \
+a notice on your next nitely call. `submit` with wait: true blocks until the result instead.
 6. Once it is In Review (or the human approved it), `land` puts it on the integration branch.
 7. Before you stop, `note` with handoff: true: what is done, what is left, what you were unsure about.
 8. Link every issue you name, in replies, commit messages, pull requests and notes: \

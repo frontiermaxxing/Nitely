@@ -109,7 +109,25 @@ an agent. [docs/claude-hooks.json](claude-hooks.json) is the Claude Code part, f
 up by hand. Its PreToolUse hook runs before MCP calls and shell commands: it notes which session
 makes each MCP call, so the board can say which agent holds an issue (NIT-194), and it reminds an
 agent about to build or test in a light worktree to use `run` instead (the playbook's `[lanes]
-heavy`; NIT-202). The command still runs. When a Nitely version adds a hook, Agent
+heavy`; NIT-202). The command still runs.
+
+Its second PostToolUse hook, `nitely wake claude`, wakes a session when the work it started ends
+(NIT-765). It follows `submit`, `submit_status`, `land`, `quick_land`, `run` and `run_status`, and
+runs in the background (`async`) for up to an hour. It watches Nitely's database for the session's
+work: the submit jobs, land jobs and lane runs it asked for, the job the tool's reply names (even
+one that ended before the hook looked), a land that went on in a process of its own (and the lane
+run a detached `run` queued). As soon as one ends it exits 2, and Claude Code's `asyncRewake` shows
+what it came to, and what still runs, and wakes the session, idle or not. With nothing to watch it
+exits at once and wakes nobody. Work another session runs on an issue this one claims does not wake
+it yet (NIT-774). A newer waiter for the same session takes over what the older one watched, under a lock,
+and what was told is not told again; a waiter that cannot go on wakes the session to say so. So an
+agent can end
+its turn after `submit` instead of polling `submit_status`, which costs a model call over its whole
+context each time. Codex, Cursor and Claude Desktop's own session messaging offer no way for
+another process to wake an idle session, so agents there make one `submit_status` call with
+`wait_seconds: 600` at a time instead.
+
+When a Nitely version adds a hook, Agent
 setup in the app (or `nitely agents`) shows the agent's settings as a change to make; applying it
 covers every repo, since the hooks are set up once per user.
 
