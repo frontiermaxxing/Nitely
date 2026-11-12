@@ -2721,6 +2721,27 @@ exit 0
         assert!(said.iter().any(|s| s == "Reviewed now, alone, not with its land batch: it changes the playbook"), "{said:?}");
     }
 
+    /// A change whose land-time review passes with no finding but needs the person's approval
+    /// stays where the Inbox shows it, and its agent is told there is nothing to do (NIT-783): the
+    /// automatic land that found it waiting no longer sends it back to In Progress to "fix it".
+    #[test]
+    fn a_change_waiting_only_for_approval_stays_in_needs_you_after_its_automatic_land() {
+        let mut f = fixture();
+        let pb = std::fs::read_to_string(f.repo.join(playbook::PLAYBOOK_PATH)).unwrap();
+        std::fs::write(f.repo.join(playbook::PLAYBOOK_PATH), format!("{pb}\n[land]\nby = \"auto\"\n")).unwrap();
+        sh(&f.repo, &["commit", "-qam", "Nitely lands what is ready"]);
+        // Reviewed in its land batch, so the review that asks for the person runs in the land.
+        f.db.conn.execute("INSERT OR REPLACE INTO project_review_mode(project,mode,overrides,explicit) VALUES('NIT','custom','{\"pre_review\":\"batched\"}',0)", []).unwrap();
+        let (issue, wt) = f.committed("Billing rounding", "billing.txt");
+        let s = f.submit(&wt, true).unwrap();
+        let review = f.db.reviews(&issue.key).unwrap().remove(0);
+        assert_eq!((review.verdict.as_str(), review.approver.as_str(), review.findings.len()), ("pass", "human", 0), "{review:?}");
+        assert_eq!(f.db.issue(&issue.key).unwrap().unwrap().state, "Needs You", "where the Inbox shows it: {}", s.next);
+        assert_eq!(s.state, "Needs You");
+        assert!(s.next.contains("nothing to do") && !s.next.contains("Fix it"), "{}", s.next);
+        assert!(!f.repo.join("billing.txt").exists(), "nothing landed");
+    }
+
     #[test]
     fn the_same_edit_somewhere_else_is_reviewed_though_its_patch_id_is_the_same() {
         let mut f = fixture();
